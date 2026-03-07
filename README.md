@@ -31,8 +31,8 @@ Each agent gets its own bounded inbox queue in Redis. Messages are delivered ato
 | Tool | Description |
 |---|---|
 | `register_agent` | Register with a name, role (`publisher`/`consumer`/`both`), and description |
-| `send_message` | Send a typed message (`task`/`result`/`status`/`error`/`ping`) to another agent's inbox |
-| `receive_message` | Blocking pop from your inbox with configurable timeout |
+| `send_message` | Send a typed message (`task`/`result`/`status`/`error`/`ping`) to another agent's inbox. Supports optional `metadata` object and `in_reply_to` message ID for threading |
+| `receive_message` | Blocking pop from your inbox (default timeout: 5s) |
 | `list_agents` | Discover all registered agents with online/offline status |
 | `get_queue_status` | Check queue depth and capacity for one or all agents |
 | `unregister_agent` | Unregister and clean up queue data |
@@ -45,7 +45,7 @@ Each agent gets its own bounded inbox queue in Redis. Messages are delivered ato
 ## Install
 
 ```bash
-git clone https://github.com/rahulkjoshi/gptqueue.git
+git clone https://github.com/rahulrajaram/gptqueue.git
 cd gptqueue
 npm install   # builds automatically via postinstall
 ```
@@ -103,9 +103,11 @@ Or set `GPTQ_AGENT_NAME` in the environment.
 
 | Variable | Default | Description |
 |---|---|---|
-| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
+| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL (MCP server and PTY wrapper) |
 | `GPTQ_AGENT_NAME` | _(none)_ | Pre-register with this agent name on startup |
 | `GPTQ_QUEUE_BOUND` | `10` | Max messages per agent inbox |
+| `REDIS_HOST` | `127.0.0.1` | Redis host (hook script only) |
+| `REDIS_PORT` | `6379` | Redis port (hook script only) |
 
 ## PTY wrapper
 
