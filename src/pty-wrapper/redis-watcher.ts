@@ -32,7 +32,7 @@ export class RedisWatcher extends EventEmitter {
           // Poll interval
           await new Promise((r) => setTimeout(r, 1000));
         }
-      } catch (err) {
+      } catch {
         if (this.running) {
           // Connection error, retry after delay
           await new Promise((r) => setTimeout(r, 2000));

@@ -7,5 +7,6 @@ source "$COMMITHOOKS_DIR/lib/secrets.sh"
 
 commithooks_skip_during_rebase && exit 0
 commithooks_js_oxlint
+commithooks_js_typecheck
 commithooks_block_sensitive_files
 commithooks_scan_secrets_in_diff
