@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+COMMITHOOKS_DIR="$(git rev-parse --git-dir)"
+source "$COMMITHOOKS_DIR/lib/common.sh"
+source "$COMMITHOOKS_DIR/lib/commit-msg.sh"
+
+commithooks_validate_conventional_commit "$1"
+commithooks_validate_subject_line "$1"
