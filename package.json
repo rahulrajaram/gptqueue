@@ -27,5 +27,8 @@
     "typescript": "^5.9.3",
     "uuid": "^13.0.0",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "oxlint": "^1.51.0"
   }
 }
