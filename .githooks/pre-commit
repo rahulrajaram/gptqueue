@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+COMMITHOOKS_DIR="$(git rev-parse --git-dir)"
+source "$COMMITHOOKS_DIR/lib/common.sh"
+source "$COMMITHOOKS_DIR/lib/lint-js.sh"
+source "$COMMITHOOKS_DIR/lib/secrets.sh"
+
+commithooks_skip_during_rebase && exit 0
+commithooks_js_oxlint
+commithooks_block_sensitive_files
+commithooks_scan_secrets_in_diff

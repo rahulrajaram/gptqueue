@@ -1,0 +1,28 @@
+{
+  "name": "gptqueue",
+  "version": "1.0.0",
+  "description": "Inter-agent communication via MCP + Redis",
+  "type": "module",
+  "main": "dist/mcp-server/index.js",
+  "bin": {
+    "gptqueue-server": "./bin/gptqueue-server",
+    "gptqueue-pty": "./bin/gptqueue-pty"
+  },
+  "scripts": {
+    "build": "tsc && cp -r src/mcp-server/lua dist/mcp-server/",
+    "prepare": "bash -c 'COMMITHOOKS=${COMMITHOOKS_DIR:-$HOME/Documents/commithooks}; GIT_DIR=$(git rev-parse --git-dir 2>/dev/null); [ -d \"$COMMITHOOKS/lib\" ] && [ -n \"$GIT_DIR\" ] && for h in pre-commit commit-msg pre-push post-checkout post-merge; do [ -f \"$COMMITHOOKS/$h\" ] && cp \"$COMMITHOOKS/$h\" \"$GIT_DIR/hooks/$h\" && chmod +x \"$GIT_DIR/hooks/$h\"; done && rm -rf \"${GIT_DIR}/lib\" && cp -r \"$COMMITHOOKS/lib\" \"$GIT_DIR/lib\" || true'",
+    "postinstall": "npm run build",
+    "dev": "tsc --watch"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@types/node": "^25.2.3",
+    "@types/uuid": "^10.0.0",
+    "ioredis": "^5.9.3",
+    "node-pty": "^1.1.0",
+    "typescript": "^5.9.3",
+    "uuid": "^13.0.0",
+    "zod": "^4.3.6"
+  }
+}
