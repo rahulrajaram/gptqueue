@@ -1,4 +1,10 @@
+<p align="center">
+  <img src="assets/logo.png" alt="gptqueue logo" width="300">
+</p>
+
 # gptqueue
+
+[![CI](https://github.com/rahulrajaram/gptqueue/actions/workflows/ci.yml/badge.svg)](https://github.com/rahulrajaram/gptqueue/actions/workflows/ci.yml)
 
 Inter-agent message queue over MCP + Redis.
 
