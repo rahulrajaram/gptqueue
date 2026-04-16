@@ -2,8 +2,15 @@ import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import type { RedisClient } from "../redis-client.js";
 import type { QueueMessage } from "../types.js";
+import { ensureSessionBinding } from "./session-binding.js";
 
 export const sendMessageSchema = z.object({
+  session_id: z
+    .string()
+    .optional()
+    .describe(
+      "Optional session_id returned by register_agent. Required when the transport does not preserve process-local registration state."
+    ),
   to: z.string().describe("Target agent name"),
   content: z.string().describe("Message content"),
   type: z
@@ -24,6 +31,8 @@ export async function sendMessage(
   client: RedisClient,
   params: z.infer<typeof sendMessageSchema>
 ) {
+  await ensureSessionBinding(client, params.session_id);
+
   const message: QueueMessage = {
     id: uuidv4(),
     from: client.requireRegistered(),
