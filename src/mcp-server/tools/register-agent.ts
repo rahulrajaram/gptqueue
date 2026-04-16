@@ -21,7 +21,7 @@ export async function registerAgent(
   client: RedisClient,
   params: z.infer<typeof registerAgentSchema>
 ) {
-  const resolvedName = await client.register(
+  const result = await client.register(
     params.role,
     params.name,
     params.description
@@ -33,7 +33,8 @@ export async function registerAgent(
         text: JSON.stringify(
           {
             status: "registered",
-            name: resolvedName,
+            name: result.name,
+            session_id: result.session_id,
             role: params.role,
             description: params.description,
           },

@@ -1,7 +1,4 @@
 import { Redis } from "ioredis";
-import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
 import {
   REDIS_KEYS,
   HEARTBEAT_TTL,
@@ -9,19 +6,25 @@ import {
   DEFAULT_QUEUE_BOUND,
 } from "./types.js";
 import type { QueueMessage } from "./types.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { MailboxStore } from "../core/mailbox-store.js";
+import { SessionStore } from "../core/session-store.js";
 
 export class RedisClient {
   private redis: Redis;
   private subscriber: Redis;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private boundedPushScript: string;
   private _agentName: string | null;
+  private _sessionId: string | null = null;
+  private readonly mailbox: MailboxStore;
+  private readonly sessions: SessionStore;
   readonly queueBound: number;
 
   get agentName(): string | null {
     return this._agentName;
+  }
+
+  get sessionId(): string | null {
+    return this._sessionId;
   }
 
   get registered(): boolean {
@@ -37,12 +40,8 @@ export class RedisClient {
     const url = redisUrl || process.env.REDIS_URL || "redis://127.0.0.1:6379";
     this.redis = new Redis(url, { maxRetriesPerRequest: 3 });
     this.subscriber = new Redis(url, { maxRetriesPerRequest: 3 });
-
-    // Load Lua script
-    this.boundedPushScript = readFileSync(
-      join(__dirname, "lua", "bounded-push.lua"),
-      "utf-8"
-    );
+    this.mailbox = new MailboxStore(this.redis, this.subscriber, this.queueBound);
+    this.sessions = new SessionStore(this.redis);
   }
 
   requireRegistered(): string {
@@ -54,23 +53,42 @@ export class RedisClient {
     return this._agentName;
   }
 
+  /**
+   * Reconnect to an existing session by session_id.
+   * Looks up the session in Redis and populates local state.
+   * This is the fix for the cross-process registration bug:
+   * a new process can resume a session without re-registering.
+   */
+  async reconnectSession(sessionId: string): Promise<string> {
+    const session = await this.sessions.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found in Redis.`);
+    }
+
+    this._sessionId = sessionId;
+    this._agentName = session.agent_name;
+
+    // Refresh the lease to prove we're alive
+    this.sessions.startLeaseRefresh(sessionId);
+
+    // Also maintain legacy heartbeat for backward compat
+    this.startHeartbeat();
+
+    return session.agent_name;
+  }
+
   async register(
     role: string,
     name: string,
     description?: string
-  ): Promise<string> {
+  ): Promise<{ name: string; session_id: string }> {
     const oldName = this._agentName;
 
-    if (oldName && name !== oldName) {
-      // Migrate pending messages from old queue to new queue
-      const oldQueue = REDIS_KEYS.queue(oldName);
-      const newQueue = REDIS_KEYS.queue(name);
-      let msg: string | null;
-      while ((msg = await this.redis.lpop(oldQueue)) !== null) {
-        await this.redis.rpush(newQueue, msg);
-      }
+    // Close previous session if renaming
+    if (this._sessionId && oldName && name !== oldName) {
+      await this.sessions.closeSession(this._sessionId);
+      await this.mailbox.migrateMessages(oldName, name);
 
-      // Clean up old keys
       await this.redis.hdel(REDIS_KEYS.registry, oldName);
       await this.redis.del(
         REDIS_KEYS.meta(oldName),
@@ -82,8 +100,17 @@ export class RedisClient {
       }
     }
 
-    this._agentName = name;
+    // Create a new session
+    const session = await this.sessions.createSession(
+      name,
+      role as "publisher" | "consumer" | "both",
+      description
+    );
 
+    this._agentName = name;
+    this._sessionId = session.session_id;
+
+    // Legacy registry entry (for backward compat with old listAgents)
     const registration = {
       name,
       role,
@@ -96,82 +123,81 @@ export class RedisClient {
       name,
       JSON.stringify(registration)
     );
-    await this.redis.hset(REDIS_KEYS.meta(name), "max_size", this.queueBound);
+    await this.mailbox.ensureMailbox(name);
+
+    // Start both session lease refresh and legacy heartbeat
+    this.sessions.startLeaseRefresh(session.session_id);
     this.startHeartbeat();
-    return name;
+
+    return { name, session_id: session.session_id };
   }
 
   private startHeartbeat(): void {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     const name = this.requireRegistered();
     const beat = async () => {
-      await this.redis.set(
-        REDIS_KEYS.heartbeat(name),
-        "alive",
-        "EX",
-        HEARTBEAT_TTL
-      );
+      try {
+        await this.redis.set(
+          REDIS_KEYS.heartbeat(name),
+          "alive",
+          "EX",
+          HEARTBEAT_TTL
+        );
+      } catch {
+        // Swallow errors from closed connections during shutdown
+      }
     };
     beat();
     this.heartbeatTimer = setInterval(beat, HEARTBEAT_INTERVAL * 1000);
   }
 
+  /** Close the current session but preserve the mailbox and registry entry. */
+  async closeCurrentSession(): Promise<string> {
+    const name = this.requireRegistered();
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    this.sessions.stopLeaseRefresh();
+
+    if (this._sessionId) {
+      await this.sessions.closeSession(this._sessionId);
+    }
+
+    // Remove heartbeat but keep registry and mailbox
+    await this.redis.del(REDIS_KEYS.heartbeat(name));
+
+    this._agentName = null;
+    this._sessionId = null;
+    return name;
+  }
+
+  /** Full unregister: close session AND delete the mailbox (destructive). */
   async unregister(): Promise<void> {
     const name = this.requireRegistered();
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    this.sessions.stopLeaseRefresh();
+
+    if (this._sessionId) {
+      await this.sessions.closeSession(this._sessionId);
+    }
+
+    // Delete everything
     await this.redis.hdel(REDIS_KEYS.registry, name);
-    await this.redis.del(
-      REDIS_KEYS.queue(name),
-      REDIS_KEYS.meta(name),
-      REDIS_KEYS.heartbeat(name)
-    );
+    await this.mailbox.deleteMailbox(name);
+    await this.redis.del(REDIS_KEYS.heartbeat(name));
+
     this._agentName = null;
+    this._sessionId = null;
   }
 
   async sendMessage(message: QueueMessage): Promise<boolean> {
     this.requireRegistered();
-    const queueKey = REDIS_KEYS.queue(message.to);
-    const metaKey = REDIS_KEYS.meta(message.to);
-    const serialized = JSON.stringify(message);
-
-    // Try bounded push with exponential backoff
-    let delay = 100;
-    const maxDelay = 5000;
-    const maxAttempts = 10;
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const result = await this.redis.eval(
-        this.boundedPushScript,
-        2,
-        queueKey,
-        metaKey,
-        serialized,
-        this.queueBound
-      );
-      if (result === 1) return true;
-
-      // Queue full, backoff
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, maxDelay);
-    }
-    return false;
+    return this.mailbox.send(message);
   }
 
   async receiveMessage(timeout: number = 5): Promise<QueueMessage | null> {
     const name = this.requireRegistered();
-    const result = await this.subscriber.blpop(
-      REDIS_KEYS.queue(name),
-      timeout
-    );
-    if (!result) return null;
-
-    const message: QueueMessage = JSON.parse(result[1]);
-
-    // Update meta
-    const len = await this.redis.llen(REDIS_KEYS.queue(name));
-    await this.redis.hset(REDIS_KEYS.meta(name), "current_size", len);
-
-    return message;
+    return this.mailbox.receive(name, timeout);
   }
 
   async listAgents(): Promise<
@@ -186,12 +212,14 @@ export class RedisClient {
     const agents = [];
     for (const [name, json] of Object.entries(registry)) {
       const reg = JSON.parse(json);
-      const heartbeat = await this.redis.get(REDIS_KEYS.heartbeat(name));
+      // Prefer session-based presence; fall back to legacy heartbeat
+      const presence = await this.sessions.getPresence(name);
+      const legacyHeartbeat = await this.redis.get(REDIS_KEYS.heartbeat(name));
       agents.push({
         name,
         role: reg.role,
         description: reg.description,
-        online: heartbeat !== null,
+        online: presence.online || legacyHeartbeat !== null,
       });
     }
     return agents;
@@ -200,33 +228,17 @@ export class RedisClient {
   async getQueueStatus(
     agent?: string
   ): Promise<{ agent: string; depth: number; max_size: number }[]> {
-    const targets = agent
-      ? [agent]
-      : Object.keys(await this.redis.hgetall(REDIS_KEYS.registry));
-
-    const statuses = [];
-    for (const name of targets) {
-      const depth = await this.redis.llen(REDIS_KEYS.queue(name));
-      const meta = await this.redis.hgetall(REDIS_KEYS.meta(name));
-      statuses.push({
-        agent: name,
-        depth,
-        max_size: parseInt(
-          meta["max_size"] || String(DEFAULT_QUEUE_BOUND),
-          10
-        ),
-      });
-    }
-    return statuses;
+    return this.mailbox.status(agent);
   }
 
   async getQueueDepth(agent?: string): Promise<number> {
     const name = agent || this.requireRegistered();
-    return this.redis.llen(REDIS_KEYS.queue(name));
+    return this.mailbox.depth(name);
   }
 
   async shutdown(): Promise<void> {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.sessions.stopLeaseRefresh();
     await this.redis.quit();
     await this.subscriber.quit();
   }

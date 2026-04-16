@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
 import { ensureSessionBinding } from "./session-binding.js";
 
-export const unregisterAgentSchema = z.object({
+export const closeSessionSchema = z.object({
   session_id: z
     .string()
     .optional()
@@ -11,18 +11,25 @@ export const unregisterAgentSchema = z.object({
     ),
 });
 
-export async function unregisterAgent(
+export async function closeSession(
   client: RedisClient,
-  params: z.infer<typeof unregisterAgentSchema>
+  params: z.infer<typeof closeSessionSchema>
 ) {
   await ensureSessionBinding(client, params.session_id);
-  const name = client.requireRegistered();
-  await client.unregister();
+  const name = await client.closeCurrentSession();
   return {
     content: [
       {
         type: "text" as const,
-        text: `Agent "${name}" unregistered and cleaned up`,
+        text: JSON.stringify(
+          {
+            status: "session_closed",
+            agent: name,
+            mailbox_preserved: true,
+          },
+          null,
+          2
+        ),
       },
     ],
   };

@@ -9,9 +9,10 @@ function parseArgs(argv: string[]): { agent: string; cmd: string; args: string[]
   let cmdIndex = -1;
 
   for (let i = 2; i < argv.length; i++) {
-    if (argv[i] === "--agent" && i + 1 < argv.length) {
-      agent = argv[++i];
-    } else if (argv[i] === "--cmd" && i + 1 < argv.length) {
+    const arg = argv[i];
+    if (arg === "--agent" && i + 1 < argv.length) {
+      agent = argv[++i] ?? "";
+    } else if (arg === "--cmd" && i + 1 < argv.length) {
       cmdIndex = i + 1;
       break;
     }
@@ -22,7 +23,7 @@ function parseArgs(argv: string[]): { agent: string; cmd: string; args: string[]
     process.exit(1);
   }
 
-  const cmd = argv[cmdIndex];
+  const cmd = argv[cmdIndex] ?? "";
   const args = argv.slice(cmdIndex + 1);
   return { agent, cmd, args };
 }
