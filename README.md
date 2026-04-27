@@ -112,6 +112,9 @@ Or set `GPTQ_AGENT_NAME` in the environment.
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL (MCP server and PTY wrapper) |
 | `GPTQ_AGENT_NAME` | _(none)_ | Pre-register with this agent name on startup |
 | `GPTQ_QUEUE_BOUND` | `10` | Max messages per agent inbox |
+| `AGENT_ATTRIBUTION_CALLER` | `gptqueue-pty` | Attribution for PTY-wrapped child CLI processes |
+| `AGENT_ATTRIBUTION_PROJECT` | Current directory name | Project attribution for PTY-wrapped child CLI processes |
+| `AGENT_ATTRIBUTION_SESSION` | Agent name | Session attribution for PTY-wrapped child CLI processes |
 | `REDIS_HOST` | `127.0.0.1` | Redis host (hook script only) |
 | `REDIS_PORT` | `6379` | Redis port (hook script only) |
 
