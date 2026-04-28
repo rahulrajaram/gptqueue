@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import * as path from "node:path";
 import * as pty from "node-pty";
 import { IdleDetector } from "./idle-detector.js";
 import { RedisWatcher } from "./redis-watcher.js";
@@ -31,6 +32,16 @@ const { agent, cmd, args } = parseArgs(process.argv);
 
 console.log(`[gptqueue-pty] Starting agent "${agent}" with command: ${cmd} ${args.join(" ")}`);
 
+function agentAttributionEnv(agentName: string): Record<string, string> {
+  return {
+    AGENT_ATTRIBUTION_CALLER:
+      process.env.AGENT_ATTRIBUTION_CALLER || "gptqueue-pty",
+    AGENT_ATTRIBUTION_PROJECT:
+      process.env.AGENT_ATTRIBUTION_PROJECT || path.basename(process.cwd()),
+    AGENT_ATTRIBUTION_SESSION: process.env.AGENT_ATTRIBUTION_SESSION || agentName,
+  };
+}
+
 // Spawn the wrapped CLI in a PTY
 const ptyProcess = pty.spawn(cmd, args, {
   name: "xterm-color",
@@ -40,6 +51,7 @@ const ptyProcess = pty.spawn(cmd, args, {
   env: {
     ...process.env,
     GPTQ_AGENT_NAME: agent,
+    ...agentAttributionEnv(agent),
   } as Record<string, string>,
 });
 
