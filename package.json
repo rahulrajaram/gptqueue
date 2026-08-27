@@ -6,13 +6,16 @@
   "main": "dist/mcp-server/index.js",
   "bin": {
     "gptqueue-server": "./bin/gptqueue-server",
+    "gptqueue-http": "./bin/gptqueue-http",
     "gptqueue-pty": "./bin/gptqueue-pty"
   },
   "scripts": {
     "build": "tsc && cp -r src/mcp-server/lua dist/mcp-server/",
     "prepare": "bash -c 'COMMITHOOKS=${COMMITHOOKS_DIR:-$HOME/Documents/commithooks}; GIT_DIR=$(git rev-parse --git-dir 2>/dev/null); [ -d \"$COMMITHOOKS/lib\" ] && [ -n \"$GIT_DIR\" ] && for h in pre-commit commit-msg pre-push post-checkout post-merge; do [ -f \"$COMMITHOOKS/$h\" ] && cp \"$COMMITHOOKS/$h\" \"$GIT_DIR/hooks/$h\" && chmod +x \"$GIT_DIR/hooks/$h\"; done && rm -rf \"${GIT_DIR}/lib\" && cp -r \"$COMMITHOOKS/lib\" \"$GIT_DIR/lib\" || true'",
     "postinstall": "npm run build",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "engines": {
     "node": ">=18"
@@ -22,6 +25,7 @@
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@types/node": "^25.2.3",
     "@types/uuid": "^10.0.0",
+    "express": "^5.2.1",
     "ioredis": "^5.9.3",
     "node-pty": "^1.1.0",
     "typescript": "^5.9.3",
@@ -29,6 +33,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "oxlint": "^1.51.0"
+    "@types/express": "^5.0.6",
+    "oxlint": "^1.51.0",
+    "vitest": "^4.1.4"
   }
 }

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
+import { toolResult } from "../tool-result.js";
 
 export const registerAgentSchema = z.object({
   name: z
@@ -21,26 +22,16 @@ export async function registerAgent(
   client: RedisClient,
   params: z.infer<typeof registerAgentSchema>
 ) {
-  const resolvedName = await client.register(
+  const result = await client.register(
     params.role,
     params.name,
     params.description
   );
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify(
-          {
+  return toolResult({
             status: "registered",
-            name: resolvedName,
+            name: result.name,
+            session_id: result.session_id,
             role: params.role,
             description: params.description,
-          },
-          null,
-          2
-        ),
-      },
-    ],
-  };
+  });
 }
