@@ -3,7 +3,7 @@ import type { RedisClient } from "../redis-client.js";
 import { ensureSessionBinding } from "./session-binding.js";
 import { toolResult } from "../tool-result.js";
 
-export const unregisterAgentSchema = z.object({
+export const closeSessionSchema = z.object({
   session_id: z
     .string()
     .optional()
@@ -12,20 +12,15 @@ export const unregisterAgentSchema = z.object({
     ),
 });
 
-export async function unregisterAgent(
+export async function closeSession(
   client: RedisClient,
-  params: z.infer<typeof unregisterAgentSchema>
+  params: z.infer<typeof closeSessionSchema>
 ) {
   await ensureSessionBinding(client, params.session_id);
-  const name = client.requireRegistered();
-  await client.unregister();
-  return toolResult(
-    {
-      status: "unregistered",
-      agent: name,
-      mailbox_deleted: true,
-    },
-    false,
-    `Agent "${name}" unregistered and cleaned up`
-  );
+  const name = await client.closeCurrentSession();
+  return toolResult({
+            status: "session_closed",
+            agent: name,
+            mailbox_preserved: true,
+  });
 }

@@ -1,28 +1,86 @@
 import { Redis } from "ioredis";
 import { EventEmitter } from "events";
-import { REDIS_KEYS } from "../mcp-server/types.js";
+import { SESSION_KEYS } from "../core/keys.js";
 
+/**
+ * Watches for incoming messages in an agent's mailbox queue using
+ * Redis keyspace notifications instead of polling.
+ *
+ * Emits "message" with the queue depth whenever a new message arrives.
+ *
+ * Requires Redis to have keyspace notifications enabled for list events:
+ *   CONFIG SET notify-keyspace-events Kl
+ *
+ * Falls back to LLEN polling if keyspace notifications are unavailable.
+ */
 export class RedisWatcher extends EventEmitter {
   private redis: Redis;
+  private subscriber: Redis | null = null;
   private running = false;
   private readonly agentName: string;
+  private readonly redisUrl: string;
 
   constructor(agentName: string, redisUrl?: string) {
     super();
     this.agentName = agentName;
-    const url = redisUrl || process.env.REDIS_URL || "redis://127.0.0.1:6379";
-    this.redis = new Redis(url, { maxRetriesPerRequest: null });
+    this.redisUrl = redisUrl || process.env.REDIS_URL || "redis://127.0.0.1:6379";
+    this.redis = new Redis(this.redisUrl, { maxRetriesPerRequest: null });
   }
 
-  /** Start the BLPOP watch loop. Emits "message" when a message arrives. */
   async start(): Promise<void> {
     this.running = true;
-    const queueKey = REDIS_KEYS.queue(this.agentName);
+    const queueKey = SESSION_KEYS.queue(this.agentName);
 
+    // Try to enable keyspace notifications and use pub/sub
+    try {
+      await this.redis.config("SET", "notify-keyspace-events", "Kl");
+      await this.startKeyspaceWatch(queueKey);
+    } catch {
+      // Keyspace notifications unavailable (e.g., managed Redis), fall back to polling
+      await this.startPolling(queueKey);
+    }
+  }
+
+  /** Watch via Redis keyspace notifications (SUBSCRIBE). */
+  private async startKeyspaceWatch(queueKey: string): Promise<void> {
+    this.subscriber = new Redis(this.redisUrl, { maxRetriesPerRequest: null });
+
+    // Subscribe to list events on the queue key
+    const db = 0;
+    const channel = `__keyspace@${db}__:${queueKey}`;
+
+    this.subscriber.on("message", async (_ch: string, event: string) => {
+      if (!this.running) return;
+      // rpush/lpush indicate a new message was pushed
+      if (event === "rpush" || event === "lpush") {
+        try {
+          const len = await this.redis.llen(queueKey);
+          if (len > 0) {
+            this.emit("message", len);
+          }
+        } catch {
+          // Redis error during llen, ignore
+        }
+      }
+    });
+
+    await this.subscriber.subscribe(channel);
+
+    // Also check for any messages already in the queue at startup
+    try {
+      const len = await this.redis.llen(queueKey);
+      if (len > 0) {
+        this.emit("message", len);
+      }
+    } catch {
+      // Ignore startup check errors
+    }
+  }
+
+  /** Fallback: poll LLEN on the queue key. */
+  private async startPolling(queueKey: string): Promise<void> {
     while (this.running) {
       try {
-        // Peek (don't consume) -- we just want to know there's a message.
-        // The agent will consume it via receive_message MCP tool.
         const len = await this.redis.llen(queueKey);
         if (len > 0) {
           this.emit("message", len);
@@ -34,7 +92,6 @@ export class RedisWatcher extends EventEmitter {
         }
       } catch {
         if (this.running) {
-          // Connection error, retry after delay
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
@@ -43,6 +100,10 @@ export class RedisWatcher extends EventEmitter {
 
   async stop(): Promise<void> {
     this.running = false;
+    if (this.subscriber) {
+      await this.subscriber.quit().catch(() => {});
+      this.subscriber = null;
+    }
     await this.redis.quit();
   }
 }

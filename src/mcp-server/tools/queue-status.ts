@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
+import { toolResult } from "../tool-result.js";
 
 export const queueStatusSchema = z.object({
   agent: z
@@ -13,12 +14,5 @@ export async function getQueueStatus(
   params: z.infer<typeof queueStatusSchema>
 ) {
   const statuses = await client.getQueueStatus(params.agent);
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify(statuses, null, 2),
-      },
-    ],
-  };
+  return toolResult({ status: "ok", queues: statuses }, false, statuses);
 }
