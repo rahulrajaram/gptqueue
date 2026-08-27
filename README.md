@@ -39,6 +39,7 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 
 ## Design Reports
 
+- [Autonomous Agent Coordination Product Thesis](docs/AUTONOMOUS_COORDINATION_PRODUCT_THESIS.md)
 - [Session and Transport Redesign Report](docs/SESSION_TRANSPORT_REDESIGN_REPORT.md)
 
 ## MCP Tools
