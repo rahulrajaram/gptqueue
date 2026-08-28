@@ -1,6 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { Redis } from "ioredis";
+import {
+  custodyClaim,
+  custodyClaimSchema,
+} from "../src/mcp-server/tools/custody-claim.js";
+import {
+  custodyRelease,
+  custodyReleaseSchema,
+} from "../src/mcp-server/tools/custody-release.js";
+import {
+  custodyStatus,
+  custodyStatusSchema,
+} from "../src/mcp-server/tools/custody-status.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
 
@@ -128,6 +140,97 @@ describe("Tool contract (NXT-015)", () => {
     expect(result.name).toBe("session-test");
     expect(client.sessionId).toBe(result.session_id);
 
+    await client.shutdown();
+  });
+
+  it("claims, releases, and queries custody through the MCP tools", async () => {
+    const client = new RedisClient(null, TEST_REDIS_URL);
+    const reg = await client.register("both", "custody-sender", "tests custody");
+
+    const claimed = await custodyClaim(
+      client,
+      custodyClaimSchema.parse({
+        session_id: reg.session_id,
+        worktree_path: "/work/custody-a",
+        repo_head: "abc123",
+        tree_fingerprint: "fp-a",
+        lease_seconds: 60,
+      })
+    );
+    expect(claimed.isError).toBeUndefined();
+    expect(claimed.structuredContent).toMatchObject({ status: "ok" });
+    expect(
+      (claimed.structuredContent as { record: { state: string } }).record.state
+    ).toBe("held");
+
+    // A double claim surfaces a structured domain error, not a throw.
+    const double = await custodyClaim(
+      client,
+      custodyClaimSchema.parse({
+        session_id: reg.session_id,
+        worktree_path: "/work/custody-a",
+        repo_head: "abc123",
+        tree_fingerprint: "fp-a",
+        lease_seconds: 60,
+      })
+    );
+    expect(double.isError).toBe(true);
+    expect(double.structuredContent).toMatchObject({
+      status: "error",
+      error: { code: "already_held" },
+    });
+
+    // Single-record status reflects the held lease.
+    const st = await custodyStatus(
+      client,
+      custodyStatusSchema.parse({ worktree_path: "/work/custody-a" })
+    );
+    expect(st.structuredContent).toMatchObject({ status: "ok" });
+    const rec = (st.structuredContent as { record: { lease_expires_at?: string } }).record;
+    expect(rec.lease_expires_at).toBeTruthy();
+
+    // Release records a handoff and clears the custodian.
+    const released = await custodyRelease(
+      client,
+      custodyReleaseSchema.parse({
+        session_id: reg.session_id,
+        worktree_path: "/work/custody-a",
+        repo_head: "abc123",
+        tracked_tree_state: "clean",
+        untracked_inventory: [],
+        unfinished_work: "wrapped up the demo",
+        hazards: [],
+        next_step: "commit the demo",
+      })
+    );
+    expect(released.isError).toBeUndefined();
+    expect(
+      (released.structuredContent as { record: { state: string } }).record.state
+    ).toBe("released");
+
+    // Listing returns the released record.
+    const listed = await custodyStatus(client, custodyStatusSchema.parse({}));
+    expect(listed.structuredContent).toMatchObject({ status: "ok" });
+    const records = (listed.structuredContent as { records: { state: string }[] }).records;
+    expect(records).toHaveLength(1);
+    expect(records[0]!.state).toBe("released");
+
+    await client.shutdown();
+  });
+
+  it("requires a bound session for custody_claim like send_message", async () => {
+    const client = new RedisClient(null, TEST_REDIS_URL);
+    await expect(
+      custodyClaim(
+        client,
+        custodyClaimSchema.parse({
+          worktree_path: "/work/custody-unregistered",
+          repo_head: "abc123",
+          tree_fingerprint: "fp-u",
+          lease_seconds: 60,
+        })
+      )
+    ).rejects.toThrow(/not registered/i);
     await client.shutdown();
   });
 });

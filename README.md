@@ -53,6 +53,9 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | `get_queue_status` | Check queue depth and capacity for one or all agents |
 | `close_session` | Close the current session but preserve the mailbox. Messages remain queued for later reconnection. Supports optional `session_id` for stateless transports |
 | `unregister_agent` | Unregister and delete all queue data (destructive). Supports optional `session_id` for stateless transports |
+| `custody_claim` | Claim custody of a worktree for this session. Handles initial claim, graceful re-claim, and successor takeover (forfeited worktrees require an `inventory`) |
+| `custody_release` | Release a held worktree, recording a structured handoff for the next custodian. Only the current custodian session may release |
+| `custody_status` | Inspect a worktree's custody record, or list every stored record. Expired leases are forfeited lazily |
 
 ## Prerequisites
 

@@ -45,3 +45,9 @@ export const SESSION_DEFAULTS = {
   LEASE_REFRESH_INTERVAL_SECONDS: 10,
   DEFAULT_QUEUE_BOUND: 10,
 } as const;
+
+/** Worktree custody record key schema. */
+export const CUSTODY_KEYS = {
+  /** Hash: field = worktree_path, value = JSON-serialized stored custody record. */
+  records: "gptq:custody",
+} as const;

@@ -20,6 +20,12 @@ import {
   closeSession,
   closeSessionSchema,
 } from "../mcp-server/tools/close-session.js";
+import { custodyClaimSchema, custodyClaim } from "../mcp-server/tools/custody-claim.js";
+import {
+  custodyReleaseSchema,
+  custodyRelease,
+} from "../mcp-server/tools/custody-release.js";
+import { custodyStatusSchema, custodyStatus } from "../mcp-server/tools/custody-status.js";
 import { stableToolError } from "../mcp-server/tool-result.js";
 
 export const GPTQUEUE_INSTRUCTIONS =
@@ -82,5 +88,26 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
     unregisterAgentSchema.shape,
     async (params) =>
       safeToolCall(() => unregisterAgent(redisClient, unregisterAgentSchema.parse(params)))
+  );
+
+  server.tool(
+    "custody_claim",
+    "[safety: writable] Claim custody of a worktree for this session. Handles initial claim, graceful re-claim, and successor takeover (forfeited worktrees require an inventory).",
+    custodyClaimSchema.shape,
+    async (params) => safeToolCall(() => custodyClaim(redisClient, custodyClaimSchema.parse(params)))
+  );
+
+  server.tool(
+    "custody_release",
+    "[safety: writable] Release a held worktree, recording a structured handoff for the next custodian. Only the current custodian session may release.",
+    custodyReleaseSchema.shape,
+    async (params) => safeToolCall(() => custodyRelease(redisClient, custodyReleaseSchema.parse(params)))
+  );
+
+  server.tool(
+    "custody_status",
+    "[safety: readonly] Inspect a worktree's custody record, or list every stored record. Expired leases are forfeited lazily. Works before registration.",
+    custodyStatusSchema.shape,
+    async (params) => safeToolCall(() => custodyStatus(redisClient, custodyStatusSchema.parse(params)))
   );
 }

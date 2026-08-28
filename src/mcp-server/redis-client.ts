@@ -8,6 +8,7 @@ import {
 import type { QueueMessage } from "./types.js";
 import { MailboxStore } from "../core/mailbox-store.js";
 import { SessionStore } from "../core/session-store.js";
+import { CustodyStore } from "../core/custody-store.js";
 
 export class RedisClient {
   private redis: Redis;
@@ -17,7 +18,12 @@ export class RedisClient {
   private _sessionId: string | null = null;
   private readonly mailbox: MailboxStore;
   private readonly sessions: SessionStore;
+  private readonly custodyStore: CustodyStore;
   readonly queueBound: number;
+
+  get custody(): CustodyStore {
+    return this.custodyStore;
+  }
 
   get agentName(): string | null {
     return this._agentName;
@@ -42,6 +48,7 @@ export class RedisClient {
     this.subscriber = new Redis(url, { maxRetriesPerRequest: 3 });
     this.mailbox = new MailboxStore(this.redis, this.subscriber, this.queueBound);
     this.sessions = new SessionStore(this.redis);
+    this.custodyStore = new CustodyStore(this.redis);
   }
 
   requireRegistered(): string {
