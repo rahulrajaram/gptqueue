@@ -47,7 +47,7 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | Tool | Description |
 |---|---|
 | `register_agent` | Register with a name, role, and description. Returns a `session_id` for session resumption |
-| `send_message` | Send a typed message (`task`/`result`/`status`/`error`/`ping`) to another agent's inbox. Supports optional `metadata`, `in_reply_to`, `session_id`, and a caller `idempotency_key` (retained for 24 hours) for retry-safe delivery |
+| `send_message` | Send a typed message (`task`/`result`/`status`/`error`/`ping`) to another agent's inbox. Supports optional `metadata`, `in_reply_to`, `session_id`, and a caller `idempotency_key` (retained for 24 hours) for retry-safe delivery. For `wake_if_offline` durable-actor recipients whose runtime is offline, the message is persisted first and an additive `wake` field on the result reports whether the actor's runtime was dispatched (`wake_dispatched`), coalesced onto an in-flight wake (`wake_coalesced`), or failed to launch (`launch_failed`) |
 | `receive_message` | Blocking pop from your inbox (default timeout: 5s; accepted range: 0–60 whole seconds). Supports optional `session_id` for stateless transports |
 | `list_agents` | Discover all registered agents with online/offline status |
 | `get_queue_status` | Check queue depth and capacity for one or all agents |
@@ -56,6 +56,8 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | `custody_claim` | Claim custody of a worktree for this session. Handles initial claim, graceful re-claim, and successor takeover (forfeited worktrees require an `inventory`) |
 | `custody_release` | Release a held worktree, recording a structured handoff for the next custodian. Only the current custodian session may release |
 | `custody_status` | Inspect a worktree's custody record, or list every stored record. Expired leases are forfeited lazily |
+| `actor_register` | Register a durable actor profile and launch contract in the shared actor directory. The calling session owns the actor's profile; `wake_if_offline` actors must declare a `launch_command` |
+| `actor_status` | Classify a durable actor's runtime presence (`active`/`idle`/`starting`/`offline_launchable`/`offline_store_only`/`unavailable`) from its launch contract, live sessions, and any outstanding wake lease |
 
 ## Prerequisites
 
@@ -187,6 +189,8 @@ gptqueue-pty --agent alice --cmd claude
 3. **Discovery** -- Any agent (even unregistered) can call `list_agents` to see all registered agents and whether they're online. Online status is computed from active session leases.
 
 4. **Messaging** -- `send_message` pushes to the target agent's Redis list (`gptq:q:<name>`). A Lua script enforces the queue bound atomically. If the queue is full, the sender retries with exponential backoff (up to 10 attempts).
+
+   **Wake-on-send.** When the recipient is a durable `wake_if_offline` actor (see `actor_register`) with no live runtime and a runnable launch contract, `send_message` persists the message first, then attempts to wake the actor: it acquires a bounded (60s) per-actor wake lease, and if it owns the lease, spawns the actor's launch command (detached, no shell). The send always succeeds regardless of the wake outcome, and the additive result field `wake` reports `wake_dispatched`/`wake_coalesced`/`launch_failed`/`wake_error`. `store_only` actors and plain agents (no durable record) never wake, so their send behavior is unchanged.
 
 5. **Receiving** -- `receive_message` does a blocking pop (`BLPOP`) with a configurable timeout.
 

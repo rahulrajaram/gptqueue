@@ -3,7 +3,13 @@ import { v4 as uuidv4 } from "uuid";
 import type { RedisClient } from "../redis-client.js";
 import type { QueueMessage } from "../types.js";
 import { ensureSessionBinding } from "./session-binding.js";
-import { toolResult } from "../tool-result.js";
+import { toolResult, type ToolPayload } from "../tool-result.js";
+import {
+  classifyPresence,
+  type RuntimeIncarnation,
+} from "../../core/actor-presence.js";
+import type { WakeLease } from "../../core/wake-lease.js";
+import { dispatchLaunch } from "../launcher.js";
 
 export const sendMessageSchema = z.object({
   session_id: z
@@ -36,6 +42,165 @@ export const sendMessageSchema = z.object({
     ),
 });
 
+/**
+ * Default wake-lease TTL (whole seconds) when launching an offline durable
+ * actor. Bounded well inside WakeLeaseStore's 1..3600 range. 60s is a sane
+ * default: it covers a realistic launch/register span while the TTL's expiry
+ * independently returns an activation that never came up to offline.
+ */
+const WAKE_LEASE_SECONDS = 60;
+
+/**
+ * Additive `wake` field appended to a send result ONLY for `wake_if_offline`
+ * durable-actor recipients. All other recipients produce byte-identical send
+ * results to pre-wake behavior.
+ */
+export type SendWakeResult =
+  | Readonly<{ status: "wake_dispatched"; lease_id: string; pid?: number }>
+  | Readonly<{
+      status: "launch_failed";
+      lease_id: string;
+      error_message: string;
+    }>
+  | Readonly<{ status: "wake_coalesced"; lease_id: string }>
+  | Readonly<{ status: "wake_error"; error_message: string }>;
+
+/**
+ * Derive a runtime incarnation from a live session. Mirrors actor-status.ts
+ * exactly (workload defaults to "idle"; the lease id is the session id).
+ */
+function runtimeFromSession(sessionId: string): RuntimeIncarnation {
+  return Object.freeze({
+    incarnation_id: sessionId,
+    session_id: sessionId,
+    lease_id: sessionId,
+    workload: "idle" as const,
+  });
+}
+
+/**
+ * Best-effort wake of an offline `wake_if_offline` durable actor, run AFTER the
+ * message persist has been awaited (see the persist-before-wake invariant in
+ * sendMessage). Returns the additive `wake` payload, or undefined when the
+ * recipient is not wake-eligible or is already active/idle.
+ *
+ * Any unexpected error is caught and surfaced as `status: "wake_error"` so the
+ * send itself can never fail because of wake handling.
+ */
+async function maybeWake(
+  client: RedisClient,
+  to: string
+): Promise<SendWakeResult | undefined> {
+  try {
+    // Presence-gated: only durable `wake_if_offline` actor records are
+    // wake-eligible. Plain agents and store_only actors resolve to no wake.
+    const dir = await client.actorDirectory.get(to);
+    if (
+      !dir.ok ||
+      dir.record === null ||
+      dir.record.profile.activation_policy.mode !== "wake_if_offline"
+    ) {
+      return undefined;
+    }
+    const record = dir.record;
+
+    const launchContract = client.actorDirectory.contractReadiness(record);
+
+    // Assemble presence exactly like actor-status.ts: runtime from live
+    // sessions with workload "idle", plus any outstanding wake lease.
+    let runtime: RuntimeIncarnation | undefined;
+    const presence = await client.sessions.getPresence(record.profile.actor_id);
+    if (presence.online && presence.active_sessions.length > 0) {
+      runtime = runtimeFromSession(presence.active_sessions[0]!);
+    }
+
+    let wakeLease: WakeLease | null = null;
+    wakeLease = await client.wakeLease.get(record.profile.actor_id);
+
+    const classification = classifyPresence({
+      actor: record.profile,
+      launch_contract: launchContract,
+      runtime,
+      ...(wakeLease ? { wake_lease_id: wakeLease.lease_id } : {}),
+    });
+
+    if (!classification.ok) return undefined;
+
+    switch (classification.presence) {
+      // Runtime-attached (or offline-but-not-launchable) recipients keep
+      // existing behavior: no wake field at all.
+      case "active":
+      case "idle":
+      case "offline_store_only":
+      case "unavailable":
+        return undefined;
+
+      // An activation is already in flight for this actor: coalesce onto the
+      // outstanding lease; we must not spawn a second runtime.
+      case "starting":
+        if (wakeLease !== null) {
+          return { status: "wake_coalesced", lease_id: wakeLease.lease_id };
+        }
+        return undefined;
+
+      case "offline_launchable": {
+        const acquired = await client.wakeLease.acquire({
+          actor_id: record.profile.actor_id,
+          issued_by_session: client.sessionId ?? "unknown",
+          lease_seconds: WAKE_LEASE_SECONDS,
+          now: new Date().toISOString(),
+        });
+        if (!acquired.ok) {
+          return {
+            status: "wake_error",
+            error_message: acquired.error.message,
+          };
+        }
+
+        // A concurrent controller already owns the activation in flight.
+        if (acquired.coalesced) {
+          return {
+            status: "wake_coalesced",
+            lease_id: acquired.lease.lease_id,
+          };
+        }
+
+        // We own the new lease: dispatch this actor's runtime launch.
+        if (record.launch === null) {
+          return {
+            status: "wake_error",
+            error_message: "launch contract missing for wake_if_offline actor",
+          };
+        }
+        const launched = await dispatchLaunch(record.launch);
+        if (launched.dispatched) {
+          return {
+            status: "wake_dispatched",
+            lease_id: acquired.lease.lease_id,
+            pid: launched.pid,
+          };
+        }
+        // Launch failed; the message is already persisted and recoverable, and
+        // the lease TTL will expire the activation back to offline.
+        return {
+          status: "launch_failed",
+          lease_id: acquired.lease.lease_id,
+          error_message:
+            launched.error?.message ?? "launch failed for unknown reason",
+        };
+      }
+
+      default:
+        return undefined;
+    }
+  } catch (error) {
+    return {
+      status: "wake_error",
+      error_message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export async function sendMessage(
   client: RedisClient,
   params: z.infer<typeof sendMessageSchema>
@@ -59,14 +224,7 @@ export async function sendMessage(
     ? await client.sendMessageIdempotent(message, params.idempotency_key)
     : { status: (await client.sendMessage(message)) ? "sent" as const : "full" as const, messageId: message.id };
 
-  if (outcome.status !== "full") {
-    return toolResult({
-      status: outcome.status,
-      message_id: outcome.messageId,
-      to: params.to,
-      deduplicated: outcome.status === "duplicate",
-    });
-  } else {
+  if (outcome.status === "full") {
     return toolResult({
       status: "error",
       error: {
@@ -77,4 +235,21 @@ export async function sendMessage(
       to: params.to,
     }, true);
   }
+
+  const payload: ToolPayload = {
+    status: outcome.status,
+    message_id: outcome.messageId,
+    to: params.to,
+    deduplicated: outcome.status === "duplicate",
+  };
+
+  // persist-before-wake INVARIANT: the mailbox RPUSH above was awaited before
+  // any wake attempt, so a launched-but-failed activation can never lose an
+  // already-persisted, recoverable message. Waking is purely additive.
+  const wake = await maybeWake(client, params.to);
+  if (wake !== undefined) {
+    payload.wake = wake;
+  }
+
+  return toolResult(payload);
 }

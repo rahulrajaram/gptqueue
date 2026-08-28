@@ -304,7 +304,7 @@ These are not yet ratified product behavior:
 5. Whether an actor's default workspace may be dirty, or activation requires a
    clean tree or isolated checkout under receiver policy.
 6. The minimal authentication boundary for the local HTTP transport.
-7. Which compatibility guarantees apply to the ten existing MCP tools.
+7. Which compatibility guarantees apply to the twelve existing MCP tools.
 
 ## Success, stop, and revision signals
 

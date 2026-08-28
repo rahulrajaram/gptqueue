@@ -51,3 +51,15 @@ export const CUSTODY_KEYS = {
   /** Hash: field = worktree_path, value = JSON-serialized stored custody record. */
   records: "gptq:custody",
 } as const;
+
+/** Durable actor directory key schema. */
+export const ACTOR_KEYS = {
+  /** Hash: field = actor_id, value = JSON-serialized actor directory record. */
+  profiles: "gptq:actor-profiles",
+} as const;
+
+/** Per-actor coalescing wake lease key schema. */
+export const WAKE_LEASE_KEYS = {
+  /** String key per actor with TTL: JSON wake lease. */
+  lease: (actorId: string) => `gptq:wake-lease:${actorId}`,
+} as const;
