@@ -26,6 +26,8 @@ import {
   custodyRelease,
 } from "../mcp-server/tools/custody-release.js";
 import { custodyStatusSchema, custodyStatus } from "../mcp-server/tools/custody-status.js";
+import { actorRegisterSchema, actorRegister } from "../mcp-server/tools/actor-register.js";
+import { actorStatusSchema, actorStatus } from "../mcp-server/tools/actor-status.js";
 import { stableToolError } from "../mcp-server/tool-result.js";
 
 export const GPTQUEUE_INSTRUCTIONS =
@@ -109,5 +111,19 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
     "[safety: readonly] Inspect a worktree's custody record, or list every stored record. Expired leases are forfeited lazily. Works before registration.",
     custodyStatusSchema.shape,
     async (params) => safeToolCall(() => custodyStatus(redisClient, custodyStatusSchema.parse(params)))
+  );
+
+  server.tool(
+    "actor_register",
+    "[safety: writable] Register a durable actor profile and launch contract in the shared actor directory, owned by the calling session. Purely additive alongside register_agent.",
+    actorRegisterSchema.shape,
+    async (params) => safeToolCall(() => actorRegister(redisClient, actorRegisterSchema.parse(params)))
+  );
+
+  server.tool(
+    "actor_status",
+    "[safety: readonly] Classify a durable actor's runtime presence (active/idle/starting/offline_* states) from its launch contract, live sessions, and any outstanding wake lease. Works before registration.",
+    actorStatusSchema.shape,
+    async (params) => safeToolCall(() => actorStatus(redisClient, actorStatusSchema.parse(params)))
   );
 }

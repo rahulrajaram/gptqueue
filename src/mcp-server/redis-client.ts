@@ -9,6 +9,8 @@ import type { QueueMessage } from "./types.js";
 import { MailboxStore } from "../core/mailbox-store.js";
 import { SessionStore } from "../core/session-store.js";
 import { CustodyStore } from "../core/custody-store.js";
+import { ActorDirectory } from "../core/actor-directory.js";
+import { WakeLeaseStore } from "../core/wake-lease.js";
 
 export class RedisClient {
   private redis: Redis;
@@ -17,12 +19,26 @@ export class RedisClient {
   private _agentName: string | null;
   private _sessionId: string | null = null;
   private readonly mailbox: MailboxStore;
-  private readonly sessions: SessionStore;
+  private readonly sessionStore: SessionStore;
   private readonly custodyStore: CustodyStore;
+  private readonly actorDirectoryStore: ActorDirectory;
+  private readonly wakeLeaseStore: WakeLeaseStore;
   readonly queueBound: number;
 
   get custody(): CustodyStore {
     return this.custodyStore;
+  }
+
+  get sessions(): SessionStore {
+    return this.sessionStore;
+  }
+
+  get actorDirectory(): ActorDirectory {
+    return this.actorDirectoryStore;
+  }
+
+  get wakeLease(): WakeLeaseStore {
+    return this.wakeLeaseStore;
   }
 
   get agentName(): string | null {
@@ -47,8 +63,10 @@ export class RedisClient {
     this.redis = new Redis(url, { maxRetriesPerRequest: 3 });
     this.subscriber = new Redis(url, { maxRetriesPerRequest: 3 });
     this.mailbox = new MailboxStore(this.redis, this.subscriber, this.queueBound);
-    this.sessions = new SessionStore(this.redis);
+    this.sessionStore = new SessionStore(this.redis);
     this.custodyStore = new CustodyStore(this.redis);
+    this.actorDirectoryStore = new ActorDirectory(this.redis);
+    this.wakeLeaseStore = new WakeLeaseStore(this.redis);
   }
 
   requireRegistered(): string {
@@ -67,7 +85,7 @@ export class RedisClient {
    * a new process can resume a session without re-registering.
    */
   async reconnectSession(sessionId: string): Promise<string> {
-    const session = await this.sessions.getSession(sessionId);
+    const session = await this.sessionStore.getSession(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} not found in Redis.`);
     }
@@ -76,7 +94,7 @@ export class RedisClient {
     this._agentName = session.agent_name;
 
     // Refresh the lease to prove we're alive
-    this.sessions.startLeaseRefresh(sessionId);
+    this.sessionStore.startLeaseRefresh(sessionId);
 
     // Also maintain legacy heartbeat for backward compat
     this.startHeartbeat();
@@ -93,7 +111,7 @@ export class RedisClient {
 
     // Close previous session if renaming
     if (this._sessionId && oldName && name !== oldName) {
-      await this.sessions.closeSession(this._sessionId);
+      await this.sessionStore.closeSession(this._sessionId);
       await this.mailbox.migrateMessages(oldName, name);
 
       await this.redis.hdel(REDIS_KEYS.registry, oldName);
@@ -108,7 +126,7 @@ export class RedisClient {
     }
 
     // Create a new session
-    const session = await this.sessions.createSession(
+    const session = await this.sessionStore.createSession(
       name,
       role as "publisher" | "consumer" | "both",
       description
@@ -133,7 +151,7 @@ export class RedisClient {
     await this.mailbox.ensureMailbox(name);
 
     // Start both session lease refresh and legacy heartbeat
-    this.sessions.startLeaseRefresh(session.session_id);
+    this.sessionStore.startLeaseRefresh(session.session_id);
     this.startHeartbeat();
 
     return { name, session_id: session.session_id };
@@ -163,10 +181,10 @@ export class RedisClient {
     const name = this.requireRegistered();
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
-    this.sessions.stopLeaseRefresh();
+    this.sessionStore.stopLeaseRefresh();
 
     if (this._sessionId) {
-      await this.sessions.closeSession(this._sessionId);
+      await this.sessionStore.closeSession(this._sessionId);
     }
 
     // Remove heartbeat but keep registry and mailbox
@@ -182,10 +200,10 @@ export class RedisClient {
     const name = this.requireRegistered();
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
-    this.sessions.stopLeaseRefresh();
+    this.sessionStore.stopLeaseRefresh();
 
     if (this._sessionId) {
-      await this.sessions.closeSession(this._sessionId);
+      await this.sessionStore.closeSession(this._sessionId);
     }
 
     // Delete everything
@@ -225,7 +243,7 @@ export class RedisClient {
     for (const [name, json] of Object.entries(registry)) {
       const reg = JSON.parse(json);
       // Prefer session-based presence; fall back to legacy heartbeat
-      const presence = await this.sessions.getPresence(name);
+      const presence = await this.sessionStore.getPresence(name);
       const legacyHeartbeat = await this.redis.get(REDIS_KEYS.heartbeat(name));
       agents.push({
         name,
@@ -250,7 +268,7 @@ export class RedisClient {
 
   async shutdown(): Promise<void> {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.sessions.stopLeaseRefresh();
+    this.sessionStore.stopLeaseRefresh();
     await this.redis.quit();
     await this.subscriber.quit();
   }
