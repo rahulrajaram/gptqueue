@@ -1,0 +1,143 @@
+%%{init: {"theme":"base","themeVariables":{"background":"transparent","primaryColor":"#ffffff","primaryBorderColor":"#111827","primaryTextColor":"#111827","lineColor":"#334155","secondaryColor":"#ffffff","tertiaryColor":"#ffffff","clusterBkg":"transparent","clusterBorder":"#111827"},"flowchart":{"htmlLabels":true,"curve":"basis","nodeSpacing":34,"rankSpacing":48}}}%%
+flowchart TB
+  subgraph AGENTS["A · COMMUNICATING AGENTS"]
+    direction LR
+    Codex(["Codex sender"]):::actor
+    Pi(["Pi sender"]):::actor
+    Work[/"task or message<br/>stable receiver identity"/]:::message
+    Receiver(["Named receiving actor<br/>Codex, Pi, or another client"]):::actor
+    Griller(("griller")):::state
+    Respondent(("respondent")):::state
+    AgentNote["AUTONOMY NOTE<br/>Agents exchange questions and answers directly.<br/>The orchestrator sets the bounded objective and reads evidence;<br/>it does not mediate every turn."]:::note
+    Codex --> Work
+    Pi --> Work
+    Work --> Receiver
+    Griller <-->|"questions / exhaustive answers"| Respondent
+    Respondent -. "advisory result" .-> Receiver
+    AgentNote -.-> Griller
+  end
+
+  subgraph CURRENT["B · GPTQUEUE TODAY — LIVE DELIVERY PLANE"]
+    direction LR
+    subgraph EDGE["MCP EDGE"]
+      direction TB
+      Stdio{{"MCP stdio"}}:::interface
+      Http{{"MCP HTTP"}}:::interface
+      Server[["GPTQueue MCP server"]]:::process
+      Tools["Seven current tools<br/>register · send · receive · list<br/>status · close · unregister"]:::process
+      Stdio --> Server
+      Http --> Server
+      Server --> Tools
+    end
+    subgraph CORE["CORE + REDIS"]
+      direction TB
+      Sessions["session store"]:::process
+      Mailboxes["mailbox store"]:::process
+      Redis[("Redis<br/>TTL session leases<br/>bounded inbox lists")]:::data
+      Running(["running receiver runtime"]):::actor
+      PTY["PTY wrapper<br/>Redis monitor"]:::process
+      Tools --> Sessions --> Redis
+      Tools --> Mailboxes --> Redis
+      Redis -->|"destructive BLPOP today"| Running
+      PTY -->|"inject notification"| Running
+    end
+    CurrentNote["CURRENT-STATE NOTE<br/>Redis delivery and the PTY wrapper are real system behavior.<br/>The present receive path removes a message when read;<br/>durable task acknowledgement is not yet claimed here."]:::note
+    CurrentNote -.-> Redis
+  end
+
+  Work --> Stdio
+  Work --> Http
+  Running -. "runtime realizes actor" .-> Receiver
+
+  subgraph REFERENCE["C · OFFLINE ACTIVATION REFERENCE MODEL — DESIRED SEMANTICS"]
+    direction TB
+    Incoming[/"task with stable actor ID<br/>and stable task ID"/]:::message
+    Persist["persist PENDING task"]:::process
+    Presence{"receiver presence?"}:::decision
+    Notify(("notify active<br/>or idle")):::state
+    LaunchPolicy{"offline launch policy?"}:::decision
+    Stored(("offline_stored<br/>store only")):::state
+    Unavailable(("unavailable")):::state
+    Lease{"acquire per-actor<br/>wake lease?"}:::decision
+    Wake(("one wake intent")):::state
+    Coalesce(("coalesce with<br/>existing wake")):::state
+    Starting(("starting")):::state
+    Claim["one runtime claims<br/>a bounded batch"]:::process
+    RunningTask(("RUNNING")):::state
+    Ack{"receiver ACK?"}:::decision
+    Complete(("COMPLETED")):::state
+    PendingAgain(("PENDING again")):::state
+    Unknown[/"activation result unknown"/]:::message
+    Reconcile["reconcile observed state<br/>before another launch"]:::process
+    PersistNote["ORDERING INVARIANT<br/>Persist before wake: a launch may fail,<br/>but accepted work must already be recoverable."]:::note
+    LeaseNote["COALESCING INVARIANT<br/>Concurrent arrivals share one actor-scoped wake lease;<br/>new startup arrivals join the same bounded drain."]:::note
+    DeliveryNote["DELIVERY INVARIANT<br/>At-least-once delivery needs stable IDs, explicit acknowledgement,<br/>and claim expiry that returns unfinished work to pending."]:::note
+
+    Incoming --> Persist --> Presence
+    Presence -->|"active / idle"| Notify --> Claim
+    Presence -->|"starting"| Coalesce --> Starting
+    Presence -->|"offline_launchable"| LaunchPolicy
+    Presence -->|"offline_stored"| Stored
+    Presence -->|"unavailable"| Unavailable
+    LaunchPolicy -->|"wake_if_offline"| Lease
+    LaunchPolicy -->|"store_only"| Stored
+    Lease -->|"acquired"| Wake --> Starting --> Claim
+    Lease -->|"already held"| Coalesce
+    Claim --> RunningTask --> Ack
+    Ack -->|"yes"| Complete
+    Ack -->|"claim expires / crash"| PendingAgain --> Presence
+    Unknown --> Reconcile -. "observed presence" .-> Presence
+    PersistNote -.-> Persist
+    LeaseNote -.-> Lease
+    DeliveryNote -.-> Ack
+  end
+
+  Tools -. "future direction — not current behavior" .-> Incoming
+
+  subgraph HARNESS["D · METABUILDER GOVERNED OFFLINE HARNESS"]
+    direction LR
+    Brief[/"approved offline brief"/]:::artifact
+    Module[["hand-authored<br/>Harness Module v2"]]:::artifact
+    Source[("GPTQueue 66e5f10<br/>tree 19ef13f")]:::data
+    Snapshot[("exact read-only<br/>source snapshot")]:::data
+    Compile{"compile + exact<br/>bundle check"}:::decision
+    Ceiling{"capability ceiling<br/>satisfied?"}:::decision
+    Run[["focused activation suite<br/>11 pure-model cases"]]:::process
+    Observe[/"exit · stdout · confinement<br/>effect observation"/]:::artifact
+    Journal[("controller journal<br/>inspect + replay")]:::data
+    Claim(["OFFLINE REFERENCE<br/>CONFORMANCE"]):::claim
+    Excluded["CLAIM CEILING<br/>No live Redis · no MCP traffic · no runtime launch<br/>no completion claim · no provider · no deploy<br/>no production retry or authorization policy"]:::exclusion
+    Baseline["separate corroboration<br/>full suite 40/40 · build · lint"]:::artifact
+    HarnessNote["EVIDENCE AUTHORITY<br/>The controller owns admission, observations, journal, and replay.<br/>Fixture prose is advisory; the pinned source and focused tests decide."]:::note
+
+    Brief --> Module --> Compile
+    Source --> Snapshot --> Ceiling
+    Compile --> Ceiling
+    Ceiling -->|"admitted"| Run --> Observe --> Journal --> Claim
+    Claim -. "does not establish" .-> Excluded
+    Baseline -. "corroborates; not governed effect" .-> Journal
+    HarnessNote -.-> Observe
+  end
+
+  Run -. "exercises pure transition semantics" .-> Persist
+  Run -.-> Lease
+  Run -.-> Ack
+
+  classDef actor fill:#ffffff,stroke:#0f172a,stroke-width:3px,color:#0f172a
+  classDef process fill:#ffffff,stroke:#1f2937,stroke-width:2.4px,color:#111827
+  classDef interface fill:#ffffff,stroke:#111827,stroke-width:2.4px,color:#111827
+  classDef data fill:#ffffff,stroke:#111827,stroke-width:3px,color:#111827
+  classDef message fill:#ffffff,stroke:#1f2937,stroke-width:2.4px,color:#111827
+  classDef state fill:#ffffff,stroke:#111827,stroke-width:2.8px,color:#111827
+  classDef decision fill:#ffffff,stroke:#111827,stroke-width:2.8px,color:#111827
+  classDef artifact fill:#ffffff,stroke:#1f2937,stroke-width:2.4px,color:#111827
+  classDef claim fill:#ffffff,stroke:#020617,stroke-width:4px,color:#020617
+  classDef exclusion fill:#ffffff,stroke:#111827,stroke-width:2.6px,stroke-dasharray:5 4,color:#111827
+  classDef note fill:#ffffff,stroke:#475569,stroke-width:1.6px,stroke-dasharray:7 5,color:#334155,font-size:13px
+  style AGENTS fill:transparent,stroke:#0f172a,stroke-width:3px
+  style CURRENT fill:transparent,stroke:#0f172a,stroke-width:3px
+  style EDGE fill:transparent,stroke:#475569,stroke-width:1.8px,stroke-dasharray:4 3
+  style CORE fill:transparent,stroke:#475569,stroke-width:1.8px,stroke-dasharray:4 3
+  style REFERENCE fill:transparent,stroke:#0f172a,stroke-width:3px
+  style HARNESS fill:transparent,stroke:#0f172a,stroke-width:3px
+  linkStyle default stroke:#334155,stroke-width:1.7px,fill:none

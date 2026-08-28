@@ -1,0 +1,181 @@
+%%{init: {"theme":"base","themeVariables":{"background":"transparent","primaryColor":"#ffffff","primaryBorderColor":"#111827","primaryTextColor":"#111827","lineColor":"#334155","secondaryColor":"#ffffff","tertiaryColor":"#ffffff","clusterBkg":"transparent","clusterBorder":"#111827"},"flowchart":{"htmlLabels":true,"curve":"basis","nodeSpacing":38,"rankSpacing":54}}}%%
+flowchart TB
+  subgraph INTENT["A · INTENT AND RECIPIENT SELECTION"]
+    direction TB
+    Codex(["Codex runtime"]):::actor
+    Pi(["Pi runtime"]):::actor
+    Envelope[/"message or task envelope<br/>target identity · payload · task ID"/]:::message
+    SuppliedTarget{"who supplies<br/>the target?"}:::decision
+    NamedTarget(["TODAY<br/>registered receiver name<br/>supplied by sender"]):::currentActor
+    FutureRouter[["FUTURE / OPTIONAL<br/>agent selector or routing policy"]]:::future
+    StableActor(["DESIRED<br/>durable actor identity<br/>independent of one process"]):::futureActor
+    RouteNote["ROUTING BOUNDARY<br/>GPTQueue currently delivers to the recipient named by the caller.<br/>It does not infer which agent is best suited to receive the work."]:::note
+
+    Codex --> Envelope
+    Pi --> Envelope
+    Envelope --> SuppliedTarget
+    SuppliedTarget -->|"caller chooses today"| NamedTarget
+    SuppliedTarget -. "capability-based choice later" .-> FutureRouter
+    FutureRouter -. "resolves actor_id" .-> StableActor
+    RouteNote -.-> SuppliedTarget
+
+    subgraph GRILL["OPTIONAL INTENT-CLARIFICATION CONVERSATION · NOT DELIVERY INFRASTRUCTURE"]
+      direction LR
+      Griller(("Griller<br/>asks dependency-aware questions")):::optional
+      Respondent(("Respondent<br/>researches and answers")):::optional
+      Clarified[/"clarified intent<br/>constraints · required capabilities"/]:::artifact
+      Griller <-->|"questions and answers"| Respondent
+      Respondent --> Clarified
+    end
+    Clarified -. "advisory input only" .-> FutureRouter
+  end
+
+  subgraph CURRENT["B · GPTQUEUE TODAY — LIVE MCP AND REDIS DELIVERY"]
+    direction TB
+    Sender(["sender runtime"]):::actor
+    Transport{"choose one MCP transport"}:::decision
+    Stdio{{"stdio"}}:::interface
+    Http{{"Streamable HTTP"}}:::interface
+    Server[["GPTQueue MCP server"]]:::process
+    SendTool["send_message<br/>(to, content)"]:::process
+    ReceiveTool["receive_message<br/>(timeout)"]:::process
+    OtherTools["five other tools<br/>register · list · status · close · unregister"]:::process
+    Mailbox["mailbox store<br/>RPUSH on send · BLPOP on receive"]:::process
+    SessionStore["session store<br/>registered names + TTL leases"]:::process
+    Redis[("Redis<br/>bounded inbox lists<br/>session keys")]:::data
+    ReceiverRuntime(["running receiver runtime<br/>request side"]):::actor
+    ReceiveResponse[/"MCP response<br/>containing popped message"/]:::message
+    ReceiverResult(["same receiver runtime<br/>receives tool result"]):::actor
+    PTY["optional PTY watcher<br/>keyspace notification or polling"]:::process
+    Prompt[/"attention prompt:<br/>call receive_message"/]:::message
+    AttentionReceiver(["receiver runtime<br/>is prompted to make a new call"]):::actor
+    CurrentIdentity["CURRENT IDENTITY LIMIT<br/>A registered receiver name belongs to a live session lease.<br/>It is not yet a durable actor directory or launch contract."]:::note
+    PopNote["CURRENT DELIVERY LIMIT<br/>BLPOP removes the message when it is received.<br/>There is no durable task claim + acknowledgement protocol yet."]:::note
+
+    Sender -->|"MCP request"| Transport
+    Transport --> Stdio --> Server
+    Transport --> Http --> Server
+    Server --> SendTool
+    Server --> ReceiveTool
+    Server --> OtherTools
+    SendTool -->|"RPUSH"| Mailbox --> Redis
+    OtherTools --> SessionStore --> Redis
+    ReceiverRuntime -->|"1 · MCP receive_message call"| Server
+    ReceiveTool -->|"2 · BLPOP"| Mailbox
+    Redis -->|"3 · popped item"| ReceiveResponse -->|"4 · returned through MCP"| ReceiverResult
+    Redis -. "queue activity signal" .-> PTY --> Prompt -.-> AttentionReceiver
+    CurrentIdentity -.-> SessionStore
+    PopNote -.-> ReceiveTool
+  end
+
+  NamedTarget -->|"send_message(to=name)"| Sender
+
+  subgraph DESIRED["C · DESIRED DURABLE TASK AND OFFLINE-ACTIVATION SEMANTICS"]
+    direction TB
+    Input[/"TaskQueued(<br/>actor_id='metabuilder',<br/>task_id='task-123',<br/>delivery='wake_if_offline'<br/>)"/]:::message
+    Persist["persist task as PENDING<br/>before attempting activation"]:::process
+    ActorKnown{"durable actor<br/>record exists?"}:::decision
+    Reject(("reject unknown<br/>receiver")):::blocked
+    Presence{"runtime presence?"}:::decision
+    Notify["notify leased runtime"]:::process
+    Online(("ONLINE / READY")):::state
+    AlreadyStarting["append task to PENDING<br/>do not issue another wake"]:::process
+    Starting(("STARTING<br/>one wake already owned")):::state
+    OfflineClass{"offline activation<br/>classification"}:::decision
+    StoreOnly(("OFFLINE_STORE_ONLY<br/>activation intentionally disabled")):::state
+    Launchable(("OFFLINE_LAUNCHABLE<br/>policy permits + contract runnable")):::state
+    Unavailable(("UNAVAILABLE<br/>launch contract cannot run")):::blocked
+    Delivery{"task delivery mode?"}:::decision
+    Stored["retain PENDING task<br/>without waking actor"]:::process
+    WakeLease{"acquire actor-scoped<br/>wake lease?"}:::decision
+    Wake[/"emit exactly one<br/>RequestWake effect"/]:::message
+    RuntimeReady[/"RuntimeReady(<br/>wake_lease_id, runtime_id<br/>)"/]:::message
+    Claim["ready runtime claims<br/>accumulated PENDING batch"]:::process
+    RunningTask(("RUNNING")):::state
+    Ack{"task acknowledged?"}:::decision
+    Complete(("COMPLETED")):::state
+    PendingAgain(("PENDING AGAIN")):::state
+    Reenter[/"re-enter presence classification<br/>on the next transition"/]:::message
+    Unknown[/"activation outcome unknown"/]:::message
+    Reconcile["observe actual runtime / lease state<br/>before considering another launch"]:::process
+    Reclassified[/"continue from the<br/>observed classification"/]:::message
+    InputsNote["CLASSIFICATION INPUTS<br/>Durable actor profile + current runtime lease/presence<br/>+ activation policy + validity of the launch contract."]:::note
+    UnavailableNote["NOT PERMANENTLY TERMINAL<br/>This activation attempt cannot proceed, but configuration or<br/>capability changes can make the actor launchable later."]:::note
+    CoalesceNote["COALESCING ≠ BATCHING<br/>Coalescing suppresses redundant wakes while STARTING.<br/>Batching occurs after RuntimeReady, when pending tasks are claimed."]:::note
+    DeliveryNote["DELIVERY GUARANTEE<br/>Stable task IDs, explicit acknowledgement, and claim expiry<br/>support at-least-once delivery and recovery after a crash."]:::note
+
+    Input --> Persist --> ActorKnown
+    ActorKnown -->|"no"| Reject
+    ActorKnown -->|"yes"| Presence
+    Presence -->|"active / idle"| Notify --> Online
+    Presence -->|"starting"| AlreadyStarting --> Starting
+    Presence -->|"offline"| OfflineClass
+    OfflineClass -->|"policy disables activation"| StoreOnly --> Stored
+    OfflineClass -->|"policy permits + launch contract valid"| Launchable --> Delivery
+    OfflineClass -->|"launch contract missing / invalid / unusable"| Unavailable
+    Delivery -->|"store_only"| Stored
+    Delivery -->|"wake_if_offline"| WakeLease
+    WakeLease -->|"acquired"| Wake --> Starting
+    WakeLease -->|"already held"| AlreadyStarting
+    Starting --> RuntimeReady --> Online
+    Online --> Claim --> RunningTask --> Ack
+    Ack -->|"yes"| Complete
+    Ack -->|"claim expires / runtime crashes"| PendingAgain --> Reenter
+    Unknown --> Reconcile --> Reclassified
+    InputsNote -.-> OfflineClass
+    UnavailableNote -.-> Unavailable
+    CoalesceNote -.-> AlreadyStarting
+    CoalesceNote -.-> Claim
+    DeliveryNote -.-> Ack
+  end
+
+  Server -. "future evolution; not current behavior" .-> Persist
+
+  subgraph HARNESS["D · METABUILDER OFFLINE HARNESS — EVIDENCE, NOT RUNTIME STATE"]
+    direction LR
+    Brief[/"approved bounded brief"/]:::artifact
+    Module[["hand-authored<br/>Harness Module v2"]]:::artifact
+    Source[("pinned GPTQueue source<br/>read-only snapshot")]:::data
+    Gates{"compile · exact bundle<br/>· capability ceiling"}:::decision
+    Suite[["focused activation suite<br/>11 pure-model cases"]]:::process
+    Evidence[/"exit · stdout · confinement<br/>journal · inspect · replay"/]:::artifact
+    Conformance(["EVIDENCE CONCLUSION<br/>offline reference conformance"]):::claim
+    Excluded["CLAIM CEILING<br/>Does not prove live Redis, MCP task delivery, runtime launch,<br/>end-to-end completion, deployment, or production policy."]:::exclusion
+    EvidenceNote["The suite exercises the pure transition model.<br/>Its conclusion does not sit on the operational state path."]:::note
+
+    Brief --> Module --> Gates
+    Source --> Gates
+    Gates -->|"admitted"| Suite --> Evidence --> Conformance
+    Conformance -. "explicitly excludes" .-> Excluded
+    EvidenceNote -.-> Conformance
+  end
+
+  Persist -. "tested by focused suite" .-> Suite
+  WakeLease -.-> Suite
+  Ack -.-> Suite
+  INTENT ~~~ CURRENT
+  CURRENT ~~~ DESIRED
+  DESIRED ~~~ HARNESS
+
+  classDef actor fill:#ffffff,stroke:#0f172a,stroke-width:3px,color:#0f172a
+  classDef currentActor fill:#ffffff,stroke:#0f172a,stroke-width:3px,color:#0f172a
+  classDef futureActor fill:#ffffff,stroke:#4338ca,stroke-width:3px,stroke-dasharray:7 4,color:#312e81
+  classDef process fill:#ffffff,stroke:#1f2937,stroke-width:2.5px,color:#111827
+  classDef future fill:#ffffff,stroke:#4338ca,stroke-width:2.5px,stroke-dasharray:7 4,color:#312e81
+  classDef interface fill:#ffffff,stroke:#111827,stroke-width:2.5px,color:#111827
+  classDef data fill:#ffffff,stroke:#111827,stroke-width:3px,color:#111827
+  classDef message fill:#ffffff,stroke:#1f2937,stroke-width:2.5px,color:#111827
+  classDef state fill:#ffffff,stroke:#111827,stroke-width:3px,color:#111827
+  classDef blocked fill:#ffffff,stroke:#991b1b,stroke-width:3px,color:#7f1d1d
+  classDef optional fill:#ffffff,stroke:#475569,stroke-width:2.4px,stroke-dasharray:5 4,color:#334155
+  classDef decision fill:#ffffff,stroke:#111827,stroke-width:3px,color:#111827
+  classDef artifact fill:#ffffff,stroke:#1f2937,stroke-width:2.5px,color:#111827
+  classDef claim fill:#ffffff,stroke:#020617,stroke-width:4px,color:#020617
+  classDef exclusion fill:#ffffff,stroke:#991b1b,stroke-width:2.6px,stroke-dasharray:6 4,color:#7f1d1d
+  classDef note fill:#ffffff,stroke:#475569,stroke-width:1.7px,stroke-dasharray:7 5,color:#334155,font-size:13px
+  style INTENT fill:transparent,stroke:#0f172a,stroke-width:3px
+  style GRILL fill:transparent,stroke:#64748b,stroke-width:1.8px,stroke-dasharray:6 4
+  style CURRENT fill:transparent,stroke:#0f172a,stroke-width:3px
+  style DESIRED fill:transparent,stroke:#0f172a,stroke-width:3px
+  style HARNESS fill:transparent,stroke:#0f172a,stroke-width:3px
+  linkStyle default stroke:#334155,stroke-width:1.8px,fill:none

@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "agreed_brief_digest": "1881ac8c447237974b32337daa8c82eee9e69d479daa509b4c3f5fe13634e21f",
+  "semantic_model": {
+    "model_version": "gptqueue-offline-conformance/v1",
+    "concepts": [
+      {
+        "concept_id": "intent.approved-brief",
+        "label": "Approved offline brief",
+        "kind": "artifact",
+        "description": "The exact gate-passed GPTQueue offline conformance intent."
+      },
+      {
+        "concept_id": "harness.module",
+        "label": "Hand-authored Harness Module v2",
+        "kind": "artifact",
+        "description": "The transparently hand-authored enduring reference module."
+      },
+      {
+        "concept_id": "source.pinned",
+        "label": "GPTQueue 66e5f10 / tree 19ef13f",
+        "kind": "artifact",
+        "description": "The sole exact source identity for this conformance run."
+      },
+      {
+        "concept_id": "source.snapshot",
+        "label": "Exact read-only source snapshot",
+        "kind": "boundary",
+        "description": "The immutable source view exposed to the command adapter."
+      },
+      {
+        "concept_id": "harness.compile",
+        "label": "Deterministic compile and bundle check",
+        "kind": "gate",
+        "description": "MetaBuilder pure compilation and exact bundle re-admission."
+      },
+      {
+        "concept_id": "harness.focused-run",
+        "label": "Focused activation suite: 11 cases",
+        "kind": "effect",
+        "description": "The sole governed process effect in the offline harness."
+      },
+      {
+        "concept_id": "evidence.controller-owned",
+        "label": "Controller-owned conformance evidence",
+        "kind": "evidence",
+        "description": "Exact effect, confinement, observation, conclusion, journal, and replay evidence."
+      },
+      {
+        "concept_id": "claims.offline-only",
+        "label": "Offline reference semantics only",
+        "kind": "claim",
+        "description": "The bounded claim set established by the focused pure-model tests."
+      },
+      {
+        "concept_id": "claims.live-excluded",
+        "label": "Redis, MCP, runtime launch, completion, production policy",
+        "kind": "exclusion",
+        "description": "Live-system and production-policy claims explicitly excluded from this wedge."
+      },
+      {
+        "concept_id": "evidence.baseline",
+        "label": "Full suite, build, lint",
+        "kind": "evidence",
+        "description": "Separately observed corroboration that is not a MetaBuilder-governed offline effect."
+      }
+    ],
+    "relations": [
+      {
+        "relation_id": "brief-defines-module",
+        "from": "intent.approved-brief",
+        "to": "harness.module",
+        "kind": "defines",
+        "label": "constrains authorship"
+      },
+      {
+        "relation_id": "source-materializes-snapshot",
+        "from": "source.pinned",
+        "to": "source.snapshot",
+        "kind": "binds",
+        "label": "exact tracked bytes"
+      },
+      {
+        "relation_id": "module-gates-run",
+        "from": "harness.module",
+        "to": "harness.compile",
+        "kind": "precedes",
+        "label": "compile and re-admit"
+      },
+      {
+        "relation_id": "compile-permits-run",
+        "from": "harness.compile",
+        "to": "harness.focused-run",
+        "kind": "gates",
+        "label": "admitted bundle only"
+      },
+      {
+        "relation_id": "snapshot-bounds-run",
+        "from": "source.snapshot",
+        "to": "harness.focused-run",
+        "kind": "bounds",
+        "label": "read-only workspace"
+      },
+      {
+        "relation_id": "run-produces-evidence",
+        "from": "harness.focused-run",
+        "to": "evidence.controller-owned",
+        "kind": "produces",
+        "label": "observed effect"
+      },
+      {
+        "relation_id": "evidence-supports-claims",
+        "from": "evidence.controller-owned",
+        "to": "claims.offline-only",
+        "kind": "supports",
+        "label": "bounded conformance"
+      },
+      {
+        "relation_id": "offline-excludes-live",
+        "from": "claims.offline-only",
+        "to": "claims.live-excluded",
+        "kind": "excludes",
+        "label": "claim ceiling"
+      },
+      {
+        "relation_id": "baseline-corroborates",
+        "from": "evidence.baseline",
+        "to": "evidence.controller-owned",
+        "kind": "corroborates",
+        "label": "separate evidence class"
+      }
+    ]
+  },
+  "projections": [
+    {
+      "view_id": "gptqueue.offline-evidence-boundary",
+      "file_name": "offline-evidence-boundary.mmd",
+      "mermaid_source": "flowchart LR\n  Brief[\"Approved offline brief\"] --> Module[\"Hand-authored Harness Module v2\"]\n  Source[\"GPTQueue 66e5f10 / tree 19ef13f\"] --> Snapshot[\"Exact read-only source snapshot\"]\n  Module --> Compile[\"Deterministic compile and bundle check\"]\n  Snapshot --> Run[\"Focused activation suite: 11 cases\"]\n  Compile --> Run\n  Run --> Evidence[\"Controller-owned conformance evidence\"]\n  Evidence --> Claims[\"Offline reference semantics only\"]\n  Claims -. excludes .-> Live[\"Redis, MCP, runtime launch, completion, production policy\"]\n  Baseline[\"Full suite, build, lint\"] -. separate corroboration .-> Evidence",
+      "receipt": {
+        "schema_version": "representation-receipt/v1",
+        "question": "Which evidence supports the offline conformance claim, and which live-system claims remain excluded?",
+        "viewpoint": {
+          "actor": "GPTQueue principal approving the first governed harness",
+          "concerns": [
+            "intent fidelity",
+            "evidence authority",
+            "source identity",
+            "live-system isolation"
+          ]
+        },
+        "semantic_scope": {
+          "summary": "The approved brief, exact source, hand-authored module, governed focused run, evidence classes, and explicit live-system claim ceiling.",
+          "included_concept_ids": [
+            "intent.approved-brief",
+            "harness.module",
+            "source.pinned",
+            "source.snapshot",
+            "harness.compile",
+            "harness.focused-run",
+            "evidence.controller-owned",
+            "claims.offline-only",
+            "claims.live-excluded",
+            "evidence.baseline"
+          ]
+        },
+        "abstraction_level": "capability",
+        "sources": [
+          {
+            "source_id": "metabuilder.agreed-brief",
+            "truth_class": "intended",
+            "locator": "metabuilder:agreed-brief:1881ac8c447237974b32337daa8c82eee9e69d479daa509b4c3f5fe13634e21f",
+            "revision": "agreed",
+            "freshness": "current",
+            "content_digest": {
+              "algorithm": "sha256",
+              "value": "1881ac8c447237974b32337daa8c82eee9e69d479daa509b4c3f5fe13634e21f"
+            }
+          }
+        ],
+        "projection": {
+          "medium": "diagram",
+          "notation": "mermaid-flowchart",
+          "projection_version": "gptqueue-offline-evidence/v1",
+          "semantic_model_version": "gptqueue-offline-conformance/v1",
+          "content_digest": {
+            "algorithm": "sha256",
+            "value": "5ee3f82e59bd50e1fdf9fc9b55aeac718c22df0500ec87b7c84c49874199ddff"
+          }
+        },
+        "relevance_rules": [
+          "Show every stage that determines whether the focused offline result may support a conformance claim.",
+          "Show the exact source and hand-authored provenance boundaries.",
+          "Keep separate corroboration visibly distinct from governed evidence.",
+          "Show excluded live-system claims explicitly."
+        ],
+        "omissions": [
+          {
+            "category": "production policy design",
+            "reason": "Retry timing, retention, dead-letter behavior, authorization, and launcher design are explicitly outside the approved wedge.",
+            "could_change_answer": false
+          },
+          {
+            "category": "fresh generation internals",
+            "reason": "The approved path is hand-authored because provider dispatch lacks an enforced spend ceiling.",
+            "could_change_answer": false
+          }
+        ],
+        "uncertainties": [
+          {
+            "statement": "A later live-product harness will require independently approved and enforced Redis, acknowledgement, and runtime-launch boundaries.",
+            "status": "unresolved_decision",
+            "confidence": "high",
+            "could_change_answer": false,
+            "source_ids": [
+              "metabuilder.agreed-brief"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

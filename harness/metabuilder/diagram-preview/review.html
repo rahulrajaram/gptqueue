@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPTQueue Offline Harness — Diagram Review</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #657086;
+      --line: #d8deea;
+      --panel: #ffffff;
+      --canvas: #f4f7fb;
+      --accent: #3b5ccc;
+      --accent-soft: #edf1ff;
+      --warn: #9b5c00;
+      --warn-soft: #fff4dc;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: var(--ink); background: var(--canvas); }
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 1.5rem;
+      padding: 1.1rem 1.5rem; background: #111827; color: white;
+      box-shadow: 0 2px 12px rgb(17 24 39 / 18%);
+    }
+    header h1 { margin: 0; font-size: 1.05rem; letter-spacing: .01em; }
+    header p { margin: .25rem 0 0; color: #b9c4da; font-size: .82rem; }
+    .badge { border: 1px solid #6376b3; border-radius: 999px; padding: .35rem .65rem; color: #dbe4ff; font-size: .75rem; white-space: nowrap; }
+    main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 1rem; padding: 1rem; min-height: calc(100vh - 76px); }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 24px rgb(28 38 62 / 7%); }
+    .viewer { display: flex; flex-direction: column; min-height: 690px; overflow: hidden; }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem 1rem; border-bottom: 1px solid var(--line); }
+    .toolbar strong { font-size: .9rem; }
+    .controls { display: flex; gap: .4rem; }
+    button { border: 1px solid #c5cede; background: white; color: var(--ink); border-radius: 8px; padding: .38rem .62rem; font-weight: 650; cursor: pointer; }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    #viewport { position: relative; flex: 1; overflow: auto; padding: 2rem; background: radial-gradient(circle at 1px 1px, #dbe2ef 1px, transparent 1px); background-size: 24px 24px; }
+    #diagram { min-width: 900px; transform-origin: top left; transition: transform 120ms ease; }
+    #diagram svg { display: block; max-width: none !important; height: auto; margin: 0 auto; filter: drop-shadow(0 8px 14px rgb(27 40 72 / 8%)); }
+    .error { margin: 2rem; padding: 1rem; border: 1px solid #ef9a9a; background: #fff1f1; color: #8b1a1a; white-space: pre-wrap; }
+    aside { padding: 1.1rem; overflow: auto; }
+    aside h2 { margin: 0 0 .35rem; font-size: 1rem; }
+    .decision { margin: .8rem 0 1rem; padding: .85rem; background: var(--accent-soft); border-left: 4px solid var(--accent); border-radius: 8px; font-weight: 650; line-height: 1.45; }
+    section { padding: .9rem 0; border-top: 1px solid var(--line); }
+    section h3 { margin: 0 0 .45rem; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .09em; }
+    section p, section li { margin-top: .35rem; font-size: .86rem; line-height: 1.48; }
+    ul { margin: .35rem 0 0; padding-left: 1.15rem; }
+    .warning { background: var(--warn-soft); border: 1px solid #f1d59c; border-radius: 8px; padding: .75rem; color: var(--warn); }
+    code { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: .72rem; }
+    @media (max-width: 980px) { main { grid-template-columns: 1fr; } .viewer { min-height: 600px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>GPTQueue offline harness · intent review</h1>
+      <p>Prepared by MetaBuilder · exact bundle awaiting principal acceptance</p>
+    </div>
+    <span class="badge">f84ebd5e…c959d</span>
+  </header>
+  <main>
+    <article class="card viewer">
+      <div class="toolbar">
+        <strong>Offline evidence boundary</strong>
+        <div class="controls">
+          <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+          <button type="button" id="reset" aria-label="Reset zoom">100%</button>
+          <button type="button" id="zoom-in" aria-label="Zoom in">＋</button>
+        </div>
+      </div>
+      <div id="viewport">
+        <div id="diagram" class="mermaid">flowchart LR
+  Brief["Approved offline brief"] --&gt; Module["Hand-authored Harness Module v2"]
+  Source["GPTQueue 66e5f10 / tree 19ef13f"] --&gt; Snapshot["Exact read-only source snapshot"]
+  Module --&gt; Compile["Deterministic compile and bundle check"]
+  Snapshot --&gt; Run["Focused activation suite: 11 cases"]
+  Compile --&gt; Run
+  Run --&gt; Evidence["Controller-owned conformance evidence"]
+  Evidence --&gt; Claims["Offline reference semantics only"]
+  Claims -. excludes .-&gt; Live["Redis, MCP, runtime launch, completion, production policy"]
+  Baseline["Full suite, build, lint"] -. separate corroboration .-&gt; Evidence</div>
+      </div>
+    </article>
+    <aside class="card">
+      <h2>Representation receipt</h2>
+      <code>source digest 1881ac8c4472…3634e21f</code>
+      <div class="decision">Which evidence supports the offline conformance claim, and which live-system claims remain excluded?</div>
+      <section>
+        <h3>Scope</h3>
+        <p>The approved brief, exact source, hand-authored module, governed focused run, evidence classes, and explicit live-system claim ceiling.</p>
+      </section>
+      <section>
+        <h3>Review these claims</h3>
+        <ul>
+          <li>The focused 11-case suite is the only governed conformance effect.</li>
+          <li>Full-suite, build, and lint results are separate corroboration.</li>
+          <li>The harness proves offline reference semantics, not live activation.</li>
+          <li>The source and module provenance boundaries are explicit.</li>
+        </ul>
+      </section>
+      <section>
+        <h3>Explicit omissions</h3>
+        <ul>
+          <li>Retry timing, retention, dead letters, authorization, and launcher design.</li>
+          <li>Fresh model generation, because provider spend lacks an enforced ceiling.</li>
+        </ul>
+      </section>
+      <section>
+        <h3>Uncertainty</h3>
+        <p class="warning">A later live-product harness needs separately approved Redis, acknowledgement, and runtime-launch boundaries.</p>
+      </section>
+      <section>
+        <h3>Decision boundary</h3>
+        <p>Acceptance confirms that this diagram faithfully represents the approved offline wedge. It does not authorize any excluded live effect.</p>
+      </section>
+    </aside>
+  </main>
+  <script src="file:///home/rahul/Documents/mermaid_viewer/node_modules/mermaid/dist/mermaid.min.js"></script>
+  <script>
+    const diagram = document.getElementById('diagram');
+    let scale = 1;
+    const paintScale = () => {
+      diagram.style.transform = `scale(${scale})`;
+      document.getElementById('reset').textContent = `${Math.round(scale * 100)}%`;
+    };
+    document.getElementById('zoom-in').addEventListener('click', () => { scale = Math.min(2, scale + 0.1); paintScale(); });
+    document.getElementById('zoom-out').addEventListener('click', () => { scale = Math.max(0.5, scale - 0.1); paintScale(); });
+    document.getElementById('reset').addEventListener('click', () => { scale = 1; paintScale(); });
+    window.addEventListener('error', (event) => {
+      diagram.className = 'error';
+      diagram.textContent = `Diagram rendering failed: ${event.message}`;
+    });
+    mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral', suppressErrorRendering: true });
+    mermaid.run({ nodes: [diagram] }).catch((error) => {
+      diagram.className = 'error';
+      diagram.textContent = `Diagram rendering failed: ${String(error)}`;
+    });
+  </script>
+</body>
+</html>

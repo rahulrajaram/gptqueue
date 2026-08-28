@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPTQueue — Holistic System and Harness Review</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #0f172a;
+      --muted: #526075;
+      --line: #111827;
+      --soft-line: #cbd5e1;
+      --paper: #ffffff;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: transparent; color: var(--ink); }
+    body { min-height: 100vh; }
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 1.5rem;
+      padding: 1rem 1.4rem; background: #0f172a; color: #ffffff;
+      border-bottom: 3px solid #020617;
+    }
+    header h1 { margin: 0; font-size: 1.08rem; letter-spacing: .015em; }
+    header p { margin: .22rem 0 0; color: #cbd5e1; font-size: .82rem; }
+    .badge {
+      border: 1px solid #e2e8f0; border-radius: 999px; padding: .35rem .7rem;
+      color: #ffffff; font-size: .72rem; white-space: nowrap;
+    }
+    main {
+      display: grid; grid-template-columns: minmax(0, 1fr) 8px var(--rail-width, 390px);
+      height: calc(100vh - 72px); min-height: 0; overflow: hidden; background: transparent;
+    }
+    .viewer {
+      min-width: 0; min-height: 0; display: flex; flex-direction: column;
+      background: transparent;
+    }
+    .toolbar {
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+      padding: .72rem 1rem; border-bottom: 2px solid var(--line); background: #ffffff;
+      position: sticky; top: 0; z-index: 5;
+    }
+    .toolbar strong { font-size: .86rem; letter-spacing: .035em; text-transform: uppercase; }
+    .controls { display: flex; gap: .38rem; }
+    button {
+      border: 2px solid #111827; background: #ffffff; color: #111827; border-radius: 7px;
+      padding: .34rem .58rem; font-weight: 750; cursor: pointer;
+    }
+    button:hover { background: #f8fafc; }
+    #viewport {
+      position: relative; flex: 1; min-height: 0; overflow: auto; padding: 2rem;
+      background: transparent; cursor: grab; touch-action: none; user-select: none;
+    }
+    #viewport.dragging { cursor: grabbing; }
+    #diagram { width: max-content; min-width: 100%; }
+    #diagram svg {
+      display: block; max-width: none !important; height: auto !important;
+      margin: 0 auto; background: transparent !important;
+    }
+    .error {
+      width: auto !important; margin: 1rem; padding: 1rem; border: 3px solid #991b1b;
+      color: #7f1d1d; background: #ffffff; white-space: pre-wrap;
+    }
+    .rail-resizer {
+      position: relative; z-index: 10; width: 8px; min-height: 0;
+      cursor: col-resize; background: #e2e8f0; touch-action: none;
+      border: 0; border-left: 1px solid #94a3b8; border-right: 1px solid #94a3b8;
+    }
+    .rail-resizer::after {
+      content: ''; position: absolute; top: 50%; left: 2px; width: 2px; height: 46px;
+      transform: translateY(-50%); border-left: 1px solid #64748b; border-right: 1px solid #64748b;
+    }
+    .rail-resizer:hover, .rail-resizer:focus-visible, .rail-resizer.dragging {
+      background: #cbd5e1; outline: none;
+    }
+    body.resizing-rail, body.resizing-rail * { cursor: col-resize !important; user-select: none !important; }
+    aside { min-height: 0; padding: 1.1rem 1.15rem 2rem; overflow: auto; background: #f5f5f5; }
+    aside h2 { margin: 0 0 .3rem; font-size: 1.02rem; }
+    .digest { overflow-wrap: anywhere; color: var(--muted); font-size: .7rem; }
+    .where-we-are {
+      margin: .7rem 0 1rem; padding-bottom: .3rem;
+    }
+    .where-we-are p {
+      margin: 0 0 .72rem; color: #334155; font-size: .82rem; line-height: 1.55;
+    }
+    .where-we-are p:last-child { margin-bottom: 0; }
+    .where-we-are strong { color: #0f172a; }
+    }
+    section { padding: .82rem 0; border-top: 1px solid var(--soft-line); }
+    section h3 {
+      margin: 0 0 .38rem; font-size: .7rem; text-transform: uppercase;
+      letter-spacing: .11em; color: #334155;
+    }
+    section p, section li { margin-top: .32rem; font-size: .82rem; line-height: 1.48; }
+    ul, ol { margin: .35rem 0 0; padding-left: 1.15rem; }
+    .boundary { border: 2px dashed #111827; padding: .7rem; background: #ffffff; }
+    .rail-section { border-top: 1px solid var(--soft-line); }
+    .rail-section summary {
+      display: flex; align-items: center; gap: .55rem; padding: .85rem 0;
+      cursor: pointer; color: #334155; font-size: .7rem; font-weight: 800;
+      text-transform: uppercase; letter-spacing: .11em; list-style: none;
+    }
+    .rail-section summary::-webkit-details-marker { display: none; }
+    .rail-section summary::before {
+      content: '▸'; width: 1rem; color: #0f172a; font-size: .9rem;
+      transform-origin: center; transition: transform 120ms ease;
+    }
+    .rail-section[open] summary::before { transform: rotate(90deg); }
+    .rail-section summary:focus-visible { outline: 2px solid #111827; outline-offset: 4px; }
+    .rail-content { padding: 0 0 .9rem 1.55rem; }
+    .rail-content p, .rail-content li { margin-top: .32rem; font-size: .82rem; line-height: 1.48; }
+    .legend { display: grid; grid-template-columns: 34px 1fr; gap: .5rem .65rem; align-items: center; }
+    .shape { height: 24px; border: 2px solid #111827; background: #ffffff; }
+    .shape.actor { border-radius: 999px; }
+    .shape.state { width: 24px; border-radius: 50%; justify-self: center; }
+    .shape.decision { width: 20px; height: 20px; transform: rotate(45deg); justify-self: center; }
+    .shape.data { border-radius: 50% / 18%; }
+    .shape.note { border-style: dashed; }
+    .legend span { font-size: .77rem; color: #334155; }
+    @media (max-width: 1000px) {
+      main { grid-template-columns: 1fr; height: auto; overflow: visible; }
+      .viewer { height: 700px; min-height: 700px; border-right: 0; border-bottom: 2px solid var(--line); }
+      .rail-resizer { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>GPTQueue · holistic system, state, and harness view</h1>
+      <p>Prepared by MetaBuilder · revised after principal feedback · pending exact acceptance</p>
+    </div>
+    <span class="badge">bundle 76a55e7c…6aae4</span>
+  </header>
+  <main>
+    <article class="viewer">
+      <div class="toolbar">
+        <strong>Architecture + activation lifecycle + evidence boundary · drag to pan</strong>
+        <div class="controls">
+          <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+          <button type="button" id="fit">Fit</button>
+          <button type="button" id="actual">100%</button>
+          <button type="button" id="zoom-in" aria-label="Zoom in">＋</button>
+        </div>
+      </div>
+      <div id="viewport">
+        <div id="diagram" aria-label="GPTQueue holistic architecture diagram"></div>
+      </div>
+    </article>
+    <div
+      id="rail-resizer"
+      class="rail-resizer"
+      role="separator"
+      aria-label="Resize information panel"
+      aria-orientation="vertical"
+      aria-valuemin="280"
+      aria-valuemax="720"
+      aria-valuenow="390"
+      tabindex="0"
+      title="Drag to resize · double-click to reset"
+    ></div>
+    <aside>
+      <h2>Where we are</h2>
+      <div class="where-we-are">
+        <p><strong>GPTQueue already provides a live communication path between named agents through MCP and Redis.</strong> The system is now moving toward durable task delivery and autonomous receiver activation, so agents can coordinate directly while the surrounding control plane preserves identity, ordering, recovery, and clear limits on authority.</p>
+        <p>We reached this point by separating current behavior from desired behavior, pinning the exact GPTQueue source, and testing the activation rules as an offline reference model. MetaBuilder has prepared a bounded harness around eleven pure-model cases. That gives us credible evidence for persist-before-wake, wake coalescing, acknowledgement, and recovery semantics, while deliberately leaving live Redis activation, runtime launch, and production policy for a later governed stage.</p>
+      </div>
+      <details class="rail-section">
+        <summary>Four compartments</summary>
+        <div class="rail-content">
+        <ol>
+          <li><strong>Communicating agents</strong> shows senders, a stable receiver identity, and a direct griller/respondent exchange.</li>
+          <li><strong>GPTQueue today</strong> shows the real MCP, core-store, Redis, BLPOP, and PTY notification path.</li>
+          <li><strong>Reference model</strong> shows the desired persist-before-wake, presence, coalescing, acknowledgement, and recovery semantics.</li>
+          <li><strong>MetaBuilder harness</strong> shows how approved intent and pinned source become bounded, replayable evidence.</li>
+        </ol>
+        </div>
+      </details>
+      <details class="rail-section">
+        <summary>Shape language</summary>
+        <div class="rail-content">
+        <div class="legend">
+          <div class="shape actor"></div><span>Actor or durable actor identity</span>
+          <div class="shape"></div><span>Process or component</span>
+          <div class="shape state"></div><span>Lifecycle state or emitted intent</span>
+          <div class="shape decision"></div><span>Decision or admission gate</span>
+          <div class="shape data"></div><span>Store, source snapshot, or journal</span>
+          <div class="shape note"></div><span>Dotted explanatory callout or claim boundary</span>
+        </div>
+        </div>
+      </details>
+      <details class="rail-section">
+        <summary>Solid versus dotted</summary>
+        <div class="rail-content">
+        <p>Solid arrows are operative flow inside a compartment. Dotted arrows are explanation, advisory influence, future direction, corroboration, or test coverage—not live data flow.</p>
+        </div>
+      </details>
+      <details class="rail-section">
+        <summary>Evidence boundary</summary>
+        <div class="rail-content">
+        <p class="boundary">The focused 11-case suite establishes only offline reference-model conformance. It does not prove live Redis activation, MCP delivery, runtime launch, end-to-end completion, provider behavior, deployment, or production policy.</p>
+        </div>
+      </details>
+      <details class="rail-section">
+        <summary>Review status</summary>
+        <div class="rail-content">
+        <p>This revision is deliberately unaccepted. Acceptance should happen only after the diagram itself matches the intended system and the claim ceiling is clear.</p>
+        <div class="digest">Exact Mermaid digest: 99318ef61cea4cde4b71b0547243782db3785d81b7e491e29eaa82db0904c7ad</div>
+        </div>
+      </details>
+    </aside>
+  </main>
+  <script type="text/plain" id="diagram-source">
+%%{init: {"theme":"base","themeVariables":{"background":"transparent","primaryColor":"#ffffff","primaryBorderColor":"#111827","primaryTextColor":"#111827","lineColor":"#334155","secondaryColor":"#ffffff","tertiaryColor":"#ffffff","clusterBkg":"transparent","clusterBorder":"#111827"},"flowchart":{"htmlLabels":true,"curve":"basis","nodeSpacing":34,"rankSpacing":48}}}%%
+flowchart TB
+  subgraph AGENTS["A · COMMUNICATING AGENTS"]
+    direction LR
+    Codex(["Codex sender"]):::actor
+    Pi(["Pi sender"]):::actor
+    Work[/"task or message<br/>stable receiver identity"/]:::message
+    Receiver(["Named receiving actor<br/>Codex, Pi, or another client"]):::actor
+    Griller(("griller")):::state
+    Respondent(("respondent")):::state
+    AgentNote["AUTONOMY NOTE<br/>Agents exchange questions and answers directly.<br/>The orchestrator sets the bounded objective and reads evidence;<br/>it does not mediate every turn."]:::note
+    Codex --> Work
+    Pi --> Work
+    Work --> Receiver
+    Griller <-->|"questions / exhaustive answers"| Respondent
+    Respondent -. "advisory result" .-> Receiver
+    AgentNote -.-> Griller
+  end
+
+  subgraph CURRENT["B · GPTQUEUE TODAY — LIVE DELIVERY PLANE"]
+    direction LR
+    subgraph EDGE["MCP EDGE"]
+      direction TB
+      Stdio{{"MCP stdio"}}:::interface
+      Http{{"MCP HTTP"}}:::interface
+      Server[["GPTQueue MCP server"]]:::process
+      Tools["Seven current tools<br/>register · send · receive · list<br/>status · close · unregister"]:::process
+      Stdio --> Server
+      Http --> Server
+      Server --> Tools
+    end
+    subgraph CORE["CORE + REDIS"]
+      direction TB
+      Sessions["session store"]:::process
+      Mailboxes["mailbox store"]:::process
+      Redis[("Redis<br/>TTL session leases<br/>bounded inbox lists")]:::data
+      Running(["running receiver runtime"]):::actor
+      PTY["PTY wrapper<br/>Redis monitor"]:::process
+      Tools --> Sessions --> Redis
+      Tools --> Mailboxes --> Redis
+      Redis -->|"destructive BLPOP today"| Running
+      PTY -->|"inject notification"| Running
+    end
+    CurrentNote["CURRENT-STATE NOTE<br/>Redis delivery and the PTY wrapper are real system behavior.<br/>The present receive path removes a message when read;<br/>durable task acknowledgement is not yet claimed here."]:::note
+    CurrentNote -.-> Redis
+  end
+
+  Work --> Stdio
+  Work --> Http
+  Running -. "runtime realizes actor" .-> Receiver
+
+  subgraph REFERENCE["C · OFFLINE ACTIVATION REFERENCE MODEL — DESIRED SEMANTICS"]
+    direction TB
+    Incoming[/"task with stable actor ID<br/>and stable task ID"/]:::message
+    Persist["persist PENDING task"]:::process
+    Presence{"receiver presence?"}:::decision
+    Notify(("notify active<br/>or idle")):::state
+    LaunchPolicy{"offline launch policy?"}:::decision
+    Stored(("offline_stored<br/>store only")):::state
+    Unavailable(("unavailable")):::state
+    Lease{"acquire per-actor<br/>wake lease?"}:::decision
+    Wake(("one wake intent")):::state
+    Coalesce(("coalesce with<br/>existing wake")):::state
+    Starting(("starting")):::state
+    Claim["one runtime claims<br/>a bounded batch"]:::process
+    RunningTask(("RUNNING")):::state
+    Ack{"receiver ACK?"}:::decision
+    Complete(("COMPLETED")):::state
+    PendingAgain(("PENDING again")):::state
+    Unknown[/"activation result unknown"/]:::message
+    Reconcile["reconcile observed state<br/>before another launch"]:::process
+    PersistNote["ORDERING INVARIANT<br/>Persist before wake: a launch may fail,<br/>but accepted work must already be recoverable."]:::note
+    LeaseNote["COALESCING INVARIANT<br/>Concurrent arrivals share one actor-scoped wake lease;<br/>new startup arrivals join the same bounded drain."]:::note
+    DeliveryNote["DELIVERY INVARIANT<br/>At-least-once delivery needs stable IDs, explicit acknowledgement,<br/>and claim expiry that returns unfinished work to pending."]:::note
+
+    Incoming --> Persist --> Presence
+    Presence -->|"active / idle"| Notify --> Claim
+    Presence -->|"starting"| Coalesce --> Starting
+    Presence -->|"offline_launchable"| LaunchPolicy
+    Presence -->|"offline_stored"| Stored
+    Presence -->|"unavailable"| Unavailable
+    LaunchPolicy -->|"wake_if_offline"| Lease
+    LaunchPolicy -->|"store_only"| Stored
+    Lease -->|"acquired"| Wake --> Starting --> Claim
+    Lease -->|"already held"| Coalesce
+    Claim --> RunningTask --> Ack
+    Ack -->|"yes"| Complete
+    Ack -->|"claim expires / crash"| PendingAgain --> Presence
+    Unknown --> Reconcile -. "observed presence" .-> Presence
+    PersistNote -.-> Persist
+    LeaseNote -.-> Lease
+    DeliveryNote -.-> Ack
+  end
+
+  Tools -. "future direction — not current behavior" .-> Incoming
+
+  subgraph HARNESS["D · METABUILDER GOVERNED OFFLINE HARNESS"]
+    direction LR
+    Brief[/"approved offline brief"/]:::artifact
+    Module[["hand-authored<br/>Harness Module v2"]]:::artifact
+    Source[("GPTQueue 66e5f10<br/>tree 19ef13f")]:::data
+    Snapshot[("exact read-only<br/>source snapshot")]:::data
+    Compile{"compile + exact<br/>bundle check"}:::decision
+    Ceiling{"capability ceiling<br/>satisfied?"}:::decision
+    Run[["focused activation suite<br/>11 pure-model cases"]]:::process
+    Observe[/"exit · stdout · confinement<br/>effect observation"/]:::artifact
+    Journal[("controller journal<br/>inspect + replay")]:::data
+    Claim(["OFFLINE REFERENCE<br/>CONFORMANCE"]):::claim
+    Excluded["CLAIM CEILING<br/>No live Redis · no MCP traffic · no runtime launch<br/>no completion claim · no provider · no deploy<br/>no production retry or authorization policy"]:::exclusion
+    Baseline["separate corroboration<br/>full suite 40/40 · build · lint"]:::artifact
+    HarnessNote["EVIDENCE AUTHORITY<br/>The controller owns admission, observations, journal, and replay.<br/>Fixture prose is advisory; the pinned source and focused tests decide."]:::note
+
+    Brief --> Module --> Compile
+    Source --> Snapshot --> Ceiling
+    Compile --> Ceiling
+    Ceiling -->|"admitted"| Run --> Observe --> Journal --> Claim
+    Claim -. "does not establish" .-> Excluded
+    Baseline -. "corroborates; not governed effect" .-> Journal
+    HarnessNote -.-> Observe
+  end
+
+  Run -. "exercises pure transition semantics" .-> Persist
+  Run -.-> Lease
+  Run -.-> Ack
+
+  classDef actor fill:#ffffff,stroke:#0f172a,stroke-width:3px,color:#0f172a
+  classDef process fill:#ffffff,stroke:#1f2937,stroke-width:2.4px,color:#111827
+  classDef interface fill:#ffffff,stroke:#111827,stroke-width:2.4px,color:#111827
+  classDef data fill:#ffffff,stroke:#111827,stroke-width:3px,color:#111827
+  classDef message fill:#ffffff,stroke:#1f2937,stroke-width:2.4px,color:#111827
+  classDef state fill:#ffffff,stroke:#111827,stroke-width:2.8px,color:#111827
+  classDef decision fill:#ffffff,stroke:#111827,stroke-width:2.8px,color:#111827
+  classDef artifact fill:#ffffff,stroke:#1f2937,stroke-width:2.4px,color:#111827
+  classDef claim fill:#ffffff,stroke:#020617,stroke-width:4px,color:#020617
+  classDef exclusion fill:#ffffff,stroke:#111827,stroke-width:2.6px,stroke-dasharray:5 4,color:#111827
+  classDef note fill:#ffffff,stroke:#475569,stroke-width:1.6px,stroke-dasharray:7 5,color:#334155,font-size:13px
+  style AGENTS fill:transparent,stroke:#0f172a,stroke-width:3px
+  style CURRENT fill:transparent,stroke:#0f172a,stroke-width:3px
+  style EDGE fill:transparent,stroke:#475569,stroke-width:1.8px,stroke-dasharray:4 3
+  style CORE fill:transparent,stroke:#475569,stroke-width:1.8px,stroke-dasharray:4 3
+  style REFERENCE fill:transparent,stroke:#0f172a,stroke-width:3px
+  style HARNESS fill:transparent,stroke:#0f172a,stroke-width:3px
+  linkStyle default stroke:#334155,stroke-width:1.7px,fill:none
+  </script>
+  <script src="file:///home/rahul/Documents/mermaid_viewer/node_modules/mermaid/dist/mermaid.min.js"></script>
+  <script>
+    const viewport = document.getElementById('viewport');
+    const target = document.getElementById('diagram');
+    const source = document.getElementById('diagram-source').textContent.trim();
+    const layout = document.querySelector('main');
+    const rail = document.querySelector('aside');
+    const railResizer = document.getElementById('rail-resizer');
+    const railWidthKey = 'gptqueue-review-rail-width';
+    let naturalWidth = 1600;
+    let scale = 1;
+    let drag = null;
+    let railDrag = null;
+
+    function railBounds() {
+      return { min: 280, max: Math.min(720, Math.floor(window.innerWidth * 0.55)) };
+    }
+
+    function setRailWidth(width, persist) {
+      const bounds = railBounds();
+      const next = Math.round(Math.max(bounds.min, Math.min(bounds.max, width)));
+      layout.style.setProperty('--rail-width', next + 'px');
+      railResizer.setAttribute('aria-valuemax', String(bounds.max));
+      railResizer.setAttribute('aria-valuenow', String(next));
+      if (persist) {
+        try { localStorage.setItem(railWidthKey, String(next)); } catch (_) { /* file storage unavailable */ }
+      }
+    }
+
+    let savedRailWidth = NaN;
+    try { savedRailWidth = Number(localStorage.getItem(railWidthKey)); } catch (_) { /* use default */ }
+    if (Number.isFinite(savedRailWidth) && savedRailWidth > 0) setRailWidth(savedRailWidth, false);
+
+    function paintScale() {
+      const svg = target.querySelector('svg');
+      if (!svg) return;
+      svg.style.width = Math.round(naturalWidth * scale) + 'px';
+      document.getElementById('actual').textContent = Math.round(scale * 100) + '%';
+    }
+
+    function setScale(nextScale, clientX, clientY) {
+      const svg = target.querySelector('svg');
+      if (!svg) return;
+      const viewportBox = viewport.getBoundingClientRect();
+      const localX = clientX === undefined ? viewport.clientWidth / 2 : clientX - viewportBox.left;
+      const localY = clientY === undefined ? viewport.clientHeight / 2 : clientY - viewportBox.top;
+      const oldWidth = svg.getBoundingClientRect().width;
+      const oldHeight = svg.getBoundingClientRect().height;
+      const focusX = viewport.scrollLeft + localX;
+      const focusY = viewport.scrollTop + localY;
+      const ratioX = oldWidth > 0 ? focusX / oldWidth : 0;
+      const ratioY = oldHeight > 0 ? focusY / oldHeight : 0;
+
+      scale = Math.max(0.2, Math.min(2.5, nextScale));
+      paintScale();
+
+      const newWidth = svg.getBoundingClientRect().width;
+      const newHeight = svg.getBoundingClientRect().height;
+      viewport.scrollLeft = Math.max(0, ratioX * newWidth - localX);
+      viewport.scrollTop = Math.max(0, ratioY * newHeight - localY);
+    }
+
+    function fitDiagram() {
+      const usable = Math.max(600, viewport.clientWidth - 64);
+      scale = Math.min(1, usable / naturalWidth);
+      paintScale();
+      viewport.scrollTo({ top: 0, left: 0 });
+    }
+
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'base',
+      suppressErrorRendering: true,
+      themeVariables: {
+        background: 'transparent',
+        primaryColor: '#ffffff',
+        primaryBorderColor: '#111827',
+        primaryTextColor: '#111827',
+        lineColor: '#334155',
+        clusterBkg: 'transparent',
+        clusterBorder: '#111827'
+      }
+    });
+
+    mermaid.render('gptqueue-v2-svg', source).then(function(result) {
+      target.innerHTML = result.svg;
+      const svg = target.querySelector('svg');
+      const box = svg.viewBox && svg.viewBox.baseVal;
+      naturalWidth = box && box.width ? Math.max(1450, box.width) : 1800;
+      svg.removeAttribute('width');
+      svg.removeAttribute('height');
+      svg.style.background = 'transparent';
+      const overviewScale = Math.min(1, Math.max(0.45, (viewport.clientWidth - 64) / naturalWidth));
+      scale = overviewScale;
+      paintScale();
+      if (result.bindFunctions) result.bindFunctions(target);
+    }).catch(function(error) {
+      target.className = 'error';
+      target.textContent = 'Diagram rendering failed: ' + String(error);
+    });
+
+    document.getElementById('zoom-in').addEventListener('click', function() {
+      setScale(scale + 0.1);
+    });
+    document.getElementById('zoom-out').addEventListener('click', function() {
+      setScale(scale - 0.1);
+    });
+    document.getElementById('fit').addEventListener('click', fitDiagram);
+    document.getElementById('actual').addEventListener('click', function() {
+      setScale(1);
+    });
+
+    viewport.addEventListener('pointerdown', function(event) {
+      if (event.button !== 0) return;
+      drag = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        left: viewport.scrollLeft,
+        top: viewport.scrollTop
+      };
+      viewport.setPointerCapture(event.pointerId);
+      viewport.classList.add('dragging');
+      event.preventDefault();
+    });
+
+    viewport.addEventListener('pointermove', function(event) {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      viewport.scrollLeft = drag.left - (event.clientX - drag.x);
+      viewport.scrollTop = drag.top - (event.clientY - drag.y);
+    });
+
+    function stopDragging(event) {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      drag = null;
+      viewport.classList.remove('dragging');
+      if (viewport.hasPointerCapture(event.pointerId)) viewport.releasePointerCapture(event.pointerId);
+    }
+
+    viewport.addEventListener('pointerup', stopDragging);
+    viewport.addEventListener('pointercancel', stopDragging);
+
+    viewport.addEventListener('wheel', function(event) {
+      event.preventDefault();
+      const direction = event.deltaY < 0 ? 1 : -1;
+      const factor = direction > 0 ? 1.12 : 1 / 1.12;
+      setScale(scale * factor, event.clientX, event.clientY);
+    }, { passive: false });
+
+    railResizer.addEventListener('pointerdown', function(event) {
+      if (event.button !== 0) return;
+      railDrag = { pointerId: event.pointerId, x: event.clientX, width: rail.getBoundingClientRect().width };
+      railResizer.setPointerCapture(event.pointerId);
+      railResizer.classList.add('dragging');
+      document.body.classList.add('resizing-rail');
+      event.preventDefault();
+    });
+
+    railResizer.addEventListener('pointermove', function(event) {
+      if (!railDrag || railDrag.pointerId !== event.pointerId) return;
+      setRailWidth(railDrag.width + railDrag.x - event.clientX, false);
+    });
+
+    function stopRailResize(event) {
+      if (!railDrag || railDrag.pointerId !== event.pointerId) return;
+      railDrag = null;
+      railResizer.classList.remove('dragging');
+      document.body.classList.remove('resizing-rail');
+      setRailWidth(rail.getBoundingClientRect().width, true);
+      if (railResizer.hasPointerCapture(event.pointerId)) railResizer.releasePointerCapture(event.pointerId);
+    }
+
+    railResizer.addEventListener('pointerup', stopRailResize);
+    railResizer.addEventListener('pointercancel', stopRailResize);
+    railResizer.addEventListener('dblclick', function() { setRailWidth(390, true); });
+    railResizer.addEventListener('keydown', function(event) {
+      const step = event.shiftKey ? 48 : 16;
+      const current = rail.getBoundingClientRect().width;
+      if (event.key === 'ArrowLeft') setRailWidth(current + step, true);
+      else if (event.key === 'ArrowRight') setRailWidth(current - step, true);
+      else if (event.key === 'Home') setRailWidth(railBounds().min, true);
+      else if (event.key === 'End') setRailWidth(railBounds().max, true);
+      else return;
+      event.preventDefault();
+    });
+    window.addEventListener('resize', function() { setRailWidth(rail.getBoundingClientRect().width, false); });
+  </script>
+</body>
+</html>
