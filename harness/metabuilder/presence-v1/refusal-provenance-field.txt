@@ -1,0 +1,4 @@
+$ /home/rahul/.local/bin/metabuilder harness compile --input MODULE.json  (first attempt, with top-level provenance object)
+exit: 2
+
+mb: invalid Harness Module wire: unknown field `provenance`, expected one of `schema_version`, `harness_id`, `objective`, `requirements`, `plan`, `actions`, `external_targets`, `bounds` at line 4 column 14

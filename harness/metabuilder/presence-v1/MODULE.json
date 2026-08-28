@@ -1,0 +1,139 @@
+{
+  "schema_version": 2,
+  "harness_id": "gptqueue-actor-presence-v1",
+  "objective": "Prove the pure presence-classification semantics of the new durable-actor profile model (src/core/actor-presence.ts) at the current GPTQueue tree, offline, through one bounded read-only focused vitest run, without any live Redis, MCP, runtime-launch, or task-completion claims.",
+  "requirements": [
+    {
+      "id": "unknown-recipient-rejection",
+      "statement": "classifyPresence rejects an unknown recipient (undefined actor profile) with a frozen { ok: false, error.code: 'unknown_recipient' } classification and creates no queue, mailbox, or directory data.",
+      "acceptance": [
+        "The controller-observed focused vitest run of tests/actor-presence.test.ts includes a passing case asserting that classifyPresence with an undefined actor returns ok:false with error.code 'unknown_recipient', and that no queue/mailbox/directory data is created."
+      ],
+      "depends_on": [],
+      "evidence_actions": ["presence-focused-vitest"]
+    },
+    {
+      "id": "offline-launchable",
+      "statement": "An offline actor with a runnable launch contract and activation_policy.mode 'wake_if_offline' classifies as 'offline_launchable'.",
+      "acceptance": [
+        "The controller-observed focused vitest run of tests/actor-presence.test.ts includes a passing case asserting presence 'offline_launchable' for a runnable contract with a wake_if_offline policy."
+      ],
+      "depends_on": [],
+      "evidence_actions": ["presence-focused-vitest"]
+    },
+    {
+      "id": "offline-store-only",
+      "statement": "An offline actor with a runnable launch contract and activation_policy.mode 'store_only' classifies as 'offline_store_only'.",
+      "acceptance": [
+        "The controller-observed focused vitest run of tests/actor-presence.test.ts includes a passing case asserting presence 'offline_store_only' for a runnable contract with a store_only policy."
+      ],
+      "depends_on": [],
+      "evidence_actions": ["presence-focused-vitest"]
+    },
+    {
+      "id": "unavailable-contract",
+      "statement": "An offline actor with a not_runnable launch contract classifies as 'unavailable' regardless of activation policy.",
+      "acceptance": [
+        "The controller-observed focused vitest run of tests/actor-presence.test.ts includes passing cases asserting presence 'unavailable' for a not_runnable contract under both wake_if_offline and store_only policies."
+      ],
+      "depends_on": [],
+      "evidence_actions": ["presence-focused-vitest"]
+    },
+    {
+      "id": "active-idle-leased-runtime",
+      "statement": "A runtime incarnation holding a lease classifies as 'active' when its workload is 'processing' and 'idle' when its workload is 'idle'; a runtime observation without a lease_id is ignored by classification and does not count as usable presence.",
+      "acceptance": [
+        "The controller-observed focused vitest run of tests/actor-presence.test.ts includes passing cases asserting 'active' for a leased processing runtime, 'idle' for a leased idle runtime, and that a leaseless runtime observation is ignored by classification."
+      ],
+      "depends_on": [],
+      "evidence_actions": ["presence-focused-vitest"]
+    },
+    {
+      "id": "starting-wake-lease",
+      "statement": "An actor with no leased runtime but an outstanding controller-issued wake lease classifies as 'starting'.",
+      "acceptance": [
+        "The controller-observed focused vitest run of tests/actor-presence.test.ts includes a passing case asserting presence 'starting' when wake_lease_id is set and no leased runtime is observed."
+      ],
+      "depends_on": [],
+      "evidence_actions": ["presence-focused-vitest"]
+    },
+    {
+      "id": "precedence-rules",
+      "statement": "Situation precedence holds exactly as implemented in resolveSituation/classifySituation: (1) a leased runtime wins over any wake lease and over offline classification; (2) an outstanding wake lease wins over offline classification; (3) only otherwise is the actor offline, where a non-runnable contract yields 'unavailable' regardless of policy.",
+      "acceptance": [
+        "The controller-observed focused vitest run of tests/actor-presence.test.ts includes passing cases exercising the precedence order: leased runtime with an outstanding wake lease still classifies active/idle, a wake lease with a not_runnable contract still classifies 'starting', and offline classification applies only when neither is present."
+      ],
+      "depends_on": [],
+      "evidence_actions": ["presence-focused-vitest"]
+    },
+    {
+      "id": "profile-admission-validation-immutability",
+      "statement": "admitActorProfile validates identity (non-empty actor_id and alias), activation policy mode ('wake_if_offline' or 'store_only'), and integer max_concurrency >= 1, returning frozen typed errors 'invalid_identity', 'invalid_policy', or 'invalid_concurrency'; an admitted profile is deeply frozen and its capabilities and activation_policy are immutable.",
+      "acceptance": [
+        "The controller-observed focused vitest run of tests/actor-presence.test.ts includes passing cases for each admission error code and passing cases asserting the admitted profile is deeply frozen (mutation attempts do not alter the admitted profile or its nested capabilities/activation_policy)."
+      ],
+      "depends_on": [],
+      "evidence_actions": ["presence-focused-vitest"]
+    },
+    {
+      "id": "delivery-mode-vs-activation-policy",
+      "statement": "Delivery mode (store_only on a queued task) is a per-task property that is intentionally absent from the presence model, while activation policy is an actor-owned property; presence classification never inspects queued work.",
+      "acceptance": [
+        "The controller-observed focused vitest run of tests/actor-presence.test.ts includes a passing case asserting that the presence model and classification results carry no per-task delivery-mode field and are unaffected by queued-work state."
+      ],
+      "depends_on": [],
+      "evidence_actions": ["presence-focused-vitest"]
+    }
+  ],
+  "plan": {
+    "root_workflow": "presence-main",
+    "workflows": {
+      "workflows": [
+        {
+          "id": "presence-main",
+          "root": {
+            "kind": "action",
+            "action": "presence-focused-vitest"
+          }
+        }
+      ]
+    }
+  },
+  "actions": [
+    {
+      "id": "presence-focused-vitest",
+      "command": {
+        "argv": [
+          "/home/rahul/nodeenv2251-311/bin/node",
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "tests/actor-presence.test.ts"
+        ],
+        "cwd": ".",
+        "pinned_directories": [
+          {
+            "path": "/home/rahul/Documents/gptqueue/node_modules",
+            "digest": "bc1e12d815b3a0878483f6d03a42fe021bc6e6bc3bbc68babfd121bd4e44b2d1"
+          }
+        ],
+        "toolchains": [
+          {
+            "id": "node24-repo-local-vitest",
+            "provider": "pinned",
+            "executables": [
+              "/home/rahul/nodeenv2251-311/bin/node"
+            ],
+            "digest": "3dc61cdcc38781a678b31903d2f69ed16094206e2258df53a4eb2c0fe4f0a793"
+          }
+        ]
+      },
+      "timeout_seconds": 120
+    }
+  ],
+  "bounds": {
+    "max_epochs": 10,
+    "max_elapsed_seconds": 3600,
+    "max_blocked_requirements": 1,
+    "max_concurrent_external_actions": 1
+  }
+}

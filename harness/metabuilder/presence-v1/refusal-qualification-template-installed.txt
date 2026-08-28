@@ -1,0 +1,106 @@
+$ /home/rahul/.local/bin/metabuilder harness qualification template --kind module
+exit: 2
+
+mb: unknown command
+
+MetaBuilder Rust authority CLI
+
+Usage:
+  mb authority bind --repo PATH --run-id ID --tranche-id ID \
+    --spec-digest SHA256 --policy-digest SHA256 --checks PATH
+  mb authority transition --journal PATH --event PATH
+  mb authority replay --journal PATH
+  mb authority verify --repo PATH --journal PATH
+  mb delta classify --input PATH
+  mb docket validate --input PATH
+  mb charter validate --input PATH --docket PATH [--required-ref D-XX]
+  mb evidence validate --input PATH
+  mb harness compile --input PATH  (compile Harness Module DSL v2 into a
+    content-addressed campaign/workflow/capability/adapter bundle)
+  mb harness check --input PATH  (recompile and verify every bundle artifact)
+  mb harness brief prepare --input PATH  (admit the initial grilling record and
+    issue its controller-bound completion receipt before agreement can begin)
+  mb harness brief finalize --input PATH --approvals PATH  (derive an agreed
+    brief and controller receipt after the mandatory task grilling gate)
+  mb harness brief inspect --input PATH  (admit and digest a draft brief and
+    report whether it is structurally ready for external actor approval;
+    inspection itself is neither grilling nor agreement)
+  mb harness brief check --input PATH  (verify exact brief, grilling,
+    decision-authority, approval, and receipt bindings)
+  mb harness diagrams prepare --brief PATH --input PATH  (bind a semantic model
+    and viewer-compatible question-specific Mermaid receipts to an agreed brief)
+  mb harness diagrams preview --brief PATH --input PATH --out PATH  (create a
+    new viewer directory for exact pre-acceptance customer review)
+  mb harness diagrams review --brief PATH --bundle PATH --review PATH  (emit a
+    reviewed bundle only for exact acceptance by a required brief approver)
+  mb harness diagrams check --brief PATH --input PATH  (re-admit exact diagram,
+    receipt, agreed-brief, and customer-review bindings)
+  mb harness diagrams materialize --brief PATH --input PATH --out PATH  (create
+    a new viewer directory of standalone .mmd files and adjacent receipts)
+  mb harness package create --brief PATH --diagram-review PATH  (emit the
+    reusable fresh-generation packet only after brief and diagram review gates)
+  mb harness package check --input PATH  (purely reconstruct and verify a
+    fresh-generation packet)
+  mb harness generate --package PATH --repo PATH --generation-dir PATH --source-selection PATH --pi PATH --pi-digest SHA256 --pi-runtime-root PATH --pi-agent-dir PATH
+    [--learnings PATH]
+    (generate exactly once
+    from an agreed packet, exact clean source, and curated learnings only)
+  mb harness generation check --input PATH --expected-receipt SHA256
+    (re-admit a persisted generation against its external receipt anchor and
+    embedded compiled bundle)
+  mb harness author --bundle PATH --run-root PATH --repo PATH --harness-repo PATH [--json]  (re-admit one compiled bundle by exact pure
+    recompilation and durably start its root workflow from it alone)
+  mb campaign compile --charter PATH --specs PATH [--campaign-id ID] [--out PATH|--check-existing PATH]
+  mb campaign check [--root PATH]   (MB-0 policy/docs consistency gate)
+  mb campaign step [--run-root PATH] [--spec PATH] [--max-steps N] [--expect PATH] [--strict] [--json]   (Q83 offline simulated-branch eval; expectation gate; --run-root is read-only)
+  mb run status --run-root PATH [--reconcile] [--json]  (Q79 canonical run-state
+    gate: digest-bound projection; exit 0 ok / 7 verification-failed / 2 invalid-request)
+  mb run attempts --run-root PATH [--json]  (MVP-3 read-path: journal-derived
+    attempt-store projection, verified without replay; read-only)
+  mb run artifacts|cursor|revisions|evidence --run-root PATH [--json]  (verified,
+    journal-derived read models; read-only)
+  mb run monitor --run-root PATH [--cursor PATH] [--json]  (read-only health,
+    changes since a content-addressed cursor, and typed intervention proposals)
+  mb run monitor preview|apply --run-root PATH --cursor PATH --input PATH [--json]
+    (cursor-bound proposal decision through one supervised campaign checkpoint)
+  mb run workflow author --run-root PATH --repo PATH --harness-repo PATH
+    --spec PATH --policy PATH --revision PATH --root-workflow ID [--json]
+    (bind clean target/harness sources and durably start one root workflow)
+  mb run workflow preview --run-root PATH [--json]  (semantically replayed,
+    read-only workflow action/blocker selection)
+  mb run workflow effects --run-root PATH (--ceiling PATH --catalog PATH | --bundle PATH) [--json]  (read-only deterministic adapter selection and
+    capability brokerage)
+  mb run workflow prepare --run-root PATH (--ceiling PATH --catalog PATH | --bundle PATH) [--workspace PATH [--rustup PATH]] [--json]
+    (persist one authorized intent checkpoint and stop without dispatch;
+    recover it before authorized conclusive resolution, and retry only after
+    failed or timed_out)
+  mb run workflow apply --run-root PATH (--ceiling PATH --catalog PATH | --bundle PATH) [--workspace PATH [--rustup PATH]] [--json]
+    (persist intent, dispatch one supervised built-in action, then observe and
+    conclude through three durable checkpoints;
+    workspace is required for commands; rustup only for Rustup toolchains)
+  mb run workflow recover --run-root PATH (--ceiling PATH --catalog PATH | --bundle PATH) [--json]
+    (no-redispatch recovery of one durable Prepared or Observed attempt)
+  Every workflow effects|prepare|apply|recover invocation names exactly one
+  authority source: --ceiling plus --catalog together, or --bundle PATH whose
+  compiled harness bundle is re-admitted by exact pure recompilation (a forged
+  bundle exits 7). Mixed, partial, duplicate, or absent sources exit 2.
+  mb run workflow resolve --run-root PATH --node SHA256 --outcome succeeded|failed|timed_out [--json]
+    (explicit conclusive resolution of the exact current Unknown blocker)
+  mb run workflow retry --run-root PATH --node SHA256 [--json]
+    (retry one exact failed/timed-out action within the ten-attempt limit)
+  mb run workflow intervene --run-root PATH --input PATH [--json]
+    (apply one typed choice/wait/repeat/race/join intervention checkpoint)
+  mb run revision preview|apply --run-root PATH --base PATH --patch PATH
+    [--json]  (exact quiescent workflow-revision activation)
+  mb capability check --ceiling PATH --request PATH [--json]  (pure root-ceiling
+    admission; denied requests exit 4 and unconfined mode stays explicit)
+  mb dry-run [--spec PATH] [--out PATH] [--quiet]  (T-B5 no-effects dry run)
+  mb run [--spec PATH] [--effects dry|checks] [--tranches a1 b4] [--repo PATH]
+  mb verify [--repo PATH] [--ledger PATH] [--receipt-root PATH]  (M-R6 LEDGER)
+  mb analyze [--objective TEXT] [--repo PATH] [--on-read PATH]  (read-only frontend analysis)
+  mb compile --input PATH --docket PATH
+  mb status --input PATH --docket PATH
+
+Machine result modes emit canonical-json-v1 to stdout, every failure uses the
+governed exit taxonomy, and no command invokes Python.
+
