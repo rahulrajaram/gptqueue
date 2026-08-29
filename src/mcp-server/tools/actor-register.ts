@@ -11,12 +11,6 @@ export const actorRegisterSchema = z.object({
     .describe(
       "Optional session_id returned by register_agent. Required when the transport does not preserve process-local registration state."
     ),
-  actor_id: z
-    .string()
-    .min(1)
-    .describe(
-      "Stable durable actor identity. The session that registers an actor owns its profile."
-    ),
   alias: z
     .string()
     .min(1)
@@ -56,20 +50,25 @@ export const actorRegisterSchema = z.object({
  * profile requires but the tool does not collect are derived deterministically
  * from the registration context per the product thesis defaults:
  * `workspace_root` = the registration (server) directory, `working_directory`
- * = workspace_root, `state_directory` = a GPTQueue-managed actor path, and
- * `runtime` = the launch command (the registered adapter), or "manual" for
- * store_only actors with no managed launch.
+ * = workspace_root, and `runtime` = the launch command (the registered
+ * adapter), or "manual" for store_only actors with no managed launch.
+ *
+ * Note: the legacy `state_directory` field was dropped (review M2) — it was
+ * only set here and never consumed downstream, so the template is removed
+ * rather than confined.
  */
-function buildProfileInput(params: z.infer<typeof actorRegisterSchema>): unknown {
+function buildProfileInput(
+  actorId: string,
+  params: z.infer<typeof actorRegisterSchema>
+): unknown {
   const workspaceRoot = process.cwd();
   const launchCommand = params.launch_command?.trim() || "";
   return {
-    actor_id: params.actor_id,
+    actor_id: actorId,
     alias: params.alias,
     capabilities: params.capabilities ?? [],
     workspace_root: workspaceRoot,
     working_directory: workspaceRoot,
-    state_directory: `${workspaceRoot}/.gptq/actors/${params.actor_id}/state`,
     runtime: launchCommand.length > 0 ? launchCommand : "manual",
     activation_policy: { mode: params.activation_policy_mode },
     max_concurrency: params.max_concurrency,
@@ -94,7 +93,7 @@ export async function actorRegister(
   params: z.infer<typeof actorRegisterSchema>
 ) {
   await ensureSessionBinding(client, params.session_id);
-  client.requireRegistered();
+  const actor_id = client.requireRegistered();
   const session_id = client.sessionId;
   if (!session_id) {
     throw new Error(
@@ -102,12 +101,16 @@ export async function actorRegister(
     );
   }
 
+  // H4 (identity discipline): the durable actor identity IS the calling
+  // session's registered agent name. actor_id is derived, never caller-supplied,
+  // so registry name, directory key, wake/presence key, and delivery/claim
+  // identity can never diverge.
   const result = await client.actorDirectory.register({
-    profile_input: buildProfileInput(params),
+    profile_input: buildProfileInput(actor_id, params),
     launch: buildLaunch(params),
     registered_by: session_id,
     registered_at: new Date().toISOString(),
   });
 
-  return actorRegisterResult(result, { actor_id: params.actor_id });
+  return actorRegisterResult(result, { actor_id });
 }

@@ -20,6 +20,7 @@ import {
   CLAIM_KEYS,
   SESSION_KEYS,
   DLQ_KEYS,
+  ACTOR_KEYS,
 } from "../../src/core/keys.js";
 
 // Per-file timeout override (does not touch the global vitest config).
@@ -665,15 +666,16 @@ describe("durable-actor receive gate", () => {
     await a.call("send_message", { session_id: a.sessionId, to: b.name, content: "gated" });
     expect(await ctx.redis.llen(SESSION_KEYS.queue(b.name))).toBe(1);
 
-    // Register a durable (store_only) actor record owned by b's actor_id.
-    const reg = await a.call("actor_register", {
-      session_id: a.sessionId,
-      actor_id: b.name,
+    // Register b itself as a durable (store_only) actor: actor_id is derived
+    // from the calling session's registered name (H4), so b must self-register.
+    const reg = await b.call("actor_register", {
+      session_id: b.sessionId,
       alias: `${b.name}-alias`,
       activation_policy_mode: "store_only",
       max_concurrency: 1,
     });
     expect(reg.data.status).toBe("ok");
+    expect(reg.data.record.profile.actor_id).toBe(b.name);
 
     // receive_message is now rejected; the inbox is NOT consumed.
     const gated = await b.call("receive_message", { session_id: b.sessionId, timeout: 1 });
@@ -696,17 +698,17 @@ describe("durable-actor receive gate", () => {
 describe("claim concurrency ceiling (directory max_concurrency)", () => {
   it("max_concurrency 1: a second session's claim is rejected until the first acks", async () => {
     const actor = uniq("conc");
-    const owner = await connect(uniq("conc-owner"));
-    const ownerReg = await owner.call("actor_register", {
-      session_id: owner.sessionId,
-      actor_id: actor,
+    // c1 is a session registered under the actor identity and self-registers the
+    // durable profile (actor_id derived from the registered name, H4).
+    const c1 = await connect(actor);
+    const ownerReg = await c1.call("actor_register", {
+      session_id: c1.sessionId,
       alias: actor,
       activation_policy_mode: "store_only",
       max_concurrency: 1,
     });
     expect(ownerReg.data.status).toBe("ok");
 
-    const c1 = await connect(actor);
     const c2 = await connect(actor);
     const sender = await connect(uniq("conc-src"));
     await sender.call("send_message", { session_id: sender.sessionId, to: actor, content: "x1" });
@@ -728,17 +730,15 @@ describe("claim concurrency ceiling (directory max_concurrency)", () => {
 
   it("max_concurrency 2 admits two outstanding claims and rejects the third", async () => {
     const actor = uniq("conc2");
-    const owner = await connect(uniq("conc2-owner"));
-    const ownerReg = await owner.call("actor_register", {
-      session_id: owner.sessionId,
-      actor_id: actor,
+    const c1 = await connect(actor);
+    const ownerReg = await c1.call("actor_register", {
+      session_id: c1.sessionId,
       alias: actor,
       activation_policy_mode: "store_only",
       max_concurrency: 2,
     });
     expect(ownerReg.data.status).toBe("ok");
 
-    const c1 = await connect(actor);
     const c2 = await connect(actor);
     const c3 = await connect(actor);
     const sender = await connect(uniq("conc2-src"));
@@ -756,6 +756,134 @@ describe("claim concurrency ceiling (directory max_concurrency)", () => {
     await c2.call("acknowledge_tasks", { session_id: c2.sessionId, claim_id: r2.claim_id });
     const r4 = expectClaimed(await c3.call("claim_tasks", { session_id: c3.sessionId, max_batch: 1, ttl_seconds: 300 }));
     await c3.call("acknowledge_tasks", { session_id: c3.sessionId, claim_id: r4.claim_id });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M. Identity discipline (H3 resolve-then-push, H4 derived actor identity)
+// ---------------------------------------------------------------------------
+describe("identity discipline at the send/claim boundary", () => {
+  it("(a/f) send to an unregistered/unknown name -> unknown_recipient, and NO queue/meta keys are created", async () => {
+    const s = await connect(uniq("idm-src"));
+    const typo = uniq("no-such-recipient");
+    expect(await ctx.redis.exists(SESSION_KEYS.queue(typo))).toBe(0);
+    expect(await ctx.redis.exists(SESSION_KEYS.mailboxMeta(typo))).toBe(0);
+
+    const res = await s.call("send_message", {
+      session_id: s.sessionId,
+      to: typo,
+      content: "typo'd recipient"
+    });
+    expect(res.isError).toBe(true);
+    expect(res.data.status).toBe("error");
+    expect(res.data.error?.code).toBe("unknown_recipient");
+
+    // Proof the push never ran: neither key was created for the orphan name.
+    expect(await ctx.redis.exists(SESSION_KEYS.queue(typo))).toBe(0);
+    expect(await ctx.redis.exists(SESSION_KEYS.mailboxMeta(typo))).toBe(0);
+  });
+
+  it("(b) send to a registered plain agent works via the registry-lookup path", async () => {
+    const s = await connect(uniq("idm-plain-src"));
+    const r = await connect(uniq("idm-plain-dst"));
+    const sent = await s.call("send_message", {
+      session_id: s.sessionId,
+      to: r.name,
+      content: "registered plain agent"
+    });
+    expect(sent.data.status).toBe("sent");
+    expect(await ctx.redis.llen(SESSION_KEYS.queue(r.name))).toBe(1);
+
+    const recv = await r.call("receive_message", { session_id: r.sessionId, timeout: 2 });
+    expect(recv.data.payload.content).toBe("registered plain agent");
+  });
+
+  it("(c) send to a durable actor works via the directory path", async () => {
+    const s = await connect(uniq("idm-dur-src"));
+    const da = await connect(uniq("idm-dur-act"));
+    const reg = await da.call("actor_register", {
+      session_id: da.sessionId,
+      alias: `${da.name}-dur-alias`,
+      activation_policy_mode: "store_only",
+      max_concurrency: 1,
+    });
+    expect(reg.data.status).toBe("ok");
+
+    const sent = await s.call("send_message", {
+      session_id: s.sessionId,
+      to: da.name,
+      content: "durable actor"
+    });
+    expect(sent.data.status).toBe("sent");
+    expect(await ctx.redis.llen(SESSION_KEYS.queue(da.name))).toBe(1);
+
+    // A durable actor consumes via claim (not receive_message).
+    const claim = expectClaimed(
+      await da.call("claim_tasks", { session_id: da.sessionId, max_batch: 1, ttl_seconds: 300 })
+    );
+    await da.call("acknowledge_tasks", { session_id: da.sessionId, claim_id: claim.claim_id });
+    expect(await ctx.redis.llen(SESSION_KEYS.queue(da.name))).toBe(0);
+  });
+
+  it("(d) self-send (to == own name) remains valid", async () => {
+    const a = await connect(uniq("idm-self"));
+    const sent = await a.call("send_message", {
+      session_id: a.sessionId,
+      to: a.name,
+      content: "to myself"
+    });
+    expect(sent.data.status).toBe("sent");
+    expect(await ctx.redis.llen(SESSION_KEYS.queue(a.name))).toBe(1);
+
+    const recv = await a.call("receive_message", { session_id: a.sessionId, timeout: 2 });
+    expect(recv.data.payload.content).toBe("to myself");
+  });
+
+  it("(e) actor_register ignores a passed actor_id and derives it from the registered name", async () => {
+    const owner = await connect(uniq("idm-schema"));
+    // The actor_id argument no longer exists in the schema; even if supplied it
+    // must not influence the derived durable identity (which is the owner name).
+    const res = await owner.call("actor_register", {
+      session_id: owner.sessionId,
+      actor_id: "should-be-ignored-name",
+      alias: "schema-alias",
+      activation_policy_mode: "store_only",
+      max_concurrency: 1,
+    });
+    expect(res.data.status).toBe("ok");
+    expect(res.data.record.profile.actor_id).toBe(owner.name); // derived, not the passed value
+  });
+
+  it("(H4 defensive) claim refuses a mismatched directory identity binding (identity_mismatch)", async () => {
+    const c = await connect(uniq("idm-mismatch"));
+    // A legitimate self-registration first (derives c.name). Then plant a
+    // divergent record directly on db15 so the directory actor_id no longer
+    // matches the caller name (the only way such a mismatch can exist, since
+    // actor_register derives actor_id from the registered name).
+    const reg = await c.call("actor_register", {
+      session_id: c.sessionId,
+      alias: "mismatch-alias",
+      activation_policy_mode: "store_only",
+      max_concurrency: 1,
+    });
+    expect(reg.data.status).toBe("ok");
+
+    await ctx.redis.hset(
+      ACTOR_KEYS.profiles,
+      c.name,
+      JSON.stringify({ ...reg.data.record, profile: { ...reg.data.record.profile, actor_id: "divergent-other" } })
+    );
+
+    // A claim under the caller name now sees a directory record whose actor_id
+    // does not match -> the invariant guard refuses with identity_mismatch.
+    const claim = await c.call("claim_tasks", {
+      session_id: c.sessionId,
+      max_batch: 1,
+      ttl_seconds: 300,
+    });
+    expect(claim.isError).toBe(true);
+    expect(claim.data.status).toBe("error");
+    expect(claim.data.error?.code).toBe("identity_mismatch");
   });
 });
 

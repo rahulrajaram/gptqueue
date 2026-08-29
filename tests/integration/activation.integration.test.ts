@@ -10,6 +10,8 @@ import {
 } from "vitest";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Redis } from "ioredis";
 import {
   setupIntegrationServer,
@@ -120,24 +122,41 @@ async function connect(name: string, opts?: Parameters<typeof connectAgent>[2]) 
   return agent;
 }
 
-/** Register a durable actor profile through the owning agent's session. */
+/**
+ * Register a durable actor profile through the owning agent's session.
+ *
+ * H4 identity discipline: actor_id is DERIVED from the calling session's
+ * registered agent name (the durable actor identity IS the registered name),
+ * so the `owner` session MUST be registered under the actor identity it wants
+ * to register. The tool no longer accepts a caller-supplied actor_id.
+ */
 async function registerActor(
   owner: Agent,
-  actorId: string,
   mode: "wake_if_offline" | "store_only",
   launch?: { command: string; args: string[] },
   maxConcurrency = 1
 ) {
   return owner.call("actor_register", {
     session_id: owner.sessionId,
-    actor_id: actorId,
-    alias: `${actorId}-alias`,
+    alias: `${owner.name}-alias`,
     activation_policy_mode: mode,
     max_concurrency: maxConcurrency,
     ...(launch
       ? { launch_command: launch.command, launch_args: launch.args }
       : {}),
   });
+}
+
+/**
+ * Take a durable actor offline by closing its owning session. The actor
+ * directory record, registry entry, and mailbox all persist; only the live
+ * session (and its lease) is removed, so presence returns to offline.
+ * actor_status is a stateless read, so it remains callable on the closed
+ * agent for offline-state assertions.
+ */
+async function takeOffline(owner: Agent): Promise<void> {
+  const res = await owner.call("close_session", { session_id: owner.sessionId });
+  expect(res.data.status).toBe("session_closed");
 }
 
 /** Track a dispatched pid for cleanup, returning it for convenience. */
@@ -177,14 +196,18 @@ async function sendAndTrack(
 // ---------------------------------------------------------------------------
 describe("actor registration & directory (wire)", () => {
   it("happy path: wake_if_offline register exposes a runnable launch contract; actor_status reflects the profile", async () => {
-    const owner = await connect(uniq("reg-happy-owner"));
     const actorId = uniq("reg-happy-act");
+    // The owning session IS registered under the actor identity (actor_id is
+    // derived from the registered name under H4).
+    const owner = await connect(actorId);
 
-    const res = await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
+    const res = await registerActor(owner, "wake_if_offline", sleeperLaunch());
     expect(res.data.status).toBe("ok");
+    expect(res.data.record.profile.actor_id).toBe(actorId); // derived, not caller-supplied
     expect(res.data.record.profile.activation_policy.mode).toBe("wake_if_offline");
     expect(res.data.record.launch.command).toBe(process.execPath);
 
+    await takeOffline(owner); // no live session -> offline_launchable
     const status = await owner.call("actor_status", { actor_id: actorId });
     expect(status.data.status).toBe("ok");
     expect(status.data.actor_id).toBe(actorId);
@@ -195,36 +218,41 @@ describe("actor registration & directory (wire)", () => {
   });
 
   it("rejects wake_if_offline without launch (invalid_launch_contract); accepts store_only without launch", async () => {
-    const owner = await connect(uniq("reg-pol-owner"));
-
-    const noLaunch = await registerActor(owner, uniq("reg-pol-nolaunch"), "wake_if_offline");
+    const noLaunchOwner = await connect(uniq("reg-pol-nolaunch"));
+    const noLaunch = await registerActor(noLaunchOwner, "wake_if_offline");
     expect(noLaunch.isError).toBe(true);
     expect(noLaunch.data.status).toBe("error");
     expect(noLaunch.data.error.code).toBe("invalid_launch_contract");
 
-    const store = await registerActor(owner, uniq("reg-pol-store"), "store_only");
+    const storeOwner = await connect(uniq("reg-pol-store"));
+    const store = await registerActor(storeOwner, "store_only");
     expect(store.data.status).toBe("ok");
+    expect(store.data.record.profile.actor_id).toBe(storeOwner.name); // derived
     expect(store.data.record.profile.activation_policy.mode).toBe("store_only");
     // Accepted and persisted. (Offline with a not_runnable contract classifies
     // as unavailable, which the B-7 test covers; here we only assert admission.)
   });
 
   it("cross-session re-register of the same actor_id is actor_owned_elsewhere; same-session update is ok", async () => {
-    const ownerA = await connect(uniq("own-a"));
-    const ownerB = await connect(uniq("own-b"));
+    // Both sessions register under the SAME actor identity; the directory
+    // ownership is session-scoped, so a second session is foreign to the
+    // existing profile regardless of sharing the actor name.
     const actorId = uniq("owned-act");
+    const ownerA = await connect(actorId);
+    const ownerB = await connect(actorId);
 
-    const first = await registerActor(ownerA, actorId, "store_only");
+    const first = await registerActor(ownerA, "store_only");
     expect(first.data.status).toBe("ok");
     const firstRecord = first.data.record.registered_by;
 
-    // A foreign session may not re-register / take over the profile.
-    const foreign = await registerActor(ownerB, actorId, "store_only");
+    // A foreign (differently-sessioned) registration may not re-register / take
+    // over the profile, even when it shares the actor name.
+    const foreign = await registerActor(ownerB, "store_only");
     expect(foreign.isError).toBe(true);
     expect(foreign.data.error.code).toBe("actor_owned_elsewhere");
 
     // The owning session may update it (here: flip policy to wake_if_offline).
-    const update = await registerActor(ownerA, actorId, "wake_if_offline", sleeperLaunch());
+    const update = await registerActor(ownerA, "wake_if_offline", sleeperLaunch());
     expect(update.data.status).toBe("ok");
     expect(update.data.record.profile.activation_policy.mode).toBe("wake_if_offline");
     expect(update.data.record.registered_by).toBe(firstRecord);
@@ -244,9 +272,10 @@ describe("actor registration & directory (wire)", () => {
 // ---------------------------------------------------------------------------
 describe("actor presence states (via actor_status)", () => {
   it("offline_launchable: wake_if_offline + runnable contract + no session + no wake lease", async () => {
-    const owner = await connect(uniq("pres-launch-owner"));
     const actorId = uniq("pres-launch-act");
-    await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
+    const owner = await connect(actorId);
+    await registerActor(owner, "wake_if_offline", sleeperLaunch());
+    await takeOffline(owner); // no live session under the actor identity
 
     const status = await owner.call("actor_status", { actor_id: actorId });
     expect(status.data).toMatchObject({
@@ -259,11 +288,12 @@ describe("actor presence states (via actor_status)", () => {
   });
 
   it("offline_store_only: store_only + runnable contact + no session", async () => {
-    const owner = await connect(uniq("pres-store-owner"));
     const actorId = uniq("pres-store-act");
+    const owner = await connect(actorId);
     // store_only with a launch contract that happens to be runnable still
     // classifies as offline_store_only while offline.
-    await registerActor(owner, actorId, "store_only", sleeperLaunch());
+    await registerActor(owner, "store_only", sleeperLaunch());
+    await takeOffline(owner);
 
     const status = await owner.call("actor_status", { actor_id: actorId });
     expect(status.data).toMatchObject({
@@ -275,14 +305,15 @@ describe("actor presence states (via actor_status)", () => {
   });
 
   it("unavailable: wake_if_offline actor whose launch contract is not runnable (launch:null via direct db15)", async () => {
-    const owner = await connect(uniq("pres-unavail-owner"));
     const actorId = uniq("pres-unavail-act");
+    const owner = await connect(actorId);
     // Register a valid wake_if_offline actor over the wire first (the tool
     // layer rejects a null launch for wake_if_offline), then set launch:null
     // directly on db15 so contractReadiness flips to not_runnable. This is the
     // explicitly-authorized direct-manipulation path for an input the schema
     // will not admit through the tool.
-    await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
+    await registerActor(owner, "wake_if_offline", sleeperLaunch());
+    await takeOffline(owner); // actor must be offline to classify unavailable
     // Overwrite the stored record with `launch: null` directly on db15.
     await ctx.redis.hset(
       ACTOR_KEYS.profiles,
@@ -297,9 +328,10 @@ describe("actor presence states (via actor_status)", () => {
   });
 
   it("starting: outstanding wake lease with no session (acquired direct on db15)", async () => {
-    const owner = await connect(uniq("pres-start-owner"));
     const actorId = uniq("pres-start-act");
-    await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
+    const owner = await connect(actorId);
+    await registerActor(owner, "wake_if_offline", sleeperLaunch());
+    await takeOffline(owner); // no live session -> only the lease drives presence
 
     const store = new WakeLeaseStore(ctx.redis);
     const acquired = await store.acquire({
@@ -320,25 +352,24 @@ describe("actor presence states (via actor_status)", () => {
   });
 
   it("idle: live session under the actor name + no outstanding claim", async () => {
-    const owner = await connect(uniq("pres-idle-owner"));
     const actorId = uniq("pres-idle-act");
-    await registerActor(owner, actorId, "store_only");
-    const runtime = await connect(actorId); // live session under the actor name
+    const owner = await connect(actorId); // living session IS the runtime
+    await registerActor(owner, "store_only");
 
     const status = await owner.call("actor_status", { actor_id: actorId });
     expect(status.data.presence).toBe("idle");
     expect(status.data.runtime).toMatchObject({
-      session_id: runtime.sessionId,
+      session_id: owner.sessionId,
       workload: "idle",
     });
   });
 
   it("active: live session + outstanding unacked claim -> processing", async () => {
-    const owner = await connect(uniq("pres-active-owner"));
     const actorId = uniq("pres-active-act");
+    const owner = await connect(actorId); // owner IS the actor's runtime session
     const sender = await connect(uniq("pres-active-src"));
-    await registerActor(owner, actorId, "store_only");
-    const runtime = await connect(actorId);
+    await registerActor(owner, "store_only");
+    const runtime = owner;
 
     await sender.call("send_message", {
       session_id: sender.sessionId,
@@ -371,10 +402,10 @@ describe("actor presence states (via actor_status)", () => {
   });
 
   it("precedence: live session + outstanding wake lease -> leased runtime wins (idle, not starting)", async () => {
-    const owner = await connect(uniq("pres-prec-owner"));
     const actorId = uniq("pres-prec-act");
-    await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
-    const runtime = await connect(actorId); // live session first
+    const owner = await connect(actorId); // owner IS the live runtime session
+    await registerActor(owner, "wake_if_offline", sleeperLaunch());
+    const runtime = owner;
 
     // A wake lease exists (in-flight activation), but the live leased runtime
     // outranks it in classification.
@@ -399,10 +430,11 @@ describe("actor presence states (via actor_status)", () => {
 // ---------------------------------------------------------------------------
 describe("wake-on-send lifecycle (real spawns)", () => {
   it("offline wake_if_offline: other agent send dispatches a live pid, leases on db15, actor starting", async () => {
-    const owner = await connect(uniq("wake-disp-owner"));
-    const sender = await connect(uniq("wake-disp-src"));
     const actorId = uniq("wake-disp-act");
-    await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
+    const owner = await connect(actorId);
+    const sender = await connect(uniq("wake-disp-src"));
+    await registerActor(owner, "wake_if_offline", sleeperLaunch());
+    await takeOffline(owner); // actor offline so wake dispatches
 
     const sent = await sendAndTrack(sender, actorId, "wake the actor");
     expect(sent.wake?.status).toBe("wake_dispatched");
@@ -427,10 +459,11 @@ describe("wake-on-send lifecycle (real spawns)", () => {
   });
 
   it("runtime_ready clears the wake lease; claimable -> active -> ack -> idle", async () => {
-    const owner = await connect(uniq("wake-ready-owner"));
-    const sender = await connect(uniq("wake-ready-src"));
     const actorId = uniq("wake-ready-act");
-    await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
+    const owner = await connect(actorId);
+    const sender = await connect(uniq("wake-ready-src"));
+    await registerActor(owner, "wake_if_offline", sleeperLaunch());
+    await takeOffline(owner); // actor offline so wake dispatches
 
     const sent = await sendAndTrack(sender, actorId, "wake then claim");
     expect(sent.wake?.status).toBe("wake_dispatched");
@@ -464,11 +497,12 @@ describe("wake-on-send lifecycle (real spawns)", () => {
   });
 
   it("coalescing: second send while first lease outstanding -> wake_coalesced same lease, exactly one child", async () => {
-    const owner = await connect(uniq("wake-coal-owner"));
+    const actorId = uniq("wake-coal-act");
+    const owner = await connect(actorId);
     const s1 = await connect(uniq("wake-coal-s1"));
     const s2 = await connect(uniq("wake-coal-s2"));
-    const actorId = uniq("wake-coal-act");
-    await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
+    await registerActor(owner, "wake_if_offline", sleeperLaunch());
+    await takeOffline(owner); // actor offline so the first send wakes
 
     const first = await sendAndTrack(s1, actorId, "first wake");
     expect(first.wake?.status).toBe("wake_dispatched");
@@ -488,11 +522,12 @@ describe("wake-on-send lifecycle (real spawns)", () => {
   });
 
   it("launch_failed: send succeeds, TTL expires back to offline, a fresh send re-dispatches a new lease", async () => {
-    const owner = await connect(uniq("wake-fail-owner"));
-    const sender = await connect(uniq("wake-fail-src"));
     const actorId = uniq("wake-fail-act");
+    const owner = await connect(actorId);
+    const sender = await connect(uniq("wake-fail-src"));
     // Register against a binary that cannot exist -> dispatch fails.
-    await registerActor(owner, actorId, "wake_if_offline", deadLaunch());
+    await registerActor(owner, "wake_if_offline", deadLaunch());
+    await takeOffline(owner);
 
     const sent = await sendAndTrack(sender, actorId, "will not launch");
     expect(sent.wake?.status).toBe("launch_failed");
@@ -508,10 +543,16 @@ describe("wake-on-send lifecycle (real spawns)", () => {
     expect(offline.data.presence).toBe("offline_launchable");
     expect(await ctx.redis.exists(WAKE_LEASE_KEYS.lease(actorId))).toBe(0);
 
-    // Same owning session repairs the launch contract, then a fresh send
+    // The owning session is offline (closed to permit wake), so it cannot issue
+    // a further actor_register repair. Apply the runnable launch directly on
+    // db15 (the explicitly-authorized manipulation seam, as in the unavailable
+    // test) so the actor returns to runnable/offline, then a fresh send
     // re-dispatches with a NEW lease id.
-    const repaired = await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
-    expect(repaired.data.status).toBe("ok");
+    await ctx.redis.hset(
+      ACTOR_KEYS.profiles,
+      actorId,
+      JSON.stringify(actorDirRecord(actorId, owner.sessionId))
+    );
     const again = await sendAndTrack(sender, actorId, "now it launches");
     expect(again.wake?.status).toBe("wake_dispatched");
     expect(again.wake?.lease_id).not.toBe(sent.wake!.lease_id);
@@ -519,10 +560,11 @@ describe("wake-on-send lifecycle (real spawns)", () => {
   });
 
   it("dead-pid reconciliation: lease cleared, presence offline (not starting), fresh send re-dispatches", async () => {
-    const owner = await connect(uniq("wake-dead-owner"));
-    const sender = await connect(uniq("wake-dead-src"));
     const actorId = uniq("wake-dead-act");
-    await registerActor(owner, actorId, "wake_if_offline", sleeperLaunch());
+    const owner = await connect(actorId);
+    const sender = await connect(uniq("wake-dead-src"));
+    await registerActor(owner, "wake_if_offline", sleeperLaunch());
+    await takeOffline(owner);
 
     // Acquire a wake lease pinned to a spawned short-lived process that exits.
     const dead = spawn(process.execPath, ["-e", "process.exit(0)"]);
@@ -565,10 +607,11 @@ describe("wake-on-send lifecycle (real spawns)", () => {
   });
 
   it("store_only actor: no wake payload, no wake lease key; message waits in inbox", async () => {
-    const owner = await connect(uniq("wake-store-owner"));
-    const sender = await connect(uniq("wake-store-src"));
     const actorId = uniq("wake-store-act");
-    await registerActor(owner, actorId, "store_only");
+    const owner = await connect(actorId);
+    const sender = await connect(uniq("wake-store-src"));
+    await registerActor(owner, "store_only");
+    await takeOffline(owner);
 
     const sent = await sendAndTrack(sender, actorId, "just store it");
     expect(sent.wake).toBeUndefined();
@@ -600,11 +643,11 @@ describe("wake-on-send lifecycle (real spawns)", () => {
 // ---------------------------------------------------------------------------
 describe("worktree custody vs actor presence (orthogonal planes)", () => {
   it("a durable actor session can hold custody of a worktree without affecting its presence", async () => {
-    const owner = await connect(uniq("custx-owner"));
     const actorId = uniq("custx-act");
+    const owner = await connect(actorId); // the actor's session claims + holds the worktree
     const ws = `/worktrees/ws-${uniq("one")}`;
-    await registerActor(owner, actorId, "store_only");
-    const runtime = await connect(actorId); // the actor's session claims the worktree
+    await registerActor(owner, "store_only");
+    const runtime = owner;
 
     const claim = await runtime.call("custody_claim", {
       session_id: runtime.sessionId,
@@ -652,6 +695,82 @@ describe("PTY & shell-hook prompt injection regression", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// F. Launch allowlist & identity policy (wire)
+// ---------------------------------------------------------------------------
+describe("launch allowlist & identity policy (wire)", () => {
+  it("rejects a wake_if_offline actor whose command is not allowlisted (launch_not_allowlisted)", async () => {
+    const owner = await connect(uniq("pol-notallow-owner"));
+    const res = await owner.call("actor_register", {
+      session_id: owner.sessionId,
+      alias: "notallowed",
+      activation_policy_mode: "wake_if_offline",
+      max_concurrency: 1,
+      launch_command: "/usr/bin/env",
+      launch_args: [],
+    });
+    expect(res.isError).toBe(true);
+    expect(res.data.error.code).toBe("launch_not_allowlisted");
+    expect(res.data.error.message).toMatch(/allowlist/);
+  });
+
+  it("rejects a shell delegator even though it is a delegator (launch_command_rejected)", async () => {
+    const owner = await connect(uniq("pol-shell-owner"));
+    const res = await owner.call("actor_register", {
+      session_id: owner.sessionId,
+      alias: "shellac",
+      activation_policy_mode: "wake_if_offline",
+      max_concurrency: 1,
+      launch_command: "/bin/sh",
+      launch_args: ["-c", "echo pwned"],
+    });
+    expect(res.isError).toBe(true);
+    expect(res.data.error.code).toBe("launch_command_rejected");
+  });
+
+  it("confines launch_cwd to the server workspace (outside rejected, inside ok)", async () => {
+    const owner = await connect(uniq("pol-cwd-owner"));
+    const outsideRes = await owner.call("actor_register", {
+      session_id: owner.sessionId,
+      alias: "cwdout",
+      activation_policy_mode: "wake_if_offline",
+      max_concurrency: 1,
+      launch_command: process.execPath,
+      launch_args: ["-e", "process.exit(0)"],
+      launch_cwd: join(tmpdir(), "gptqueue-outside-ws"),
+    });
+    expect(outsideRes.isError).toBe(true);
+    expect(outsideRes.data.error.code).toBe("launch_cwd_confined");
+
+    // An existing directory inside the workspace is accepted (and, being an
+    // allowlisted process.execPath command, registers cleanly).
+    const insideRes = await owner.call("actor_register", {
+      session_id: owner.sessionId,
+      alias: "cwdinside",
+      activation_policy_mode: "wake_if_offline",
+      max_concurrency: 1,
+      launch_command: process.execPath,
+      launch_args: ["-e", "process.exit(0)"],
+      launch_cwd: process.cwd(),
+    });
+    expect(insideRes.data.status).toBe("ok");
+  });
+
+  it("rejects a derived actor_id outside the identity charset over the wire (invalid_identity_charset)", async () => {
+    // actor_id is now DERIVED from the registered name (H4); register a name
+    // containing a space so the derived identity violates the charset.
+    const owner = await connect(uniq("pol-ident-act") + " ");
+    const res = await owner.call("actor_register", {
+      session_id: owner.sessionId,
+      alias: "ok-alias",
+      activation_policy_mode: "store_only",
+      max_concurrency: 1,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.data.error.code).toBe("invalid_identity_charset");
+  });
+});
+
 /**
  * Reconstruct a minimal actor-directory record for a registered actor so a
  * test may craft a legacy/inconsistent variant (e.g. `launch: null` for a
@@ -665,7 +784,6 @@ function actorDirRecord(actorId: string, registeredBy: string) {
       capabilities: [],
       workspace_root: process.cwd(),
       working_directory: process.cwd(),
-      state_directory: `${process.cwd()}/.gptq/actors/${actorId}/state`,
       runtime: "manual",
       activation_policy: { mode: "wake_if_offline" },
       max_concurrency: 1,

@@ -24,7 +24,15 @@ if [ -n "$OLD_PID" ]; then
 fi
 
 echo "[install] starting gptqueue-http on port $PORT..."
+# GPTQUEUE_HOST and GPTQUEUE_HTTP_TOKEN are inherited from the caller's
+# environment (nothing sanitizes them), but we forward them explicitly so the
+# security controls honored by dist/transports/http.js survive this nohup
+# wrapper untouched. Empty values forward as empty strings, which the server
+# treats as "not configured" (loopback bind / no token).
 REDIS_URL="${GPTQUEUE_REDIS_URL:-redis://127.0.0.1:6379}" \
+GPTQUEUE_HOST="${GPTQUEUE_HOST:-}" \
+GPTQUEUE_HTTP_TOKEN=\
+"${GPTQUEUE_HTTP_TOKEN:-}" \
   nohup node dist/transports/http.js --port "$PORT" >> "$LOG" 2>&1 &
 NEW_PID=$!
 disown || true

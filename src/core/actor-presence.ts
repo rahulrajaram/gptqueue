@@ -31,7 +31,6 @@ export interface DurableActorProfile {
   readonly capabilities: readonly string[];
   readonly workspace_root: string;
   readonly working_directory: string;
-  readonly state_directory: string;
   /** Isolated state for one incarnation; created per activation. */
   readonly run_directory?: string;
   /** Approved adapter and launch profile name. */
@@ -98,6 +97,7 @@ export type ProfileAdmission =
       error: Readonly<{
         code:
           | "invalid_identity"
+          | "invalid_identity_charset"
           | "invalid_policy"
           | "invalid_concurrency";
         message: string;
@@ -206,6 +206,13 @@ const isActivationPolicyMode = (value: unknown): value is ActivationPolicyMode =
   value === "wake_if_offline" || value === "store_only";
 
 /**
+ * Identity charset for actor_id/alias (review M2): letters, digits, dot,
+ * underscore, hyphen, 1..64 chars. Prevents a caller from embedding path or
+ * injection-special characters into a durable identity.
+ */
+const IDENTITY_CHARSET = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
  * Admit and deeply freeze a durable actor profile. Pure validation only;
  * it performs no registration, Redis, or filesystem work.
  */
@@ -227,6 +234,26 @@ export const admitActorProfile = (
       error: Object.freeze({
         code: "invalid_identity",
         message: "alias must be a non-empty address",
+      }),
+    });
+  }
+  if (!IDENTITY_CHARSET.test(candidate.actor_id)) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: "invalid_identity_charset",
+        message:
+          "actor_id must match /^[A-Za-z0-9._-]{1,64}$/ (letters, digits, '.', '_', '-'; 1..64 chars)",
+      }),
+    });
+  }
+  if (!IDENTITY_CHARSET.test(candidate.alias)) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: "invalid_identity_charset",
+        message:
+          "alias must match /^[A-Za-z0-9._-]{1,64}$/ (letters, digits, '.', '_', '-'; 1..64 chars)",
       }),
     });
   }

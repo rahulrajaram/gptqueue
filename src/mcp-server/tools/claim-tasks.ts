@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
 import { ensureSessionBinding } from "./session-binding.js";
 import { claimTasksResult } from "./task-claim-result.js";
+import { toolResult } from "../tool-result.js";
 
 export const claimTasksSchema = z.object({
   session_id: z
@@ -62,6 +63,24 @@ export async function claimTasks(
   let max_concurrent_claims: number | undefined;
   const dir = await client.actorDirectory.get(actor_id);
   if (dir.ok && dir.record !== null) {
+    // H4 invariant guard: a durable directory record, if present for the
+    // caller's name, must carry the SAME actor_id as the caller name. Since
+    // actor_register derives actor_id from the registered name, a mismatch
+    // is impossible by construction; this is a defensive assertion that fails
+    // closed (no claim issued) rather than silently operating under a bruised
+    // identity binding.
+    if (dir.record.profile.actor_id !== actor_id) {
+      return toolResult(
+        {
+          status: "error",
+          error: {
+            code: "identity_mismatch",
+            message: `directory record for '${actor_id}' carries actor_id '${dir.record.profile.actor_id}'; refusing to claim under a mismatched identity`,
+          },
+        },
+        true
+      );
+    }
     max_concurrent_claims = dir.record.profile.max_concurrency;
   }
 

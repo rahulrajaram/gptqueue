@@ -23,6 +23,7 @@ import {
   type DurableActorProfile,
   type LaunchContractReadiness,
 } from "./actor-presence.js";
+import { evaluateLaunchPolicy } from "./launch-policy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
@@ -50,9 +51,13 @@ export interface ActorDirectoryRecord {
 
 export type ActorDirectoryErrorCode =
   | "invalid_identity"
+  | "invalid_identity_charset"
   | "invalid_policy"
   | "invalid_concurrency"
   | "invalid_launch_contract"
+  | "launch_command_rejected"
+  | "launch_not_allowlisted"
+  | "launch_cwd_confined"
   | "actor_owned_elsewhere"
   | "store_corrupt";
 
@@ -134,9 +139,12 @@ export class ActorDirectory {
   /**
    * Register (or re-register/update) a durable actor profile. Admission runs
    * first and its error codes propagate unchanged. A `wake_if_offline` actor
-   * must carry a runnable launch contract. Ownership is session-scoped: a
-   * foreign session that did not register the actor is rejected as
-   * `actor_owned_elsewhere`.
+   * must carry a runnable launch contract, and its launch contract must pass
+   * the operator launch policy (allowlist + cwd confinement) before it is
+   * persisted — enforcement happens again at dispatch so a stale record
+   * cannot spawn what the operator has since disallowed. Ownership is
+   * session-scoped: a foreign session that did not register the actor is
+   * rejected as `actor_owned_elsewhere`.
    */
   async register(input: ActorRegisterInput): Promise<ActorDirectoryResult> {
     const admission = admitActorProfile(
@@ -152,6 +160,20 @@ export class ActorDirectory {
         "invalid_launch_contract",
         "a wake_if_offline actor requires a launch contract with a non-empty command and string[] args"
       );
+    }
+
+    // Operator launch policy gates NEW wake_if_offline registrations
+    // (fail-closed when the allowlist is absent/unparseable). store_only
+    // actors are never dispatched, so their (inert, metadata-only) launch
+    // contracts are not policy-evaluated here.
+    if (
+      profile.activation_policy.mode === "wake_if_offline" &&
+      input.launch !== null
+    ) {
+      const policy = await evaluateLaunchPolicy(input.launch);
+      if (!policy.ok) {
+        return fail(policy.error.code, policy.error.message);
+      }
     }
 
     const record: ActorDirectoryRecord = Object.freeze({

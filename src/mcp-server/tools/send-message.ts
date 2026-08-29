@@ -238,11 +238,73 @@ async function maybeWake(
   }
 }
 
+/**
+ * Frozen typed error result for an unresolvable recipient. Shape matches the
+ * repo's typed-tool-error convention (`status`/`error`/`isError`), consistent
+ * with QUEUE_FULL and the durable-actor gate errors.
+ */
+function unknownRecipient(to: string) {
+  return Object.freeze(
+    toolResult(
+      {
+        status: "error",
+        error: {
+          code: "unknown_recipient",
+          message: `recipient '${to}' is not a registered agent or durable actor; no mailbox or queue data was created`,
+        },
+        to,
+      },
+      true
+    )
+  );
+}
+
+/**
+ * Resolve-then-push recipient validation (review-mandated H3): BEFORE any
+ * mailbox push, resolve `to` as (a) a durable actor-directory record, or
+ * (b) a REGISTERED agent via the canonical registry. Anything else is an
+ * unknown recipient and is rejected with a frozen typed error WITHOUT
+ * creating any queue (`gptq:q:<to>`) or metadata (`gptq:meta:<to>`) keys.
+ */
+async function resolveRecipient(
+  client: RedisClient,
+  to: string
+): Promise<{ ok: true } | { ok: false; error: { code: string; message: string } }> {
+  const dir = await client.actorDirectory.get(to);
+  if (!dir.ok) {
+    // Fail closed on a corrupt/unreadable directory: do not create keys.
+    return { ok: false, error: { code: dir.error.code, message: dir.error.message } };
+  }
+  if (dir.record !== null) {
+    return { ok: true }; // durable actor path
+  }
+  const registered = await client.sessions.resolveRegistered(to);
+  if (registered) {
+    return { ok: true }; // registered (plain) agent path
+  }
+  return { ok: false, error: { code: "unknown_recipient", message: "" } };
+}
+
 export async function sendMessage(
   client: RedisClient,
   params: z.infer<typeof sendMessageSchema>
 ) {
   await ensureSessionBinding(client, params.session_id);
+
+  const resolved = await resolveRecipient(client, params.to);
+  if (!resolved.ok) {
+    if (resolved.error.code === "unknown_recipient") {
+      return unknownRecipient(params.to);
+    }
+    return toolResult(
+      {
+        status: "error",
+        error: { code: resolved.error.code, message: resolved.error.message },
+        to: params.to,
+      },
+      true
+    );
+  }
 
   const message: QueueMessage = {
     id: uuidv4(),
