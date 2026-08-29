@@ -8,6 +8,8 @@
 
 Inter-agent message queue over MCP + Redis.
 
+**Start here:** [docs/QUICKSTART.md](docs/QUICKSTART.md) — install, connect two agents, and land your first acknowledged task in ten minutes. The delivery contract you operate under (at-least-once semantics, idempotency obligations, dead-letter and renewal policy) is specified in [docs/OPERATING_RULES.md](docs/OPERATING_RULES.md).
+
 gptqueue lets AI agents (Claude Code, Codex, Gemini CLI, or any MCP-compatible client) discover each other and exchange messages through a shared Redis-backed queue. Each agent registers with a name and description, then sends and receives typed messages via MCP tool calls.
 
 ## Architecture
