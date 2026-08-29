@@ -124,4 +124,61 @@ describe("Session-scoped tools across fresh clients", () => {
     await sender.shutdown();
     await receiver.shutdown();
   });
+
+  it("rejects receive_message for a durable actor without popping its inbox", async () => {
+    const actorName = "durable-receiver";
+    const sender = new RedisClient(null, TEST_REDIS_URL);
+    const receiver = new RedisClient(null, TEST_REDIS_URL);
+
+    await sender.register("publisher", "durable-sender", "sends to a durable actor");
+    const reg = await receiver.register("consumer", actorName, "durable actor");
+
+    // Admit a store_only durable actor record (never wakes, so send is side-effect free).
+    const dirResult = await receiver.actorDirectory.register({
+      profile_input: {
+        actor_id: actorName,
+        alias: actorName,
+        capabilities: [],
+        workspace_root: "/workspace",
+        working_directory: "/workspace",
+        state_directory: `/state/${actorName}`,
+        runtime: "node",
+        activation_policy: { mode: "store_only" },
+        max_concurrency: 1,
+      },
+      registered_by: reg.session_id,
+      registered_at: new Date().toISOString(),
+      launch: null,
+    });
+    expect(dirResult.ok).toBe(true);
+
+    await sender.sendMessage({
+      id: "durable-1",
+      from: "durable-sender",
+      to: actorName,
+      timestamp: new Date().toISOString(),
+      type: "task",
+      payload: { content: "for the durable actor" },
+    });
+
+    const before = await receiver.getQueueDepth();
+    expect(before).toBe(1);
+
+    const result = await receiveMessage(
+      receiver,
+      receiveMessageSchema.parse({ timeout: 1 })
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      status: "error",
+      error: { code: "durable_actor_claim_required" },
+    });
+
+    // The legacy destructive pop must NOT have consumed the message.
+    expect(await receiver.getQueueDepth()).toBe(before);
+    expect(await receiver.getQueueDepth()).toBe(1);
+
+    await sender.shutdown();
+    await receiver.shutdown();
+  });
 });
