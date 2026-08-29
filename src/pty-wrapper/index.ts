@@ -78,7 +78,7 @@ watcher.on("message", (count: number) => {
   pendingInjection = true;
 
   const inject = () => {
-    const prompt = `\nYou have ${count} pending message(s) in your GPTQueue inbox. Call the receive_message tool to process them.\n`;
+    const prompt = `\nYou have ${count} pending message(s) in your GPTQueue inbox. Call claim_tasks to claim a batch (optional max_batch and ttl_seconds), process the tasks, then acknowledge them with acknowledge_tasks (claim_id).\n`;
     ptyProcess.write(prompt);
     pendingInjection = false;
   };

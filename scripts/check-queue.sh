@@ -44,7 +44,7 @@ EOF
       cat <<EOF
 {
   "decision": "block",
-  "additionalContext": "IMPORTANT: You have ${COUNT} pending message(s) in your GPTQueue inbox. Call the receive_message tool NOW to process them. Do not stop until all messages are handled."
+  "additionalContext": "IMPORTANT: You have ${COUNT} pending message(s) in your GPTQueue inbox. Call claim_tasks to claim a batch (optional max_batch and ttl_seconds), process the tasks, then acknowledge them with acknowledge_tasks (claim_id). Do not stop until all messages are handled."
 }
 EOF
     else

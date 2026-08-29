@@ -48,7 +48,7 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 |---|---|
 | `register_agent` | Register with a name, role, and description. Returns a `session_id` for session resumption |
 | `send_message` | Send a typed message (`task`/`result`/`status`/`error`/`ping`) to another agent's inbox. Supports optional `metadata`, `in_reply_to`, `session_id`, and a caller `idempotency_key` (retained for 24 hours) for retry-safe delivery. For `wake_if_offline` durable-actor recipients whose runtime is offline, the message is persisted first and an additive `wake` field on the result reports whether the actor's runtime was dispatched (`wake_dispatched`), coalesced onto an in-flight wake (`wake_coalesced`), or failed to launch (`launch_failed`) |
-| `receive_message` | Blocking pop from your inbox (default timeout: 5s; accepted range: 0–60 whole seconds). Supports optional `session_id` for stateless transports |
+| `receive_message` | Blocking pop from your inbox (default timeout: 5s; accepted range: 0–60 whole seconds). Supports optional `session_id` for stateless transports. Plain agents (no actor-directory record) keep this legacy at-most-once `BLPOP`. Durable actors (those with an actor-directory record) are rejected with a structured `durable_actor_claim_required` error and must consume their inbox via `claim_tasks`/`acknowledge_tasks` instead |
 | `list_agents` | Discover all registered agents with online/offline status |
 | `get_queue_status` | Check queue depth and capacity for one or all agents |
 | `close_session` | Close the current session but preserve the mailbox. Messages remain queued for later reconnection. Supports optional `session_id` for stateless transports |
@@ -182,6 +182,11 @@ The PTY wrapper lets you run any CLI (e.g. `claude`, `codex`) inside a PTY that 
 gptqueue-pty --agent alice --cmd claude
 ```
 
+When a woken agent has pending messages, the injected prompt instructs it to
+consume via `claim_tasks` (optional `max_batch`, `ttl_seconds`) and confirm
+with `acknowledge_tasks` (`claim_id`) rather than `receive_message`, so a
+durable actor woken through the PTY consumes its batch at-least-once.
+
 ## How it works
 
 1. **Registration** -- An agent calls `register_agent` with a name, role, and description. This creates a Redis-backed session with a TTL lease and returns a `session_id`.
@@ -196,7 +201,7 @@ gptqueue-pty --agent alice --cmd claude
 
    **Pid-liveness reconciliation.** When a wake lease records a `spawned_pid` and the launched runtime never registers (no live session), the actor would otherwise stay pinned in `starting` until the lease TTL lapses. Presence assembly (both `actor_status` and `send_message`'s wake gate) reconciles this observationally: if the lease's spawned process is no longer alive, the lease is cleared as a failed activation, so the actor returns to offline and re-wake becomes possible. A live or un-probed (no pid) lease is retained and reported as `starting`; `actor_status`'s `wake_lease` payload includes an additive `pid_liveness` of `alive`/`dead`/`unknown`.
 
-5. **Receiving** -- `receive_message` does a blocking pop (`BLPOP`) with a configurable timeout.
+5. **Receiving** -- `receive_message` does a blocking pop (`BLPOP`) with a configurable timeout. For plain agents (no durable actor-directory record) this is unchanged. A durable actor (one with an actor-directory record) is refused with a `durable_actor_claim_required` error and must consume at-least-once via `claim_tasks` (returns a `claim_id`) then `acknowledge_tasks` (`claim_id`) instead, so the legacy destructive pop never silently drops a durable actor's message.
 
 6. **Session close** -- `close_session` drops the live session but preserves the mailbox. Queued messages remain available for a future session.
 
