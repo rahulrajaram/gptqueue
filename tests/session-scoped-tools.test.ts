@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import {
   registerAgent,
@@ -14,12 +15,8 @@ import {
   receiveMessageSchema,
 } from "../src/mcp-server/tools/receive-message.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
-async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
-}
 
 function parseTextPayload(result: {
   content: readonly { type: "text"; text: string }[];
@@ -32,11 +29,11 @@ describe("Session-scoped tools across fresh clients", () => {
 
   beforeEach(async () => {
     cleanup = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(cleanup);
+    await flushTestKeys(cleanup, TEST_REDIS_URL);
   });
 
   afterEach(async () => {
-    await flushTestKeys(cleanup);
+    await flushTestKeys(cleanup, TEST_REDIS_URL);
     await cleanup.quit();
   });
 

@@ -1,13 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
-async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
-}
 
 /**
  * Multi-session policy (NXT-020):
@@ -21,11 +18,11 @@ describe("Multi-session policy (NXT-020)", () => {
 
   beforeEach(async () => {
     cleanup = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(cleanup);
+    await flushTestKeys(cleanup, TEST_REDIS_URL);
   });
 
   afterEach(async () => {
-    await flushTestKeys(cleanup);
+    await flushTestKeys(cleanup, TEST_REDIS_URL);
     await cleanup.quit();
   });
 

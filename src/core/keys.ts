@@ -1,16 +1,7 @@
 /**
- * Redis key schema for sessions, mailboxes, and leases.
- *
- * New session-aware keys coexist with legacy keys during migration.
+ * Redis key schema for sessions, mailboxes, and leases. This is the single
+ * source of truth for every `gptq:*` key string (and the mailbox size bound).
  */
-
-/** Legacy keys (kept for backward compatibility during transition). */
-export const LEGACY_KEYS = {
-  registry: "gptq:registry",
-  queue: (agent: string) => `gptq:q:${agent}`,
-  meta: (agent: string) => `gptq:meta:${agent}`,
-  heartbeat: (agent: string) => `gptq:heartbeat:${agent}`,
-} as const;
 
 /** Session-aware key schema. */
 export const SESSION_KEYS = {
@@ -32,8 +23,11 @@ export const SESSION_KEYS = {
   /** Set of active session IDs for an agent (set). */
   agentSessions: (name: string) => `gptq:agent-sessions:${name}`,
 
-  /** Global agent discovery index (hash, same as legacy registry). */
+  /** Global agent discovery index (hash). */
   registry: "gptq:registry",
+
+  /** TTL-backed legacy liveness heartbeat per agent (string with EX). */
+  heartbeat: (name: string) => `gptq:heartbeat:${name}`,
 
   /** Retry-deduplication namespace; individual keys expire after 24 hours. */
   idempotency: (sender: string) => `gptq:idempotency:${sender}`,

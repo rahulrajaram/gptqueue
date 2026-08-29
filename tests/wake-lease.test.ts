@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import {
   WakeLeaseStore,
   type WakeLeaseAcquireInput,
@@ -17,7 +18,7 @@ import {
   registerAgentSchema,
 } from "../src/mcp-server/tools/register-agent.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
 // wake_if_offline admission now requires an operator allowlist. Scaffold one
 // permitting the test launchers ("/usr/bin/pi") and point GPTQUEUE_LAUNCH_ALLOWLIST
@@ -32,10 +33,6 @@ const allowlist = scaffoldLaunchAllowlist([
 allowlist.set();
 afterAll(() => allowlist.cleanup());
 
-async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
-}
 
 const T0 = "2030-01-01T00:00:00.000Z";
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,12 +53,12 @@ describe("WakeLeaseStore", () => {
 
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     store = new WakeLeaseStore(redis);
   });
 
   afterEach(async () => {
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     await redis.quit();
   });
 
@@ -212,12 +209,12 @@ describe("actor_status presence matrix", () => {
 
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     client = new RedisClient(null, TEST_REDIS_URL);
   });
 
   afterEach(async () => {
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     await client.shutdown();
   });
 

@@ -1,14 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { SessionStore } from "../src/core/session-store.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
-async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
-}
 
 describe("SessionStore", () => {
   let redis: Redis;
@@ -16,13 +13,13 @@ describe("SessionStore", () => {
 
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     store = new SessionStore(redis);
   });
 
   afterEach(async () => {
     store.stopLeaseRefresh();
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     await redis.quit();
   });
 

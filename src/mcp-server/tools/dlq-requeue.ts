@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession } from "./session-binding.js";
 import { dlqRequeueResult } from "./task-claim-result.js";
 
 export const dlqRequeueSchema = z.object({
@@ -28,13 +28,7 @@ export async function dlqRequeue(
   client: RedisClient,
   params: z.infer<typeof dlqRequeueSchema>
 ) {
-  await ensureSessionBinding(client, params.session_id);
-  const actor_id = client.requireRegistered();
-  if (!client.sessionId) {
-    throw new Error(
-      "Session not bound. Call register_agent first with a name and retain the session_id."
-    );
-  }
+  const { agent: actor_id } = await bindSession(client, params.session_id);
 
   const result = await client.taskClaim.requeue({
     actor_id,

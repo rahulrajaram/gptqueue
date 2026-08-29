@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession } from "./session-binding.js";
 import { toolResult } from "../tool-result.js";
 
 export const closeSessionSchema = z.object({
@@ -16,7 +16,10 @@ export async function closeSession(
   client: RedisClient,
   params: z.infer<typeof closeSessionSchema>
 ) {
-  await ensureSessionBinding(client, params.session_id);
+  // bindSession validates that the call is bound to a durable session before
+  // closeCurrentSession tears local state down, so a lost session surfaces the
+  // same SESSION_UNAVAILABLE code as the other session-bound tools.
+  await bindSession(client, params.session_id);
   const name = await client.closeCurrentSession();
   return toolResult({
             status: "session_closed",

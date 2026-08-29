@@ -6,12 +6,15 @@ import { ensureSessionBinding } from "./session-binding.js";
 import { toolResult, type ToolPayload } from "../tool-result.js";
 import {
   classifyPresence,
-  type RuntimeIncarnation,
+  type RuntimePresenceState,
 } from "../../core/actor-presence.js";
+import type { ActorDirectoryRecord } from "../../core/actor-directory.js";
 import type { WakeLease } from "../../core/wake-lease.js";
 import { dispatchLaunch } from "../launcher.js";
-import { workloadForSession } from "./workload-for-session.js";
-import { reconcileWakeLease } from "./reconcile-wake-lease.js";
+import {
+  assemblePresenceInput,
+  type AssembledPresence,
+} from "./presence-input.js";
 
 export const sendMessageSchema = z.object({
   session_id: z
@@ -68,23 +71,180 @@ export type SendWakeResult =
   | Readonly<{ status: "wake_error"; error_message: string }>;
 
 /**
- * Derive a runtime incarnation from a live session and its observed workload.
- * Mirrors actor-status.ts exactly: workload is observation-based (a session
- * holding an unacked claim is "processing"), and the lease id is the session
- * id.
+ * Reject anything that is not a durable `wake_if_offline` actor record.
+ * Presence-gated eligibility: plain agents and store_only actors resolve to
+ * no wake. Returns `{ record }` when the recipient is wake-eligible, else
+ * undefined. Pure policy gate — performs no presence assembly or lease work.
  */
-async function runtimeFromSession(
-  claims: RedisClient["taskClaim"],
-  actorId: string,
-  sessionId: string
-): Promise<RuntimeIncarnation> {
-  const workload = await workloadForSession(claims, actorId, sessionId);
-  return Object.freeze({
-    incarnation_id: sessionId,
-    session_id: sessionId,
-    lease_id: sessionId,
-    workload,
+export async function gateWakeEligibility(
+  client: Pick<RedisClient, "actorDirectory">,
+  to: string
+): Promise<{ readonly record: ActorDirectoryRecord } | undefined> {
+  const dir = await client.actorDirectory.get(to);
+  if (
+    !dir.ok ||
+    dir.record === null ||
+    dir.record.profile.activation_policy.mode !== "wake_if_offline"
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ record: dir.record });
+}
+
+/**
+ * The wake decision for one classified presence state, discriminated so an
+ * unknown presence is a COMPILE error (`assertNever`) rather than a silent
+ * no-wake. A new presence state added to `RuntimePresenceState` must be mapped
+ * here before it can ever be dispatched.
+ */
+export type WakePresenceDecision =
+  | Readonly<{ kind: "no_wake" }>
+  | Readonly<{ kind: "coalesce" }>
+  | Readonly<{ kind: "launch" }>;
+
+const assertNever = (value: never): never => {
+  throw new Error(`Unhandled wake decision: ${JSON.stringify(value)}`);
+};
+
+/**
+ * Map a classified presence state to the wake action. Exhaustive over every
+ * member of `RuntimePresenceState` — the union is the source of the
+ * `default: never` guarantee. `hasWakeLease` drives the starting -> coalesce
+ * vs no-wake split (starting without an observed lease is a degenerate case
+ * that keeps pre-wake behavior).
+ */
+export function wakeDecisionForPresence(
+  presence: RuntimePresenceState,
+  hasWakeLease: boolean
+): WakePresenceDecision {
+  switch (presence) {
+    // Runtime-attached (or offline-but-not-launchable) recipients get no wake.
+    case "active":
+    case "idle":
+    case "offline_store_only":
+    case "unavailable":
+      return Object.freeze({ kind: "no_wake" });
+    // An activation is already in flight; coalesce when a lease is observed.
+    case "starting":
+      return hasWakeLease
+        ? Object.freeze({ kind: "coalesce" })
+        : Object.freeze({ kind: "no_wake" });
+    case "offline_launchable":
+      return Object.freeze({ kind: "launch" });
+    default:
+      return assertNever(presence);
+  }
+}
+
+/** Outcome of the atomic acquire-or-coalesce on the wake lease store. */
+type AcquireOutcome =
+  | Readonly<{ kind: "owned"; lease: WakeLease }>
+  | Readonly<{ kind: "coalesced"; lease_id: string }>
+  | Readonly<{ kind: "error"; error_message: string }>;
+
+/**
+ * Atomically acquire this actor's wake lease, or learn that a concurrent
+ * controller already owns the in-flight activation (coalesce onto it). Never
+ * throws: a store error is returned as `error`.
+ */
+async function acquireOrCoalesce(
+  client: Pick<RedisClient, "wakeLease" | "sessionId">,
+  record: ActorDirectoryRecord
+): Promise<AcquireOutcome> {
+  const acquired = await client.wakeLease.acquire({
+    actor_id: record.profile.actor_id,
+    issued_by_session: client.sessionId ?? "unknown",
+    lease_seconds: WAKE_LEASE_SECONDS,
+    now: new Date().toISOString(),
   });
+  if (!acquired.ok) {
+    return { kind: "error", error_message: acquired.error.message };
+  }
+  if (acquired.coalesced) {
+    return { kind: "coalesced", lease_id: acquired.lease.lease_id };
+  }
+  return { kind: "owned", lease: acquired.lease };
+}
+
+/**
+ * Dispatch the actor's runtime launch now that WE own the lease, attaching
+ * best-effort spawn evidence to it. `launch !== null` is guaranteed for a
+ * `wake_if_offline` record admitted through the tool, but a legacy
+ * inconsistent record (launch:null direct on db) is handled loudly rather
+ * than dispatching a null. Never throws.
+ */
+async function shipLaunch(
+  client: Pick<RedisClient, "wakeLease">,
+  record: ActorDirectoryRecord,
+  lease: WakeLease
+): Promise<
+  | Readonly<{ status: "wake_dispatched"; lease_id: string; pid?: number }>
+  | Readonly<{
+      status: "launch_failed";
+      lease_id: string;
+      error_message: string;
+    }>
+  | Readonly<{ status: "wake_error"; error_message: string }>
+> {
+  if (record.launch === null) {
+    return {
+      status: "wake_error",
+      error_message: "launch contract missing for wake_if_offline actor",
+    };
+  }
+  const launched = await dispatchLaunch(record.launch);
+  if (launched.dispatched) {
+    // Best-effort spawn evidence: record the dispatched pid on the wake lease
+    // so observers (actor_status) can surface it. A failure here must never
+    // affect the send result.
+    if (launched.pid !== undefined) {
+      try {
+        await client.wakeLease.attachSpawn({
+          actor_id: record.profile.actor_id,
+          lease_id: lease.lease_id,
+          pid: launched.pid,
+          spawned_at: new Date().toISOString(),
+        });
+      } catch {
+        // best-effort; launch and send are unaffected
+      }
+    }
+    return {
+      status: "wake_dispatched",
+      lease_id: lease.lease_id,
+      pid: launched.pid,
+    };
+  }
+  // Launch failed; the message is already persisted and recoverable, and the
+  // lease TTL will expire the activation back to offline.
+  return {
+    status: "launch_failed",
+    lease_id: lease.lease_id,
+    error_message:
+      launched.error?.message ?? "launch failed for unknown reason",
+  };
+}
+
+/**
+ * Execute the wake for an `offline_launchable` actor: acquire/coalesce the
+ * lease, then (if we own it) ship the launch. A pure linear composition of
+ * `acquireOrCoalesce` + `shipLaunch`.
+ */
+async function wakeOfflineLaunchable(
+  client: Pick<RedisClient, "wakeLease" | "sessionId">,
+  record: ActorDirectoryRecord
+): Promise<SendWakeResult> {
+  const acquire = await acquireOrCoalesce(client, record);
+  switch (acquire.kind) {
+    case "owned":
+      return shipLaunch(client, record, acquire.lease);
+    case "coalesced":
+      return { status: "wake_coalesced", lease_id: acquire.lease_id };
+    case "error":
+      return { status: "wake_error", error_message: acquire.error_message };
+    default:
+      return assertNever(acquire);
+  }
 }
 
 /**
@@ -92,6 +252,11 @@ async function runtimeFromSession(
  * message persist has been awaited (see the persist-before-wake invariant in
  * sendMessage). Returns the additive `wake` payload, or undefined when the
  * recipient is not wake-eligible or is already active/idle.
+ *
+ * Shallow linear composition: gate eligibility -> assemble presence -> classify
+ * -> dispatch the classified result. Presence dispatch is exhaustively handled
+ * by `wakeDecisionForPresence` (a new presence state is a compile error, never
+ * a silent no-wake).
  *
  * Any unexpected error is caught and surfaced as `status: "wake_error"` so the
  * send itself can never fail because of wake handling.
@@ -101,134 +266,42 @@ async function maybeWake(
   to: string
 ): Promise<SendWakeResult | undefined> {
   try {
-    // Presence-gated: only durable `wake_if_offline` actor records are
-    // wake-eligible. Plain agents and store_only actors resolve to no wake.
-    const dir = await client.actorDirectory.get(to);
-    if (
-      !dir.ok ||
-      dir.record === null ||
-      dir.record.profile.activation_policy.mode !== "wake_if_offline"
-    ) {
-      return undefined;
-    }
-    const record = dir.record;
+    const gate = await gateWakeEligibility(client, to);
+    if (gate === undefined) return undefined;
+    const { record } = gate;
 
-    const launchContract = client.actorDirectory.contractReadiness(record);
-
-    // Assemble presence exactly like actor-status.ts: runtime from live
-    // sessions with workload "idle", plus any outstanding wake lease.
-    let runtime: RuntimeIncarnation | undefined;
-    const presence = await client.sessions.getPresence(record.profile.actor_id);
-    if (presence.online && presence.active_sessions.length > 0) {
-      runtime = await runtimeFromSession(
-        client.taskClaim,
-        record.profile.actor_id,
-        presence.active_sessions[0]!
-      );
-    }
-
-    let wakeLease: WakeLease | null = null;
-    if (runtime === undefined) {
-      // Reconcile the outstanding lease against process liveness before
-      // classifying: a dead-pid lease is a failed activation and is cleared,
-      // so the actor classifies from offline and re-wake becomes possible. A
-      // live/un-probed lease is retained so an in-flight start coalesces.
-      const reconcile = await reconcileWakeLease(client, record.profile.actor_id);
-      if (!reconcile.cleared) {
-        wakeLease = await client.wakeLease.get(record.profile.actor_id);
-      }
-    }
+    // Presence assembly is shared byte-for-byte with actor-status.ts.
+    const presence: AssembledPresence = await assemblePresenceInput(client, record);
 
     const classification = classifyPresence({
       actor: record.profile,
-      launch_contract: launchContract,
-      runtime,
-      ...(wakeLease ? { wake_lease_id: wakeLease.lease_id } : {}),
+      launch_contract: presence.launch_contract,
+      runtime: presence.runtime,
+      ...(presence.wake_lease
+        ? { wake_lease_id: presence.wake_lease.lease_id }
+        : {}),
     });
 
     if (!classification.ok) return undefined;
 
-    switch (classification.presence) {
-      // Runtime-attached (or offline-but-not-launchable) recipients keep
-      // existing behavior: no wake field at all.
-      case "active":
-      case "idle":
-      case "offline_store_only":
-      case "unavailable":
+    const decision = wakeDecisionForPresence(
+      classification.presence,
+      presence.wake_lease !== null
+    );
+    switch (decision.kind) {
+      case "no_wake":
         return undefined;
-
-      // An activation is already in flight for this actor: coalesce onto the
-      // outstanding lease; we must not spawn a second runtime.
-      case "starting":
-        if (wakeLease !== null) {
-          return { status: "wake_coalesced", lease_id: wakeLease.lease_id };
-        }
-        return undefined;
-
-      case "offline_launchable": {
-        const acquired = await client.wakeLease.acquire({
-          actor_id: record.profile.actor_id,
-          issued_by_session: client.sessionId ?? "unknown",
-          lease_seconds: WAKE_LEASE_SECONDS,
-          now: new Date().toISOString(),
-        });
-        if (!acquired.ok) {
-          return {
-            status: "wake_error",
-            error_message: acquired.error.message,
-          };
-        }
-
-        // A concurrent controller already owns the activation in flight.
-        if (acquired.coalesced) {
-          return {
-            status: "wake_coalesced",
-            lease_id: acquired.lease.lease_id,
-          };
-        }
-
-        // We own the new lease: dispatch this actor's runtime launch.
-        if (record.launch === null) {
-          return {
-            status: "wake_error",
-            error_message: "launch contract missing for wake_if_offline actor",
-          };
-        }
-        const launched = await dispatchLaunch(record.launch);
-        if (launched.dispatched) {
-          // Best-effort spawn evidence: record the dispatched pid on the wake
-          // lease so observers (actor_status) can surface it. A failure here
-          // must never affect the send result.
-          if (launched.pid !== undefined) {
-            try {
-              await client.wakeLease.attachSpawn({
-                actor_id: record.profile.actor_id,
-                lease_id: acquired.lease.lease_id,
-                pid: launched.pid,
-                spawned_at: new Date().toISOString(),
-              });
-            } catch {
-              // best-effort; launch and send are unaffected
+      case "coalesce":
+        return presence.wake_lease !== null
+          ? {
+              status: "wake_coalesced",
+              lease_id: presence.wake_lease.lease_id,
             }
-          }
-          return {
-            status: "wake_dispatched",
-            lease_id: acquired.lease.lease_id,
-            pid: launched.pid,
-          };
-        }
-        // Launch failed; the message is already persisted and recoverable, and
-        // the lease TTL will expire the activation back to offline.
-        return {
-          status: "launch_failed",
-          lease_id: acquired.lease.lease_id,
-          error_message:
-            launched.error?.message ?? "launch failed for unknown reason",
-        };
-      }
-
+          : undefined;
+      case "launch":
+        return wakeOfflineLaunchable(client, record);
       default:
-        return undefined;
+        return assertNever(decision);
     }
   } catch (error) {
     return {

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { spawn } from "child_process";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import {
@@ -47,12 +48,8 @@ const allowlist = scaffoldLaunchAllowlist([
 allowlist.set();
 afterAll(() => allowlist.cleanup());
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
-async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
-}
 
 const T0 = "2030-01-01T00:00:00.000Z";
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -149,14 +146,14 @@ describe("wake-on-send e2e", () => {
 
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     sender = new RedisClient(null, TEST_REDIS_URL);
     const reg = await sender.register("publisher", "wake-sender", "sends");
     expect(reg.session_id).toBeTruthy();
   });
 
   afterEach(async () => {
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     await sender.shutdown();
     await redis.quit();
   });
@@ -385,14 +382,14 @@ describe("task claim e2e (at-least-once delivery)", () => {
 
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     sender = new RedisClient(null, TEST_REDIS_URL);
     const reg = await sender.register("publisher", "e2e-sender", "sends");
     expect(reg.session_id).toBeTruthy();
   });
 
   afterEach(async () => {
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     await sender.shutdown();
     await redis.quit();
   });
@@ -532,14 +529,14 @@ describe("pid-liveness reconciliation", () => {
 
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     sender = new RedisClient(null, TEST_REDIS_URL);
     const reg = await sender.register("publisher", "recon-sender", "sends");
     expect(reg.session_id).toBeTruthy();
   });
 
   afterEach(async () => {
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     await sender.shutdown();
     await redis.quit();
   });

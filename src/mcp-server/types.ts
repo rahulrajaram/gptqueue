@@ -19,14 +19,6 @@ export interface AgentRegistration {
   pid: number;
 }
 
-export const REDIS_KEYS = {
-  registry: "gptq:registry",
-  queue: (agent: string) => `gptq:q:${agent}`,
-  meta: (agent: string) => `gptq:meta:${agent}`,
-  heartbeat: (agent: string) => `gptq:heartbeat:${agent}`,
-} as const;
-
-export const DEFAULT_QUEUE_BOUND = 10;
 export const HEARTBEAT_TTL = 30;
 export const HEARTBEAT_INTERVAL = 10;
 // test

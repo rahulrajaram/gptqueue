@@ -450,6 +450,19 @@ export const transitionCustody = (
  * Decide how routed work should be handled given custody state. Forfeited and
  * held checks precede all policy routing: custody gates work distribution.
  */
+/**
+ * REFERENCE DISCLOSURE: `resolveWorkOwnership` is an UNWIRED DECISION ORACLE.
+ * This one function — unlike the rest of this module, which IS wired to
+ * production via src/core/custody-store.ts (transitionCustody +
+ * admitHandoffRecord) — is a pure, test-only decision model. It maps custody
+ * state plus an ownership request to a routing decision, but NO production
+ * code calls it: real ownership routing lives in the tool adapters
+ * (actor-status.ts, send-message.ts, custody-*.ts) and the worktree custody
+ * store. The ENFORCEMENT GAP — that workable/unowned-routed work can silently
+ * fall back to a different path instead of this oracle's decision — is tracked
+ * separately; tests/reference-boundary.test.ts keeps this disclosure present
+ * so the claim cannot silently regress.
+ */
 export const resolveWorkOwnership = (
   request: WorkOwnershipRequest,
   custodyState: CustodyState

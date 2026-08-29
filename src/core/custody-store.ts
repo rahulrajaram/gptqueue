@@ -76,6 +76,9 @@ export interface CustodyReleaseInput {
   readonly actor_name: string;
   readonly session_id: string;
   readonly handoff: unknown;
+  // ISO timestamp; the adapter layer reads the clock, not the core. Used to
+  // self-heal an expired hold before applying release preconditions.
+  readonly now: string;
 }
 
 export interface CustodyStatusInput {
@@ -138,7 +141,7 @@ export class CustodyStore {
       const stored = await this.readRecord(input.worktree_path);
       if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
 
-      const record = stored.kind === "record" ? stored.record : null;
+      let record = stored.kind === "record" ? stored.record : null;
       if (record === null) {
         // Fresh worktree: seed the custody record then claim it as "initial".
         const seeded = createCustody(worktree);
@@ -158,6 +161,13 @@ export class CustodyStore {
         // Race: another writer created a record; loop re-reads and retries.
         continue;
       }
+
+      // Self-heal (M4): an expired-but-held lease is lazily forfeited BEFORE
+      // any claim precondition runs, so a successor claiming an expired hold
+      // reaches the takeover path instead of a dead-end `already_held`. The
+      // forfeited state is persisted conditionally (precondition "held") and
+      // the returned (forfeited) record drives the transition below.
+      record = await this.lazyExpire(record, input.now);
 
       if (record.state === "held") {
         return fail(
@@ -238,7 +248,14 @@ export class CustodyStore {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const stored = await this.readRecord(input.worktree_path);
       if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
-      const record = stored.kind === "record" ? stored.record : null;
+      let record = stored.kind === "record" ? stored.record : null;
+      if (record !== null) {
+        // Self-heal (M4): a release of an EXPIRED hold is not a success on a
+        // stale hold. The lapsed lease is forfeited first, so the release
+        // resolves to a typed `not_held` outcome (the worktree is no longer
+        // held by anyone) rather than silently releasing a dead custodian.
+        record = await this.lazyExpire(record, input.now);
+      }
 
       if (!record || record.state !== "held") {
         return fail("not_held", "cannot release a worktree that is not held");

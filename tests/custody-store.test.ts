@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import {
   CustodyStore,
   type CustodyClaimInput,
@@ -10,12 +11,8 @@ import {
 import { CUSTODY_KEYS } from "../src/core/keys.js";
 import type { HandoffRecordV1 } from "../src/core/custody-model.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
-async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
-}
 
 const T0 = "2030-01-01T00:00:00.000Z";
 const PATH = "/srv/worktrees/one";
@@ -54,6 +51,7 @@ const release = (
   actor_name: "agent-a",
   session_id: "session-a",
   handoff: handoff(),
+  now: T0,
   ...overrides,
 });
 
@@ -69,12 +67,12 @@ describe("CustodyStore", () => {
 
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     store = new CustodyStore(redis);
   });
 
   afterEach(async () => {
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     await redis.quit();
   });
 
@@ -258,6 +256,60 @@ describe("CustodyStore", () => {
     if (!status.ok || !("record" in status))
       throw new Error("expected ok status");
     expect(status.record?.state).toBe("held");
+  });
+
+  it("self-heals an expired-held lease on claim so a successor can take over", async () => {
+    // session-a holds until 2030-01-01T00:00:01Z.
+    await store.claim(claim({ lease_seconds: 1 }));
+
+    // A successor claims AFTER the lease lapsed: the expired-but-held record
+    // must be lazily forfeited first so the takeover path runs instead of a
+    // dead-end already_held.
+    const res = await store.claim(
+      claim({
+        actor_name: "agent-b",
+        session_id: "session-b",
+        inventory: ["recovered.txt"],
+        now: "2030-01-01T00:00:02.000Z",
+        lease_seconds: 3600,
+      })
+    );
+    const ok = expectOk(res);
+    expect(ok.record.state).toBe("held");
+    expect(ok.record.mode).toBe("successor_takeover");
+    expect(ok.record.custodian).toEqual({
+      actor_name: "agent-b",
+      session_id: "session-b",
+    });
+    // The forfeited state was persisted before the takeover, so the finished
+    // hold is clean successor attribution.
+    expect(ok.record.custodian?.actor_name).toBe("agent-b");
+  });
+
+  it("keeps already_held for a claim on an unexpired hold", async () => {
+    // Hold is valid through 2030-01-01T01:00:00Z.
+    await store.claim(claim({ lease_seconds: 3600 }));
+    const res = await store.claim(
+      claim({ actor_name: "agent-b", session_id: "session-b" })
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected already_held");
+    expect(res.error.code).toBe("already_held");
+  });
+
+  it("releases an expired-held lease as not_held after self-healing the lapsed hold", async () => {
+    // The old custodian's lease lapsed before their release attempt.
+    await store.claim(claim({ lease_seconds: 1 }));
+    const res = await store.release(
+      release({ now: "2030-01-01T00:00:02.000Z" })
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected not_held");
+    // Documented coherence choice (M4): releasing a lapsed (expired-but-held)
+    // hold self-heals the record to forfeited, then resolves as not_held --
+    // the worktree is no longer held by anyone -- rather than silently
+    // releasing a stale hold.
+    expect(res.error.code).toBe("not_held");
   });
 
   it("returns null for an absent worktree path", async () => {
