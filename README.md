@@ -58,6 +58,8 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | `custody_status` | Inspect a worktree's custody record, or list every stored record. Expired leases are forfeited lazily |
 | `actor_register` | Register a durable actor profile and launch contract in the shared actor directory. The calling session owns the actor's profile; `wake_if_offline` actors must declare a `launch_command` |
 | `actor_status` | Classify a durable actor's runtime presence (`active`/`idle`/`starting`/`offline_launchable`/`offline_store_only`/`unavailable`) from its launch contract, live sessions, and any outstanding wake lease |
+| `claim_tasks` | Atomically claim up to `max_batch` messages (default 1, range 1–16) from your own durable inbox as an at-least-once delivery batch for the calling session. Returns the claim (`claim_id`, `tasks`, `expires_at`) or an explicit empty-batch result when nothing is pending. `ttl_seconds` (default 300, range 1–3600) bounds how long an unacknowledged claim stays out of the inbox before lazy recovery re-queues it. For registered durable actors, the directory's admitted `max_concurrency` caps the number of simultaneously outstanding unacked claims: once the ceiling is reached, a further claim is refused with a `concurrency_limit_reached` error until an existing claim is acknowledged or lazily recovered. Plain agents (no directory record) claim without any ceiling |
+| `acknowledge_tasks` | Acknowledge a `claim_id` returned by `claim_tasks`, confirming delivery of that batch. Only the claiming session may acknowledge its own claim; acknowledged tasks are removed so they are not re-delivered |
 
 ## Prerequisites
 
@@ -191,6 +193,8 @@ gptqueue-pty --agent alice --cmd claude
 4. **Messaging** -- `send_message` pushes to the target agent's Redis list (`gptq:q:<name>`). A Lua script enforces the queue bound atomically. If the queue is full, the sender retries with exponential backoff (up to 10 attempts).
 
    **Wake-on-send.** When the recipient is a durable `wake_if_offline` actor (see `actor_register`) with no live runtime and a runnable launch contract, `send_message` persists the message first, then attempts to wake the actor: it acquires a bounded (60s) per-actor wake lease, and if it owns the lease, spawns the actor's launch command (detached, no shell). The send always succeeds regardless of the wake outcome, and the additive result field `wake` reports `wake_dispatched`/`wake_coalesced`/`launch_failed`/`wake_error`. `store_only` actors and plain agents (no durable record) never wake, so their send behavior is unchanged.
+
+   **Pid-liveness reconciliation.** When a wake lease records a `spawned_pid` and the launched runtime never registers (no live session), the actor would otherwise stay pinned in `starting` until the lease TTL lapses. Presence assembly (both `actor_status` and `send_message`'s wake gate) reconciles this observationally: if the lease's spawned process is no longer alive, the lease is cleared as a failed activation, so the actor returns to offline and re-wake becomes possible. A live or un-probed (no pid) lease is retained and reported as `starting`; `actor_status`'s `wake_lease` payload includes an additive `pid_liveness` of `alive`/`dead`/`unknown`.
 
 5. **Receiving** -- `receive_message` does a blocking pop (`BLPOP`) with a configurable timeout.
 

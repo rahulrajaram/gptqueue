@@ -11,6 +11,7 @@ import { SessionStore } from "../core/session-store.js";
 import { CustodyStore } from "../core/custody-store.js";
 import { ActorDirectory } from "../core/actor-directory.js";
 import { WakeLeaseStore } from "../core/wake-lease.js";
+import { TaskClaimStore } from "../core/task-claim-store.js";
 
 export class RedisClient {
   private redis: Redis;
@@ -23,6 +24,7 @@ export class RedisClient {
   private readonly custodyStore: CustodyStore;
   private readonly actorDirectoryStore: ActorDirectory;
   private readonly wakeLeaseStore: WakeLeaseStore;
+  private readonly taskClaimStore: TaskClaimStore;
   readonly queueBound: number;
 
   get custody(): CustodyStore {
@@ -39,6 +41,10 @@ export class RedisClient {
 
   get wakeLease(): WakeLeaseStore {
     return this.wakeLeaseStore;
+  }
+
+  get taskClaim(): TaskClaimStore {
+    return this.taskClaimStore;
   }
 
   get agentName(): string | null {
@@ -67,6 +73,7 @@ export class RedisClient {
     this.custodyStore = new CustodyStore(this.redis);
     this.actorDirectoryStore = new ActorDirectory(this.redis);
     this.wakeLeaseStore = new WakeLeaseStore(this.redis);
+    this.taskClaimStore = new TaskClaimStore(this.redis);
   }
 
   requireRegistered(): string {

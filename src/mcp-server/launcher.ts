@@ -27,6 +27,28 @@ export interface LaunchOutcome {
 }
 
 /**
+ * Whether a pid refers to a currently-live process. Uses `process.kill(pid,
+ * 0)` (the standard zero-signal liveness probe). `undefined`-safe: a
+ * non-number resolves to `false`. Never throws: EPERM still means the process
+ * is alive (we lack permission to signal, but it exists) and is treated as
+ * `true`; ESRCH (no such process) and every other error resolve to `false`
+ * (conservative).
+ */
+export const isPidAlive = (pid: number): boolean => {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // EPERM: the process exists but we may not signal it -> still alive.
+    return code === "EPERM";
+  }
+};
+
+/**
  * Dispatch a runtime launch from its contract. Resolves on the child's
  * "spawn" event with the pid, or on "error" with a `launch_failed` outcome.
  * Resolves on the first event and never throws.

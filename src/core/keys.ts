@@ -63,3 +63,11 @@ export const WAKE_LEASE_KEYS = {
   /** String key per actor with TTL: JSON wake lease. */
   lease: (actorId: string) => `gptq:wake-lease:${actorId}`,
 } as const;
+
+/** Durable task-claim key schema (at-least-once batch delivery). */
+export const CLAIM_KEYS = {
+  /** Hash: field = claim_id, value = JSON-serialized claim record. */
+  claims: "gptq:claims",
+  /** Per-actor zset of outstanding claims: member = claim_id, score = expires_at epoch ms. */
+  index: (actorId: string) => `gptq:claims-index:${actorId}`,
+} as const;
