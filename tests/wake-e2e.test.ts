@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
+import { spawn } from "child_process";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import {
   sendMessage,
@@ -10,7 +11,19 @@ import {
   registerAgentSchema,
 } from "../src/mcp-server/tools/register-agent.js";
 import type { RuntimeLaunchContract } from "../src/core/actor-directory.js";
-import { WAKE_LEASE_KEYS, ACTOR_KEYS } from "../src/core/keys.js";
+import { WAKE_LEASE_KEYS, ACTOR_KEYS, SESSION_KEYS } from "../src/core/keys.js";
+import {
+  claimTasks,
+  claimTasksSchema,
+} from "../src/mcp-server/tools/claim-tasks.js";
+import {
+  acknowledgeTasks,
+  acknowledgeTasksSchema,
+} from "../src/mcp-server/tools/acknowledge-tasks.js";
+import {
+  actorStatus,
+  actorStatusSchema,
+} from "../src/mcp-server/tools/actor-status.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
 
@@ -20,6 +33,7 @@ async function flushTestKeys(redis: Redis): Promise<void> {
 }
 
 const T0 = "2030-01-01T00:00:00.000Z";
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Harmless, short-lived spawned child (sleeps then exits). */
 const sleepyLaunch = (): RuntimeLaunchContract => ({
@@ -67,6 +81,17 @@ function killPid(pid: number | undefined): void {
     process.kill(pid);
   } catch {
     // already gone
+  }
+}
+
+/** Poll until a launched pid is no longer alive (a failed activation). */
+async function waitForDead(pid: number, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (isAlive(pid)) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("expected launched process to exit");
+    }
+    await delay(25);
   }
 }
 
@@ -314,5 +339,336 @@ describe("wake-on-send e2e", () => {
     );
     expect(unavail.wake).toBeUndefined();
     expect(await redis.exists(WAKE_LEASE_KEYS.lease("unavailable-act"))).toBe(0);
+  });
+});
+
+describe("task claim e2e (at-least-once delivery)", () => {
+  let redis: Redis;
+  let sender: RedisClient;
+  const actorId = "e2e-actor";
+
+  const deadLaunch = (): RuntimeLaunchContract => ({
+    command: "/nonexistent/definitely-not-a-binary-12345",
+    args: [],
+  });
+
+  const registerActorProfile = async (registeredBy: string) => {
+    await registerActor(
+      sender,
+      actorId,
+      "wake_if_offline",
+      deadLaunch(),
+      registeredBy
+    );
+  };
+
+  beforeEach(async () => {
+    redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
+    await flushTestKeys(redis);
+    sender = new RedisClient(null, TEST_REDIS_URL);
+    const reg = await sender.register("publisher", "e2e-sender", "sends");
+    expect(reg.session_id).toBeTruthy();
+  });
+
+  afterEach(async () => {
+    await flushTestKeys(redis);
+    await sender.shutdown();
+    await redis.quit();
+  });
+
+  it("send 2 messages -> runtime registers -> claim both -> ack -> inbox empty and actor_status idle", async () => {
+    const reg = await sender.register("publisher", "e2e-sender-2", "sends");
+    await registerActorProfile(reg.session_id);
+
+    // The runtime comes online under the durable actor id (live session). This
+    // makes the actor idle at send time, so dispatch is skipped entirely.
+    const worker = new RedisClient(null, TEST_REDIS_URL);
+    let workerSession: string;
+    try {
+      const wreg = await registerAgent(
+        worker,
+        registerAgentSchema.parse({ name: actorId, role: "both", description: "runtime" })
+      );
+      workerSession = wreg.session_id;
+
+      // Send two messages to the (idle, live) actor.
+      const r1 = parseText(
+        await sendMessage(
+          sender,
+          sendMessageSchema.parse({ to: actorId, content: "task one", type: "task" })
+        )
+      );
+      const r2 = parseText(
+        await sendMessage(
+          sender,
+          sendMessageSchema.parse({ to: actorId, content: "task two", type: "task" })
+        )
+      );
+      expect(r1.status).toBe("sent");
+      expect(r2.status).toBe("sent");
+      expect(await redis.llen(SESSION_KEYS.queue(actorId))).toBe(2);
+
+      // Runtime claims both messages in one batch.
+      const claim = await claimTasks(
+        worker,
+        claimTasksSchema.parse({ session_id: workerSession, max_batch: 5, ttl_seconds: 300 })
+      );
+      const claimPayload = claim.structuredContent as {
+        claimed: boolean;
+        claim: { claim_id: string; tasks: string[] };
+      };
+      expect(claimPayload.claimed).toBe(true);
+      expect(claimPayload.claim.tasks).toHaveLength(2);
+      expect(claimPayload.claim.tasks.join(",")).toContain("task one");
+      expect(claimPayload.claim.tasks.join(",")).toContain("task two");
+
+      // Claimed (popped) messages are out of the inbox.
+      expect(await redis.llen(SESSION_KEYS.queue(actorId))).toBe(0);
+
+      // The holding runtime reports active.
+      const during = await actorStatus(sender, actorStatusSchema.parse({ actor_id: actorId }));
+      expect(during.structuredContent).toMatchObject({ presence: "active" });
+
+      // Runtime acknowledges -> batch removed -> inbox empty and idle.
+      const ack = await acknowledgeTasks(
+        worker,
+        acknowledgeTasksSchema.parse({ session_id: workerSession, claim_id: claimPayload.claim.claim_id })
+      );
+      expect(ack.structuredContent).toMatchObject({ status: "ok", acknowledged: 2 });
+      expect(await redis.llen(SESSION_KEYS.queue(actorId))).toBe(0);
+
+      const after = await actorStatus(sender, actorStatusSchema.parse({ actor_id: actorId }));
+      expect(after.structuredContent).toMatchObject({ presence: "idle" });
+    } finally {
+      await worker.shutdown();
+    }
+  });
+
+  it("crash path: claim without ack, expire, recover, and re-claim returns the messages", async () => {
+    const reg = await sender.register("publisher", "e2e-sender-3", "sends");
+    await registerActorProfile(reg.session_id);
+
+    const worker = new RedisClient(null, TEST_REDIS_URL);
+    let workerSession: string;
+    try {
+      const wreg = await registerAgent(
+        worker,
+        registerAgentSchema.parse({ name: actorId, role: "both", description: "runtime" })
+      );
+      workerSession = wreg.session_id;
+
+      await sendMessage(
+        sender,
+        sendMessageSchema.parse({ to: actorId, content: "durable msg", type: "task" })
+      );
+
+      // Runtime claims with a short TTL and then "crashes" (never acks).
+      const claim = await claimTasks(
+        worker,
+        claimTasksSchema.parse({ session_id: workerSession, max_batch: 5, ttl_seconds: 1 })
+      );
+      const firstClaim = (claim.structuredContent as {
+        claimed: boolean;
+        claim: { claim_id: string; tasks: string[] };
+      });
+      expect(firstClaim.claimed).toBe(true);
+      expect(firstClaim.claim.tasks).toHaveLength(1);
+
+      // Wait past expiry so the unacked claim expires.
+      await delay(1100);
+
+      // A fresh claim lazily recovers the expired claim's tasks first, then
+      // re-claims them from the inbox.
+      const reclaim = await claimTasks(
+        worker,
+        claimTasksSchema.parse({ session_id: workerSession, max_batch: 5, ttl_seconds: 300 })
+      );
+      const secondClaim = (reclaim.structuredContent as {
+        claimed: boolean;
+        claim: { tasks: string[] };
+      });
+      expect(secondClaim.claimed).toBe(true);
+      expect(secondClaim.claim.tasks).toHaveLength(1);
+    } finally {
+      await worker.shutdown();
+    }
+  });
+});
+
+describe("pid-liveness reconciliation", () => {
+  let redis: Redis;
+  let sender: RedisClient;
+
+  const immediateExitLaunch = (): RuntimeLaunchContract => ({
+    command: process.execPath,
+    args: ["-e", "process.exit(0)"],
+  });
+
+  const liveSleeperLaunch = (): RuntimeLaunchContract => ({
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 15000)"],
+  });
+
+  beforeEach(async () => {
+    redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
+    await flushTestKeys(redis);
+    sender = new RedisClient(null, TEST_REDIS_URL);
+    const reg = await sender.register("publisher", "recon-sender", "sends");
+    expect(reg.session_id).toBeTruthy();
+  });
+
+  afterEach(async () => {
+    await flushTestKeys(redis);
+    await sender.shutdown();
+    await redis.quit();
+  });
+
+  it("a lease whose spawned process died is cleared so the actor classifies offline", async () => {
+    const reg = await sender.register("publisher", "recon-sender-2", "sends");
+    await registerActor(
+      sender,
+      "deadpid-act",
+      "wake_if_offline",
+      liveSleeperLaunch(),
+      reg.session_id
+    );
+
+    // A definitely-dead pid: spawn a child that exits immediately, then wait.
+    const dead = spawn(process.execPath, ["-e", "process.exit(0)"]);
+    const deadPid = dead.pid!;
+    await new Promise<void>((resolve) => dead.once("exit", () => resolve()));
+
+    const acquired = await sender.wakeLease.acquire({
+      actor_id: "deadpid-act",
+      issued_by_session: reg.session_id,
+      lease_seconds: 300,
+      now: T0,
+    });
+    if (!acquired.ok) throw new Error("expected ok acquire");
+    await sender.wakeLease.attachSpawn({
+      actor_id: "deadpid-act",
+      lease_id: acquired.lease.lease_id,
+      pid: deadPid,
+      spawned_at: T0,
+    });
+
+    // Reconciliation observes the dead pid -> clears the lease -> offline.
+    const res = await actorStatus(
+      sender,
+      actorStatusSchema.parse({ actor_id: "deadpid-act" })
+    );
+    expect(res.structuredContent).toMatchObject({ presence: "offline_launchable" });
+    expect((res.structuredContent as { wake_lease: unknown }).wake_lease).toBeNull();
+    expect(await sender.wakeLease.get("deadpid-act")).toBeNull();
+  });
+
+  it("a lease with a live spawned pid is retained while the actor starts", async () => {
+    const reg = await sender.register("publisher", "recon-sender-3", "sends");
+    await registerActor(
+      sender,
+      "livepid-act",
+      "wake_if_offline",
+      liveSleeperLaunch(),
+      reg.session_id
+    );
+
+    const sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)"]);
+    const livePid = sleeper.pid!;
+    try {
+      const acquired = await sender.wakeLease.acquire({
+        actor_id: "livepid-act",
+        issued_by_session: reg.session_id,
+        lease_seconds: 300,
+        now: T0,
+      });
+      if (!acquired.ok) throw new Error("expected ok acquire");
+      await sender.wakeLease.attachSpawn({
+        actor_id: "livepid-act",
+        lease_id: acquired.lease.lease_id,
+        pid: livePid,
+        spawned_at: T0,
+      });
+
+      const res = await actorStatus(
+        sender,
+        actorStatusSchema.parse({ actor_id: "livepid-act" })
+      );
+      expect(res.structuredContent).toMatchObject({ presence: "starting" });
+      expect(res.structuredContent).toMatchObject({
+        wake_lease: {
+          lease_id: acquired.lease.lease_id,
+          spawned_pid: livePid,
+          pid_liveness: "alive",
+        },
+      });
+      expect(await sender.wakeLease.get("livepid-act")).not.toBeNull();
+    } finally {
+      killPid(livePid);
+    }
+  });
+
+  it("a lease without spawn evidence is retained as starting with pid_liveness unknown", async () => {
+    const reg = await sender.register("publisher", "recon-sender-4", "sends");
+    await registerActor(
+      sender,
+      "nopid-act",
+      "wake_if_offline",
+      liveSleeperLaunch(),
+      reg.session_id
+    );
+
+    const acquired = await sender.wakeLease.acquire({
+      actor_id: "nopid-act",
+      issued_by_session: reg.session_id,
+      lease_seconds: 300,
+      now: T0,
+    });
+    if (!acquired.ok) throw new Error("expected ok acquire");
+
+    const res = await actorStatus(
+      sender,
+      actorStatusSchema.parse({ actor_id: "nopid-act" })
+    );
+    expect(res.structuredContent).toMatchObject({ presence: "starting" });
+    expect(res.structuredContent).toMatchObject({
+      wake_lease: { lease_id: acquired.lease.lease_id, pid_liveness: "unknown" },
+    });
+    expect(await sender.wakeLease.get("nopid-act")).not.toBeNull();
+  });
+
+  it("e2e: a dead-pid actor is re-woken on the next send with a fresh lease", async () => {
+    const reg = await sender.register("publisher", "recon-sender-5", "sends");
+    await registerActor(
+      sender,
+      "revenge-act",
+      "wake_if_offline",
+      immediateExitLaunch(),
+      reg.session_id
+    );
+
+    // First send dispatches a runtime that exits immediately (dead pid).
+    const first = parseText(
+      await sendMessage(
+        sender,
+        sendMessageSchema.parse({ to: "revenge-act", content: "wake once", type: "task" })
+      )
+    );
+    expect(first.wake?.status).toBe("wake_dispatched");
+    expect(first.wake?.lease_id).toBeTruthy();
+    expect(first.wake?.pid).toBeTypeOf("number");
+    await waitForDead(first.wake!.pid!); // the launched process is now dead
+
+    // No live runtime; the dead-pid lease is reconciled away on the next
+    // presence assembly, so a fresh wake is dispatched with a NEW lease.
+    const second = parseText(
+      await sendMessage(
+        sender,
+        sendMessageSchema.parse({ to: "revenge-act", content: "wake again", type: "task" })
+      )
+    );
+    expect(second.wake?.status).toBe("wake_dispatched");
+    expect(second.wake?.lease_id).toBeTruthy();
+    expect(second.wake!.lease_id).not.toBe(first.wake!.lease_id);
+    killPid(second.wake?.pid);
   });
 });

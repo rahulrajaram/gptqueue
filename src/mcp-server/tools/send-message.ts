@@ -10,6 +10,8 @@ import {
 } from "../../core/actor-presence.js";
 import type { WakeLease } from "../../core/wake-lease.js";
 import { dispatchLaunch } from "../launcher.js";
+import { workloadForSession } from "./workload-for-session.js";
+import { reconcileWakeLease } from "./reconcile-wake-lease.js";
 
 export const sendMessageSchema = z.object({
   session_id: z
@@ -66,15 +68,22 @@ export type SendWakeResult =
   | Readonly<{ status: "wake_error"; error_message: string }>;
 
 /**
- * Derive a runtime incarnation from a live session. Mirrors actor-status.ts
- * exactly (workload defaults to "idle"; the lease id is the session id).
+ * Derive a runtime incarnation from a live session and its observed workload.
+ * Mirrors actor-status.ts exactly: workload is observation-based (a session
+ * holding an unacked claim is "processing"), and the lease id is the session
+ * id.
  */
-function runtimeFromSession(sessionId: string): RuntimeIncarnation {
+async function runtimeFromSession(
+  claims: RedisClient["taskClaim"],
+  actorId: string,
+  sessionId: string
+): Promise<RuntimeIncarnation> {
+  const workload = await workloadForSession(claims, actorId, sessionId);
   return Object.freeze({
     incarnation_id: sessionId,
     session_id: sessionId,
     lease_id: sessionId,
-    workload: "idle" as const,
+    workload,
   });
 }
 
@@ -111,11 +120,24 @@ async function maybeWake(
     let runtime: RuntimeIncarnation | undefined;
     const presence = await client.sessions.getPresence(record.profile.actor_id);
     if (presence.online && presence.active_sessions.length > 0) {
-      runtime = runtimeFromSession(presence.active_sessions[0]!);
+      runtime = await runtimeFromSession(
+        client.taskClaim,
+        record.profile.actor_id,
+        presence.active_sessions[0]!
+      );
     }
 
     let wakeLease: WakeLease | null = null;
-    wakeLease = await client.wakeLease.get(record.profile.actor_id);
+    if (runtime === undefined) {
+      // Reconcile the outstanding lease against process liveness before
+      // classifying: a dead-pid lease is a failed activation and is cleared,
+      // so the actor classifies from offline and re-wake becomes possible. A
+      // live/un-probed lease is retained so an in-flight start coalesces.
+      const reconcile = await reconcileWakeLease(client, record.profile.actor_id);
+      if (!reconcile.cleared) {
+        wakeLease = await client.wakeLease.get(record.profile.actor_id);
+      }
+    }
 
     const classification = classifyPresence({
       actor: record.profile,
@@ -174,6 +196,21 @@ async function maybeWake(
         }
         const launched = await dispatchLaunch(record.launch);
         if (launched.dispatched) {
+          // Best-effort spawn evidence: record the dispatched pid on the wake
+          // lease so observers (actor_status) can surface it. A failure here
+          // must never affect the send result.
+          if (launched.pid !== undefined) {
+            try {
+              await client.wakeLease.attachSpawn({
+                actor_id: record.profile.actor_id,
+                lease_id: acquired.lease.lease_id,
+                pid: launched.pid,
+                spawned_at: new Date().toISOString(),
+              });
+            } catch {
+              // best-effort; launch and send are unaffected
+            }
+          }
           return {
             status: "wake_dispatched",
             lease_id: acquired.lease.lease_id,

@@ -28,6 +28,11 @@ import {
 import { custodyStatusSchema, custodyStatus } from "../mcp-server/tools/custody-status.js";
 import { actorRegisterSchema, actorRegister } from "../mcp-server/tools/actor-register.js";
 import { actorStatusSchema, actorStatus } from "../mcp-server/tools/actor-status.js";
+import { claimTasksSchema, claimTasks } from "../mcp-server/tools/claim-tasks.js";
+import {
+  acknowledgeTasksSchema,
+  acknowledgeTasks,
+} from "../mcp-server/tools/acknowledge-tasks.js";
 import { stableToolError } from "../mcp-server/tool-result.js";
 
 export const GPTQUEUE_INSTRUCTIONS =
@@ -125,5 +130,19 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
     "[safety: readonly] Classify a durable actor's runtime presence (active/idle/starting/offline_* states) from its launch contract, live sessions, and any outstanding wake lease. Works before registration.",
     actorStatusSchema.shape,
     async (params) => safeToolCall(() => actorStatus(redisClient, actorStatusSchema.parse(params)))
+  );
+
+  server.tool(
+    "claim_tasks",
+    "[safety: writable] Atomically claim up to max_batch messages from your own durable inbox as an at-least-once delivery batch for the calling session. Returns the claim (claim_id, tasks, expires_at) or an explicit empty-batch result when nothing is pending.",
+    claimTasksSchema.shape,
+    async (params) => safeToolCall(() => claimTasks(redisClient, claimTasksSchema.parse(params)))
+  );
+
+  server.tool(
+    "acknowledge_tasks",
+    "[safety: writable] Acknowledge a claim_id returned by claim_tasks, confirming delivery of that batch. Only the claiming session may acknowledge its own claim; acknowledged tasks are not re-delivered.",
+    acknowledgeTasksSchema.shape,
+    async (params) => safeToolCall(() => acknowledgeTasks(redisClient, acknowledgeTasksSchema.parse(params)))
   );
 }

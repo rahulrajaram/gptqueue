@@ -28,6 +28,9 @@ export interface WakeLease {
   readonly issued_by_session: string;
   readonly issued_at: string;
   readonly expires_at: string;
+  /** Additive spawn evidence; set best-effort by the dispatcher after launch. */
+  readonly spawned_pid?: number;
+  readonly spawned_at?: string;
 }
 
 export type WakeLeaseError = Readonly<{
@@ -44,6 +47,11 @@ export type WakeLeaseClearResult = Readonly<{
   cleared: boolean;
 }>;
 
+export type WakeLeaseAttachSpawnResult = Readonly<{
+  ok: true;
+  attached: boolean;
+}>;
+
 export interface WakeLeaseAcquireInput {
   readonly actor_id: string;
   readonly issued_by_session: string;
@@ -57,6 +65,13 @@ export interface WakeLeaseClearInput {
   readonly lease_id: string;
 }
 
+export interface WakeLeaseAttachSpawnInput {
+  readonly actor_id: string;
+  readonly lease_id: string;
+  readonly pid: number;
+  readonly spawned_at: string; // ISO timestamp; the adapter layer reads the clock, not the core
+}
+
 const EXCERPT = 80;
 const excerptOf = (raw: string): string =>
   raw.length <= EXCERPT ? raw : `${raw.slice(0, EXCERPT)}...`;
@@ -65,6 +80,7 @@ export class WakeLeaseStore {
   private readonly redis: Redis;
   private readonly acquireScript: string;
   private readonly clearScript: string;
+  private readonly attachSpawnScript: string;
 
   constructor(redis: Redis) {
     this.redis = redis;
@@ -74,6 +90,10 @@ export class WakeLeaseStore {
     );
     this.clearScript = readFileSync(
       join(LUA_DIR, "wake-lease-clear.lua"),
+      "utf-8"
+    );
+    this.attachSpawnScript = readFileSync(
+      join(LUA_DIR, "wake-lease-attach-spawn.lua"),
       "utf-8"
     );
   }
@@ -153,6 +173,27 @@ export class WakeLeaseStore {
       input.lease_id
     )) as number;
     return { ok: true, cleared: result === 1 };
+  }
+
+  /**
+   * Best-effort, conditional attach of spawn evidence to a wake lease. Updates
+   * only when the stored lease's `.lease_id` matches the caller's, preserving
+   * the lease TTL. A mismatch (or absent/expired lease) is `attached:false` —
+   * NOT an error — so a best-effort spawn report stays idempotent. Observers
+   * (e.g. actor_status) surface the pid when present.
+   */
+  async attachSpawn(
+    input: WakeLeaseAttachSpawnInput
+  ): Promise<WakeLeaseAttachSpawnResult> {
+    const result = (await this.redis.eval(
+      this.attachSpawnScript,
+      1,
+      WAKE_LEASE_KEYS.lease(input.actor_id),
+      input.lease_id,
+      input.pid,
+      input.spawned_at
+    )) as number;
+    return { ok: true, attached: result === 1 };
   }
 
   private parseLease(raw: string): WakeLease | null {

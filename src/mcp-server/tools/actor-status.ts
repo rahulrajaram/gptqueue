@@ -5,24 +5,33 @@ import {
   classifyPresence,
   type RuntimeIncarnation,
 } from "../../core/actor-presence.js";
+import { workloadForSession } from "./workload-for-session.js";
+import {
+  reconcileWakeLease,
+  type PidLiveness,
+} from "./reconcile-wake-lease.js";
 
 export const actorStatusSchema = z.object({
   actor_id: z.string().min(1).describe("Durable actor identity to inspect"),
 });
 
 /**
- * Derive a runtime incarnation from a live session, if one exists. The report
- * phase defaults a leased but un-observed runtime to workload "idle": this
- * slice has no workload tracking, so any live leased session is treated as
- * ready to accept work rather than processing. The lease id is the session id
- * (the session's Redis lease key is keyed on the session id).
+ * Derive a runtime incarnation from a live session and its observed workload.
+ * The report defaults a leased but un-observed runtime to the supplied
+ * workload, which is observation-derived: a session holding an unacked claim
+ * is "processing" (the runtime accepted work in flight), otherwise "idle".
+ * The lease id is the session id (the session's Redis lease key is keyed on
+ * the session id).
  */
-function runtimeFromSession(sessionId: string): RuntimeIncarnation {
+function runtimeFromSession(
+  sessionId: string,
+  workload: "processing" | "idle"
+): RuntimeIncarnation {
   return Object.freeze({
     incarnation_id: sessionId,
     session_id: sessionId,
     lease_id: sessionId,
-    workload: "idle" as const,
+    workload,
   });
 }
 
@@ -38,7 +47,7 @@ export async function actorStatus(
   let launchContract: "runnable" | "not_runnable" = "not_runnable";
   let runtime: RuntimeIncarnation | undefined = undefined;
   let wakeLease:
-    | { lease_id: string; actor_id: string; issued_by_session: string; issued_at: string; expires_at: string }
+    | { lease_id: string; actor_id: string; issued_by_session: string; issued_at: string; expires_at: string; spawned_pid?: number; spawned_at?: string; pid_liveness?: PidLiveness }
     | null = null;
 
   if (dir.ok) {
@@ -47,13 +56,40 @@ export async function actorStatus(
       launchContract = client.actorDirectory.contractReadiness(record);
 
       // A live (leased) session is a running runtime incarnation that outranks
-      // any outstanding wake lease.
+      // any outstanding wake lease. Workload is observation-based: a session
+      // holding an unacked claim classifies as processing (active); otherwise
+      // idle.
       const presence = await client.sessions.getPresence(record.profile.actor_id);
       if (presence.online && presence.active_sessions.length > 0) {
-        runtime = runtimeFromSession(presence.active_sessions[0]!);
+        const sessionId = presence.active_sessions[0]!;
+        const workload = await workloadForSession(
+          client.taskClaim,
+          record.profile.actor_id,
+          sessionId
+        );
+        runtime = runtimeFromSession(sessionId, workload);
       }
 
-      wakeLease = await client.wakeLease.get(record.profile.actor_id);
+      if (runtime === undefined) {
+        // Reconcile first: an outstanding wake lease whose spawned process died
+        // without registering is a failed activation -> clear it, then read the
+        // (possibly gone) lease and classify from offline. A live or un-probed
+        // lease is retained, with its pid_liveness surfaced in the payload.
+        const reconcile = await reconcileWakeLease(
+          client,
+          record.profile.actor_id
+        );
+        if (!reconcile.cleared) {
+          const lease = await client.wakeLease.get(record.profile.actor_id);
+          if (lease !== null) {
+            wakeLease = { ...lease, pid_liveness: reconcile.pid_liveness };
+          }
+        }
+      } else {
+        // Runtime attached: read any lease for observability but classify by
+        // the runtime (which outranks a stale lease).
+        wakeLease = await client.wakeLease.get(record.profile.actor_id);
+      }
     }
   }
 
