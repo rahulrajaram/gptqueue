@@ -1,11 +1,7 @@
 import { Redis } from "ioredis";
-import {
-  REDIS_KEYS,
-  HEARTBEAT_TTL,
-  HEARTBEAT_INTERVAL,
-  DEFAULT_QUEUE_BOUND,
-} from "./types.js";
+import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
+import { SESSION_KEYS, SESSION_DEFAULTS } from "../core/keys.js";
 import { MailboxStore } from "../core/mailbox-store.js";
 import { SessionStore } from "../core/session-store.js";
 import { CustodyStore } from "../core/custody-store.js";
@@ -62,7 +58,7 @@ export class RedisClient {
   constructor(agentName: string | null, redisUrl?: string) {
     this._agentName = agentName;
     this.queueBound = parseInt(
-      process.env.GPTQ_QUEUE_BOUND || String(DEFAULT_QUEUE_BOUND),
+      process.env.GPTQ_QUEUE_BOUND || String(SESSION_DEFAULTS.DEFAULT_QUEUE_BOUND),
       10
     );
     const url = redisUrl || process.env.REDIS_URL || "redis://127.0.0.1:6379";
@@ -121,10 +117,10 @@ export class RedisClient {
       await this.sessionStore.closeSession(this._sessionId);
       await this.mailbox.migrateMessages(oldName, name);
 
-      await this.redis.hdel(REDIS_KEYS.registry, oldName);
+      await this.redis.hdel(SESSION_KEYS.registry, oldName);
       await this.redis.del(
-        REDIS_KEYS.meta(oldName),
-        REDIS_KEYS.heartbeat(oldName)
+        SESSION_KEYS.mailboxMeta(oldName),
+        SESSION_KEYS.heartbeat(oldName)
       );
       if (this.heartbeatTimer) {
         clearInterval(this.heartbeatTimer);
@@ -151,7 +147,7 @@ export class RedisClient {
       pid: process.pid,
     };
     await this.redis.hset(
-      REDIS_KEYS.registry,
+      SESSION_KEYS.registry,
       name,
       JSON.stringify(registration)
     );
@@ -170,7 +166,7 @@ export class RedisClient {
     const beat = async () => {
       try {
         await this.redis.set(
-          REDIS_KEYS.heartbeat(name),
+          SESSION_KEYS.heartbeat(name),
           "alive",
           "EX",
           HEARTBEAT_TTL
@@ -195,7 +191,7 @@ export class RedisClient {
     }
 
     // Remove heartbeat but keep registry and mailbox
-    await this.redis.del(REDIS_KEYS.heartbeat(name));
+    await this.redis.del(SESSION_KEYS.heartbeat(name));
 
     this._agentName = null;
     this._sessionId = null;
@@ -214,9 +210,9 @@ export class RedisClient {
     }
 
     // Delete everything
-    await this.redis.hdel(REDIS_KEYS.registry, name);
+    await this.redis.hdel(SESSION_KEYS.registry, name);
     await this.mailbox.deleteMailbox(name);
-    await this.redis.del(REDIS_KEYS.heartbeat(name));
+    await this.redis.del(SESSION_KEYS.heartbeat(name));
 
     this._agentName = null;
     this._sessionId = null;
@@ -245,13 +241,13 @@ export class RedisClient {
       online: boolean;
     }>
   > {
-    const registry = await this.redis.hgetall(REDIS_KEYS.registry);
+    const registry = await this.redis.hgetall(SESSION_KEYS.registry);
     const agents = [];
     for (const [name, json] of Object.entries(registry)) {
       const reg = JSON.parse(json);
       // Prefer session-based presence; fall back to legacy heartbeat
       const presence = await this.sessionStore.getPresence(name);
-      const legacyHeartbeat = await this.redis.get(REDIS_KEYS.heartbeat(name));
+      const legacyHeartbeat = await this.redis.get(SESSION_KEYS.heartbeat(name));
       agents.push({
         name,
         role: reg.role,

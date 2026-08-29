@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession } from "./session-binding.js";
 import { custodyOpResult } from "./custody-result.js";
 
 export const custodyReleaseSchema = z.object({
@@ -49,14 +49,10 @@ export async function custodyRelease(
   client: RedisClient,
   params: z.infer<typeof custodyReleaseSchema>
 ) {
-  await ensureSessionBinding(client, params.session_id);
-  const actor_name = client.requireRegistered();
-  const session_id = client.sessionId;
-  if (!session_id) {
-    throw new Error(
-      "Session not bound. Call register_agent first with a name and retain the session_id."
-    );
-  }
+  const { agent: actor_name, sessionId: session_id } = await bindSession(
+    client,
+    params.session_id
+  );
 
   const handoff = {
     schema_version: 1,
@@ -74,6 +70,7 @@ export async function custodyRelease(
     actor_name,
     session_id,
     handoff,
+    now: new Date().toISOString(),
   });
 
   return custodyOpResult(result, { status: "released" });

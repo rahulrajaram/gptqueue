@@ -1,25 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
 /** Flush all gptq:* keys used by tests. */
-async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
-}
 
 describe("RedisClient", () => {
   let cleanup: Redis;
 
   beforeEach(async () => {
     cleanup = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(cleanup);
+    await flushTestKeys(cleanup, TEST_REDIS_URL);
   });
 
   afterEach(async () => {
-    await flushTestKeys(cleanup);
+    await flushTestKeys(cleanup, TEST_REDIS_URL);
     await cleanup.quit();
   });
 

@@ -32,6 +32,22 @@ describe("MCP contract hardening", () => {
     });
   });
 
+  it("maps the session-bound prologue lost-session error to SESSION_UNAVAILABLE", () => {
+    // M6: bindSession throws this exact message when a caller is registered but
+    // has no bound session; it must map to SESSION_UNAVAILABLE, not
+    // GPTQUEUE_ERROR.
+    const result = stableToolError(
+      new Error(
+        "Session binding not found. Call register_agent first with a name and retain the session_id."
+      )
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      status: "error",
+      error: { code: "SESSION_UNAVAILABLE", retryable: false },
+    });
+  });
+
   it("places coordination-plane policy in server instructions", () => {
     expect(GPTQUEUE_INSTRUCTIONS).toContain("instead of native");
     expect(GPTQUEUE_INSTRUCTIONS).toContain("idempotency_key");

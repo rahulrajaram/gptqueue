@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import {
   ActorDirectory,
   type ActorRegisterInput,
@@ -8,12 +9,8 @@ import {
 import { ACTOR_KEYS } from "../src/core/keys.js";
 import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
-async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
-}
 
 const T0 = "2030-01-01T00:00:00.000Z";
 
@@ -75,12 +72,12 @@ describe("ActorDirectory", () => {
     ]);
     allowlist.set();
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     store = new ActorDirectory(redis);
   });
 
   afterEach(async () => {
-    await flushTestKeys(redis);
+    await flushTestKeys(redis, TEST_REDIS_URL);
     await redis.quit();
     allowlist.cleanup();
   });

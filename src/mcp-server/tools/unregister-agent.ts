@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession } from "./session-binding.js";
 import { toolResult } from "../tool-result.js";
 
 export const unregisterAgentSchema = z.object({
@@ -16,8 +16,7 @@ export async function unregisterAgent(
   client: RedisClient,
   params: z.infer<typeof unregisterAgentSchema>
 ) {
-  await ensureSessionBinding(client, params.session_id);
-  const name = client.requireRegistered();
+  const { agent: name } = await bindSession(client, params.session_id);
   await client.unregister();
   return toolResult(
     {

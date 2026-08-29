@@ -21,6 +21,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./redis-test-utils.js";
 
 // ---- Launch-allowlist scaffold for the spawned server --------------------
 // The server child enforces the operator launch allowlist fail-closed at
@@ -97,25 +98,11 @@ type Glob = typeof globalThis & { [GLOBAL_KEY]?: Singleton };
 
 /** Scan-based deletion of gptq:* keys on a given client + db. Never FLUSHDB. */
 export async function flushGptqKeys(redis: Redis): Promise<void> {
-  const keys: string[] = [];
-  let cursor = "0";
-  do {
-    const [next, batch] = (await redis.scan(
-      cursor,
-      "MATCH",
-      "gptq:*",
-      "COUNT",
-      500
-    )) as [string, string[]];
-    cursor = next;
-    keys.push(...batch);
-  } while (cursor !== "0");
-  if (keys.length > 0) {
-    // Chunked DEL to stay well under any command-size limits.
-    for (let i = 0; i < keys.length; i += 200) {
-      await redis.del(...keys.slice(i, i + 200));
-    }
-  }
+  // Route through the shared guarded flush. The integration server is
+  // hardwired to db15, so the db0 guard always passes here; keeping the call
+  // in one place guarantees this helper can never be pointed at the live
+  // server's database by accident (M11).
+  await flushTestKeys(redis, INTEGRATION_REDIS_URL);
 }
 
 /**

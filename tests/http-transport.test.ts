@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import { execSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -11,7 +12,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { registerTools } from "../src/transports/setup-tools.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 const TEST_PORT = 3198;
 // Root of the repo (tests/ -> repo root), used to spawn the built server.
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -149,10 +150,6 @@ async function waitForStdout(
   );
 }
 
-async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
-}
 
 describe("HTTP transport (NXT-018)", () => {
   let httpServer: Server;
@@ -236,7 +233,7 @@ describe("HTTP transport (NXT-018)", () => {
 
   beforeEach(async () => {
     cleanup = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
-    await flushTestKeys(cleanup);
+    await flushTestKeys(cleanup, TEST_REDIS_URL);
     await cleanup.quit();
   });
 

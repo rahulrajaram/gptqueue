@@ -1,6 +1,24 @@
 /**
- * Pure reference model for single-flight activation and batch delivery.
- * It returns effect intents; it performs no Redis, process, or network work.
+ * REFERENCE MODEL — NOT wired into production delivery.
+ *
+ * This module is a pure reference model for single-flight activation and
+ * batch delivery. It returns effect intents; it performs no Redis, process, or
+ * network work. It is consumed ONLY by tests (tests/activation-model.test.ts)
+ * and is deliberately NOT wired into production.
+ *
+ * Production wake/claim/acknowledge/recover delivery lives in:
+ *   - src/mcp-server/tools/send-message.ts (maybeWake and its decomposed
+ *     helpers)
+ *   - src/mcp-server/tools/reconcile-wake-lease.ts (pid-liveness reconcile)
+ *   - src/core/wake-lease.ts + src/mcp-server/lua/wake-lease-*.lua (lease
+ *     acquire/clear/attach)
+ *   - src/core/task-claim-store.ts + claims-*.lua (claim/ack/recover)
+ *
+ * This model is neither used as a driver nor asserted to match the Lua-backed
+ * implementation above. WIRING IT INTO PRODUCTION IS A DELIBERATE FUTURE
+ * DECISION; until then the tests/reference-boundary.test.ts grep-guard keeps
+ * the boundary honest (no src file outside this module may import it, so a
+ * silent rewiring cannot happen without touching that test).
  */
 
 export type ActivationPhase =

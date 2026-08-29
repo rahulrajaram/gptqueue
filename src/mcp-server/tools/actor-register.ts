@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
 import type { RuntimeLaunchContract } from "../../core/actor-directory.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession } from "./session-binding.js";
 import { actorRegisterResult } from "./actor-result.js";
 
 export const actorRegisterSchema = z.object({
@@ -92,14 +92,10 @@ export async function actorRegister(
   client: RedisClient,
   params: z.infer<typeof actorRegisterSchema>
 ) {
-  await ensureSessionBinding(client, params.session_id);
-  const actor_id = client.requireRegistered();
-  const session_id = client.sessionId;
-  if (!session_id) {
-    throw new Error(
-      "Session not bound. Call register_agent first with a name and retain the session_id."
-    );
-  }
+  const { agent: actor_id, sessionId: session_id } = await bindSession(
+    client,
+    params.session_id
+  );
 
   // H4 (identity discipline): the durable actor identity IS the calling
   // session's registered agent name. actor_id is derived, never caller-supplied,

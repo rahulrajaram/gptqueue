@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession } from "./session-binding.js";
 import { renewClaimResult } from "./task-claim-result.js";
 import { DLQ_PROVISIONAL } from "../../core/keys.js";
 
@@ -42,14 +42,10 @@ export async function renewClaim(
   client: RedisClient,
   params: z.infer<typeof renewClaimSchema>
 ) {
-  await ensureSessionBinding(client, params.session_id);
-  const actor_id = client.requireRegistered();
-  const session_id = client.sessionId;
-  if (!session_id) {
-    throw new Error(
-      "Session not bound. Call register_agent first with a name and retain the session_id."
-    );
-  }
+  const { agent: actor_id, sessionId: session_id } = await bindSession(
+    client,
+    params.session_id
+  );
 
   const result = await client.taskClaim.renew({
     claim_id: params.claim_id,
