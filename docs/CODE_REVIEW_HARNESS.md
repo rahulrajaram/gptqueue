@@ -53,6 +53,41 @@ harness executes).
 
 The pre-push hook enforces that a push carries only reviewed work. The
 implementation lives in `.githooks/lib/review-gate.sh`, wired into
+`.githooks/pre-push` (which the installed `pre-push` dispatcher execs).
+
+The gate is CONTENT-anchored, not commit-SHA-anchored: what it protects is
+whether the pushed *tree* was reviewed, independent of how history was
+shaped afterward. Squash, rebase, and reword all pass automatically when
+the pushed content is the reviewed content.
+
+Every `distilled-review.md` must declare a machine-readable
+`reviewed-tree: <tree-digest>` line recording the exact tree it examined.
+
+Decision table (pushed tree vs reviewed tree):
+
+| Delta | Result |
+|---|---|
+| Identical digest | Pass ("history shape irrelevant") |
+| Docs/notes only (`*.md`, `docs/`) | Allow with a loud notice |
+| Any source surface (src, scripts, hooks, config, Lua) | Refuse; the unreviewed delta is named |
+| Principal waiver (`.gptqueue/review-override`) | Allow with a loud waiver notice |
+| Review package absent / no reviewed-tree digest | Fail-open with a warning (documented limitation) |
+
+Known limitation: the rule is path-classified, not semantics-classified —
+a docs-file change that alters agent behavior (e.g. AGENTS.md) passes
+without review, so behavior-bearing prose changes should still trigger a
+re-convene by convention.
+
+## Run history
+
+- `2026-08-29` — first convening: target = working tree after the
+  reliability arc (24 commits). Run root:
+  `/home/rahul/Documents/codereview/review-pipeline/runs/gptqueue-20260829/`.
+
+## Enforcement
+
+The pre-push hook enforces that a push carries only reviewed work. The
+implementation lives in `.githooks/lib/review-gate.sh`, wired into
 `.githooks/pre-push` (which the installed `pre-push` dispatcher execs). The
 rule and its escape hatches are summarized below.
 
