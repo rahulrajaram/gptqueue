@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { spawn } from "child_process";
+import { readFileSync } from "fs";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { TaskClaimStore } from "../src/core/task-claim-store.js";
 import {
   CLAIM_KEYS,
+  DLQ_KEYS,
   SESSION_KEYS,
 } from "../src/core/keys.js";
 import {
@@ -291,6 +293,211 @@ describe("TaskClaimStore", () => {
     expect(rec.recovered).toBe(0);
     // The live, unexpired claim still exists.
     expect(await redis.zcard(CLAIM_KEYS.index(actorId))).toBe(1);
+  });
+
+  describe("renew (claim renewal)", () => {
+    const renewReq = (
+      overrides: Partial<Parameters<TaskClaimStore["renew"]>[0]> = {}
+    ) => ({
+      claim_id: "missing",
+      actor_id: actorId,
+      session_id: "session-runtime",
+      ttl_seconds: 300,
+      budget_seconds: 86400,
+      now: T0,
+      ...overrides,
+    });
+
+    it("owner renewal extends expiry and keeps the zset score aligned with expires_at", async () => {
+      await pushTasks(redis, actorId, ["r1"]);
+      const claimed = expectOk(await store.claim(claimReq())); // claimed_at T0, expires 00:05:00
+      const claimId = claimed.claim!.claim_id;
+
+      const res = await store.renew(
+        renewReq({
+          claim_id: claimId,
+          now: "2030-01-01T00:01:00.000Z",
+        })
+      );
+      const ok = expectOk(res);
+      // T0+1min + 300s = 00:06:00 (capped by the generous budget).
+      expect(ok.expires_at).toBe("2030-01-01T00:06:00.000Z");
+      // The zset score must exactly equal the new expiry's epoch-ms.
+      const score = await redis.zscore(CLAIM_KEYS.index(actorId), claimId);
+      expect(score).toBe(String(Date.parse(ok.expires_at)));
+      // The hash record reflects the new expiry.
+      const stored = JSON.parse(
+        (await redis.hget(CLAIM_KEYS.claims, claimId))!
+      ) as { expires_at: string };
+      expect(stored.expires_at).toBe(ok.expires_at);
+    });
+
+    it("a foreign session renewal is not_claim_owner naming the owning session", async () => {
+      await pushTasks(redis, actorId, ["x1"]);
+      const claimed = expectOk(await store.claim(claimReq()));
+      const claimId = claimed.claim!.claim_id;
+
+      const foreign = await store.renew(
+        renewReq({ claim_id: claimId, session_id: "session-other" })
+      );
+      expect(foreign.ok).toBe(false);
+      if (!foreign.ok) {
+        expect(foreign.error.code).toBe("not_claim_owner");
+        expect(foreign.error.message).toContain("session-runtime");
+      }
+      // A failed foreign renewal leaves the claim untouched.
+      const stored = JSON.parse(
+        (await redis.hget(CLAIM_KEYS.claims, claimId))!
+      ) as { expires_at: string };
+      expect(stored.expires_at).toBe("2030-01-01T00:05:00.000Z");
+    });
+
+    it("renewing an unknown claim is a typed unknown_claim", async () => {
+      const res = await store.renew(renewReq());
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.code).toBe("unknown_claim");
+    });
+
+    it("renewing an already-expired claim is claim_expired", async () => {
+      await pushTasks(redis, actorId, ["e1"]);
+      const claimed = expectOk(await store.claim(claimReq({ ttl_seconds: 1 })));
+      const claimId = claimed.claim!.claim_id;
+
+      const res = await store.renew(
+        renewReq({ claim_id: claimId, now: "2030-01-01T00:00:02.000Z" })
+      );
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.code).toBe("claim_expired");
+    });
+
+    it("renewing past the lifetime budget is budget_exceeded", async () => {
+      await pushTasks(redis, actorId, ["b1"]);
+      const claimed = expectOk(await store.claim(claimReq({ ttl_seconds: 300 })));
+      const claimId = claimed.claim!.claim_id;
+
+      // claimed_at = T0, budget 30s -> cap at T0+30s; renew at T0+40s is past it.
+      const res = await store.renew(
+        renewReq({
+          claim_id: claimId,
+          budget_seconds: 30,
+          now: "2030-01-01T00:00:40.000Z",
+        })
+      );
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error.code).toBe("budget_exceeded");
+      // The claim is untouched by a refused renewal.
+      expect(await redis.hget(CLAIM_KEYS.claims, claimId)).not.toBeNull();
+    });
+
+    it("rejects an invalid renew request", async () => {
+      for (const bad of [
+        { claim_id: "", session_id: "session-runtime" },
+        { claim_id: "c", actor_id: "", session_id: "session-runtime" },
+        { claim_id: "c", actor_id: actorId, session_id: "" },
+        { claim_id: "c", actor_id: actorId, session_id: "s", ttl_seconds: 0 },
+        { claim_id: "c", actor_id: actorId, session_id: "s", ttl_seconds: 3601 },
+        { claim_id: "c", actor_id: actorId, session_id: "s", ttl_seconds: 1.5 },
+      ]) {
+        const res = await store.renew(
+          renewReq(bad as Partial<Parameters<TaskClaimStore["renew"]>[0]>)
+        );
+        expect(res.ok).toBe(false);
+        if (!res.ok) expect(res.error.code).toBe("invalid_renew_request");
+      }
+    });
+
+    it("a renewal ahead of recovery prevents re-delivery (no double-apply)", async () => {
+      await pushTasks(redis, actorId, ["q1"]);
+      const claimed = expectOk(await store.claim(claimReq({ ttl_seconds: 300 }))); // expires 00:05:00
+      const claimId = claimed.claim!.claim_id;
+
+      const renewed = expectOk(
+        await store.renew(
+          renewReq({ claim_id: claimId, now: "2030-01-01T00:01:00.000Z" })
+        )
+      );
+      expect(renewed.expires_at).toBe("2030-01-01T00:06:00.000Z");
+
+      // Recovery at the ORIGINAL expiry finds nothing expired: the renewal moved
+      // the zset score forward, so the claim is not re-delivered (no double-apply).
+      const rec = expectOk(
+        await store.recoverExpired({
+          actor_id: actorId,
+          now: "2030-01-01T00:05:30.000Z",
+        })
+      );
+      expect(rec.recovered).toBe(0);
+      expect(await inboxDepth(redis, actorId)).toBe(0);
+      expect(await redis.hget(CLAIM_KEYS.claims, claimId)).not.toBeNull();
+      expect(
+        await redis.zscore(CLAIM_KEYS.index(actorId), claimId)
+      ).toBe(String(Date.parse(renewed.expires_at)));
+    });
+
+    it("a renewed claim can still be acknowledged", async () => {
+      await pushTasks(redis, actorId, ["a1", "a2"]);
+      const claimed = expectOk(await store.claim(claimReq()));
+      const claimId = claimed.claim!.claim_id;
+
+      expectOk(
+        await store.renew(
+          renewReq({ claim_id: claimId, now: "2030-01-01T00:01:00.000Z" })
+        )
+      );
+      const ack = expectOk(
+        await store.acknowledge({
+          claim_id: claimId,
+          actor_id: actorId,
+          session_id: "session-runtime",
+        })
+      );
+      expect(ack.acknowledged).toBe(2);
+      expect(await redis.hget(CLAIM_KEYS.claims, claimId)).toBeNull();
+      expect(await redis.zscore(CLAIM_KEYS.index(actorId), claimId)).toBeNull();
+    });
+
+    it("e2e: claim short ttl, renew out of original expiry, recover only after the budget cap expires", async () => {
+      await pushTasks(redis, actorId, ["w1"]);
+      // Short-ttl claim: expires at T0+30s.
+      const claimed = expectOk(await store.claim(claimReq({ ttl_seconds: 30 })));
+      const claimId = claimed.claim!.claim_id;
+      expect(claimed.claim!.expires_at).toBe("2030-01-01T00:00:30.000Z");
+
+      // Renew at T0+10s with a 50s budget: capped at claimed_at+50s = T0+50s.
+      const renewed = expectOk(
+        await store.renew(
+          renewReq({
+            claim_id: claimId,
+            ttl_seconds: 300,
+            budget_seconds: 50,
+            now: "2030-01-01T00:00:10.000Z",
+          })
+        )
+      );
+      expect(renewed.expires_at).toBe("2030-01-01T00:00:50.000Z");
+
+      // Past the ORIGINAL expiry (T0+30s) but before the renewed expiry: NOT recovered.
+      const early = expectOk(
+        await store.recoverExpired({
+          actor_id: actorId,
+          now: "2030-01-01T00:00:40.000Z",
+        })
+      );
+      expect(early.recovered).toBe(0);
+      expect(await inboxDepth(redis, actorId)).toBe(0);
+
+      // Past the budget-capped renewed expiry (T0+50s): the claim expires and its
+      // task is recovered back to the inbox.
+      const late = expectOk(
+        await store.recoverExpired({
+          actor_id: actorId,
+          now: "2030-01-01T00:00:51.000Z",
+        })
+      );
+      expect(late.recovered).toBe(1);
+      expect(await inboxDepth(redis, actorId)).toBe(1);
+      expect(await redis.hget(CLAIM_KEYS.claims, claimId)).toBeNull();
+    });
   });
 });
 
@@ -676,3 +883,249 @@ describe("attachSpawn (wake lease spawn evidence)", () => {
     expect(await client.wakeLease.get(actorId)).toBeNull();
   });
 });
+
+describe("dead-letter queue (tranche 2)", () => {
+  let redis: Redis;
+  let store: TaskClaimStore;
+  const actorId = "dlq-actor";
+
+  // The recovery Lua constants (DLQ_PROVISIONAL) are frozen imports, so tests
+  // that need a smaller cap / bound invoke the raw script with a small ARGV.
+  const dlqLua = readFileSync(
+    new URL("../src/mcp-server/lua/claims-recover.lua", import.meta.url),
+    "utf-8"
+  );
+
+  // Directly eval the recovery script with an arbitrary cap / DLQ bound.
+  const evalRecovery = async (
+    nowISO: string,
+    cap: number,
+    maxLength: number,
+    counterTtl = 604800
+  ): Promise<[number, number]> =>
+    (await redis.eval(
+      dlqLua,
+      4,
+      CLAIM_KEYS.index(actorId),
+      CLAIM_KEYS.claims,
+      SESSION_KEYS.queue(actorId),
+      DLQ_KEYS.list(actorId),
+      Date.parse(nowISO),
+      cap,
+      maxLength,
+      counterTtl
+    )) as [number, number];
+
+  const msgTask = (id: string) =>
+    JSON.stringify({
+      id,
+      from: "sender",
+      to: actorId,
+      timestamp: "2030-01-01T00:00:00.000Z",
+      type: "task",
+      payload: { content: id },
+    });
+
+  const claimDLQ = (
+    overrides: Partial<Parameters<TaskClaimStore["claim"]>[0]> = {}
+  ) => ({
+    actor_id: actorId,
+    session_id: "session-runtime",
+    max_batch: 1,
+    ttl_seconds: 1,
+    now: T0,
+    ...overrides,
+  });
+
+  // Push -> claim -> recover once with cap 0 (any recovery exceeds the cap), so
+  // a single pass dead-letters a message for the DLQ-bound tests.
+  const deadletterOnce = async (
+    id: string,
+    nowISO: string,
+    maxLength: number
+  ): Promise<[number, number]> => {
+    await pushTasks(redis, actorId, [msgTask(id)]);
+    expectOk(await store.claim(claimDLQ()));
+    return evalRecovery(nowISO, 0, maxLength);
+  };
+
+  beforeEach(async () => {
+    redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
+    await flushTestKeys(redis);
+    store = new TaskClaimStore(redis);
+  });
+
+  afterEach(async () => {
+    await flushTestKeys(redis);
+    await redis.quit();
+  });
+
+  it("recovery increments a per-message counter while the task stays on the inbox under the cap", async () => {
+    await pushTasks(redis, actorId, [msgTask("m1")]);
+    expectOk(await store.claim(claimDLQ()));
+
+    const [recovered, deadlettered] = await evalRecovery(
+      "2030-01-01T00:00:02.000Z",
+      5,
+      1000
+    );
+    expect(recovered).toBe(1);
+    expect(deadlettered).toBe(0);
+    // Counter incremented to 1; task back on the inbox, not dead-lettered.
+    expect(await redis.get(CLAIM_KEYS.recoverCount(actorId, "m1"))).toBe("1");
+    expect(await inboxDepth(redis, actorId)).toBe(1);
+    expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(0);
+  });
+
+  it("cap exceeded lands the task in the DLQ (not the inbox) and deletes the counter", async () => {
+    await pushTasks(redis, actorId, [msgTask("m1")]);
+    expectOk(await store.claim(claimDLQ()));
+
+    // First recovery: counter -> 1, under cap=1, re-queued to the inbox.
+    let [r1, d1] = await evalRecovery("2030-01-01T00:00:02.000Z", 1, 1000);
+    expect(r1).toBe(1);
+    expect(d1).toBe(0);
+
+    // Re-claim the recovered task, then recover again -> counter -> 2 > cap -> DLQ.
+    expectOk(await store.claim(claimDLQ()));
+    const [r2, d2] = await evalRecovery("2030-01-01T00:00:04.000Z", 1, 1000);
+    expect(r2).toBe(0);
+    expect(d2).toBe(1);
+    expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(1);
+    expect(await inboxDepth(redis, actorId)).toBe(0);
+    expect(await redis.get(CLAIM_KEYS.recoverCount(actorId, "m1"))).toBeNull();
+  });
+
+  it("deadLetterEntries lists DLQ entries with decoded ids and timestamps; requeue returns a fresh budget", async () => {
+    await deadletterOnce("m1", "2030-01-01T00:00:02.000Z", 1000);
+
+    const listed = expectOk(
+      await store.deadLetterEntries({ actor_id: actorId })
+    );
+    expect(listed.entries.length).toBe(1);
+    expect(listed.entries[0].message_id).toBe("m1");
+    expect(listed.entries[0].deadlettered_at).toBe("2030-01-01T00:00:00.000Z");
+    expect(JSON.parse(listed.entries[0].payload).id).toBe("m1");
+
+    // Requeue moves the raw payload back to the inbox tail and deletes the counter.
+    const requeued = expectOk(
+      await store.requeue({ actor_id: actorId, message_id: "m1" })
+    );
+    expect(requeued.requeued).toBe(1);
+    expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(0);
+    expect(await inboxDepth(redis, actorId)).toBe(1);
+    expect(
+      await redis.get(CLAIM_KEYS.recoverCount(actorId, "m1"))
+    ).toBeNull();
+
+    // Fresh budget: reclaim and recover once (cap=1) stays on the inbox.
+    expectOk(
+      await store.claim(claimDLQ({ now: "2030-01-01T00:00:05.000Z" }))
+    );
+    const [r, d] = await evalRecovery("2030-01-01T00:00:07.000Z", 1, 1000);
+    expect(r).toBe(1);
+    expect(d).toBe(0);
+    expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(0);
+  });
+
+  it("requeue of a missing message is a typed dlq_entry_not_found", async () => {
+    const missing = await store.requeue({
+      actor_id: actorId,
+      message_id: "does-not-exist",
+    });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error.code).toBe("dlq_entry_not_found");
+  });
+
+  it("ack clears the per-message recovery counters it owns", async () => {
+    await pushTasks(redis, actorId, [msgTask("a1"), msgTask("a2")]);
+    const claimed = expectOk(await store.claim(claimDLQ({ max_batch: 2 })));
+    // Seed counters as if prior recoveries had accumulated.
+    await redis.set(CLAIM_KEYS.recoverCount(actorId, "a1"), "2");
+    await redis.set(CLAIM_KEYS.recoverCount(actorId, "a2"), "1");
+
+    const ack = expectOk(
+      await store.acknowledge({
+        claim_id: claimed.claim!.claim_id,
+        actor_id: actorId,
+        session_id: "session-runtime",
+      })
+    );
+    expect(ack.acknowledged).toBe(2);
+    expect(
+      await redis.get(CLAIM_KEYS.recoverCount(actorId, "a1"))
+    ).toBeNull();
+    expect(
+      await redis.get(CLAIM_KEYS.recoverCount(actorId, "a2"))
+    ).toBeNull();
+  });
+
+  it("DLQ LTRIM bound is enforced, keeping the newest entries", async () => {
+    await deadletterOnce("d1", "2030-01-01T00:00:02.000Z", 2);
+    await deadletterOnce("d2", "2030-01-01T00:00:04.000Z", 2);
+    await deadletterOnce("d3", "2030-01-01T00:00:06.000Z", 2);
+
+    expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(2);
+    const kept = await redis.lrange(DLQ_KEYS.list(actorId), 0, -1);
+    // LPUSH keeps newest at the head: [d3, d2]; d1 was trimmed (dropped).
+    expect(JSON.parse(kept[0]).id).toBe("d3");
+    expect(JSON.parse(kept[1]).id).toBe("d2");
+  });
+
+  it("concurrent recovery never double-counts a shared message id", async () => {
+    // Two separate expired claims, each holding a task with the SAME message id.
+    await pushTasks(redis, actorId, [msgTask("m1")]);
+    expectOk(await store.claim(claimDLQ()));
+    await pushTasks(redis, actorId, [msgTask("m1")]);
+    expectOk(await store.claim(claimDLQ()));
+
+    const [a, b] = await Promise.all([
+      evalRecovery("2030-01-01T00:00:02.000Z", 5, 1000),
+      evalRecovery("2030-01-01T00:00:02.000Z", 5, 1000),
+    ]);
+    // Exactly two tasks recovered total; the counter reflects two increments,
+    // so EVAL's atomic INCR never lost an update under concurrency.
+    expect(a[0] + b[0]).toBe(2);
+    expect(a[1] + b[1]).toBe(0);
+    expect(await redis.get(CLAIM_KEYS.recoverCount(actorId, "m1"))).toBe("2");
+  });
+
+  it("envelope decode survives a legacy payload without a message id", async () => {
+    // Legacy/undecodable envelope: valid JSON but no stable id.
+    const legacy = JSON.stringify({
+      from: "sender",
+      to: actorId,
+      type: "task",
+      payload: { content: "legacy" },
+    });
+    await pushTasks(redis, actorId, [legacy]);
+    expectOk(await store.claim(claimDLQ()));
+
+    // Recovery re-queues the legacy task (counter skipped), never dead-letters it.
+    const [r1, d1] = await evalRecovery("2030-01-01T00:00:02.000Z", 0, 1000);
+    expect(r1).toBe(1);
+    expect(d1).toBe(0);
+    expect(await inboxDepth(redis, actorId)).toBe(1);
+    expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(0);
+
+    // Ack of a claim containing a legacy task skips counter cleanup, no error.
+    const c2 = expectOk(await store.claim(claimDLQ()));
+    const ack = expectOk(
+      await store.acknowledge({
+        claim_id: c2.claim!.claim_id,
+        actor_id: actorId,
+        session_id: "session-runtime",
+      })
+    );
+    expect(ack.acknowledged).toBe(1);
+
+    // Id-bearing messages STILL dead-letter on the next cap after the legacy rode along.
+    await pushTasks(redis, actorId, [msgTask("m1")]);
+    expectOk(await store.claim(claimDLQ()));
+    const [r2, d2] = await evalRecovery("2030-01-01T00:00:04.000Z", 0, 1000);
+    expect(r2).toBe(0);
+    expect(d2).toBe(1);
+    expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(1);
+  });
+});
+

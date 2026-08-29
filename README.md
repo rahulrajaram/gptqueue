@@ -60,6 +60,25 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | `actor_status` | Classify a durable actor's runtime presence (`active`/`idle`/`starting`/`offline_launchable`/`offline_store_only`/`unavailable`) from its launch contract, live sessions, and any outstanding wake lease |
 | `claim_tasks` | Atomically claim up to `max_batch` messages (default 1, range 1–16) from your own durable inbox as an at-least-once delivery batch for the calling session. Returns the claim (`claim_id`, `tasks`, `expires_at`) or an explicit empty-batch result when nothing is pending. `ttl_seconds` (default 300, range 1–3600) bounds how long an unacknowledged claim stays out of the inbox before lazy recovery re-queues it. For registered durable actors, the directory's admitted `max_concurrency` caps the number of simultaneously outstanding unacked claims: once the ceiling is reached, a further claim is refused with a `concurrency_limit_reached` error until an existing claim is acknowledged or lazily recovered. Plain agents (no directory record) claim without any ceiling |
 | `acknowledge_tasks` | Acknowledge a `claim_id` returned by `claim_tasks`, confirming delivery of that batch. Only the claiming session may acknowledge its own claim; acknowledged tasks are removed so they are not re-delivered |
+| `renew_claim` | Renew an outstanding `claim_id` returned by `claim_tasks`, extending its expiry by `ttl_seconds` (default 300, range 1–3600) from the renew instant. Only the claiming session may renew its own claim (`not_claim_owner` otherwise). The extension is capped by the claim's provisional lifetime budget rendered from its `claimed_at`, so an endlessly-renewing runtime cannot hold a batch forever: a post-expiry renewal is `claim_expired` and budget exhaustion is `budget_exceeded` |
+| `dlq_status` | List the calling agent's dead-letter queue (DLQ) entries, newest first. A message is dead-lettered after it has been recovered (re-queued) more than `RECOVER_CAP` times without an acknowledge, so a perpetually failing message cannot loop through lazy recovery forever. Supports an optional `limit` (default 50, range 1–1000) |
+| `dlq_requeue` | Move one dead-lettered message (by `message_id` from `dlq_status`) from the calling agent's DLQ back to the tail of its own inbox, restoring a fresh recovery budget. Not found is a structured `dlq_entry_not_found` error |
+
+### Dead-letter queue (provisional policy)
+
+Lazy recovery (in `claims-recover.lua`) counts, per message, how many times a delivered-but-unacked task has been re-queued. Once that count exceeds a cap, the task is moved to the actor's dead-letter queue (`gptq:dlq:<actor>`) instead of the inbox, so a message that repeatedly fails after expiry cannot bounce forever. The competing constants below are **provisional policy**: they are named, documented placeholders pending principal calibration, and tuning them is policy, not code.
+
+- `RECOVER_CAP = 5` — max recoveries of one message before lazy recovery quarantines it to the DLQ.
+- `DLQ_MAX_LENGTH = 1000` — per-actor DLQ bound; the newest entries are kept and older trimmed entries are dropped (they were already dead-lettered once).
+- `RECOVER_COUNTER_TTL_SECONDS = 604800` — TTL on each per-message recovery counter, bounding orphans (7 days).
+
+Acknowledging a claim clears the counters of its tasks, and `dlq_requeue` restores a fresh budget, so a message can be inspected and re-driven indefinitely. Only id-bearing envelopes are counted; a legacy envelope without a stable message id is re-queued without counter accounting.
+
+### Claim renewal (provisional budget policy)
+
+`renew_claim` extends an outstanding claim's expiry so a runtime can keep a long-running batch alive without surrendering it to lazy recovery. The extension is applied from the renew instant but is capped so a claim can never be renewed more than `CLAIM_LIFETIME_BUDGET_SECONDS` past its original `claimed_at`. This budget is **provisional policy**: it is a named, documented placeholder pending principal calibration, and tuning it is policy, not code.
+
+- `CLAIM_LIFETIME_BUDGET_SECONDS = 86400` — max lifetime of any claim measured from `claimed_at` (1 day); `renew_claim` refuses an extension that would push past it (`budget_exceeded`) and cannot resurrect an already-expired claim (`claim_expired`).
 
 ## Prerequisites
 

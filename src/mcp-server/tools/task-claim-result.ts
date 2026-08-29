@@ -2,6 +2,9 @@ import { toolResult } from "../tool-result.js";
 import type {
   ClaimResult,
   AcknowledgeResult,
+  RenewResult,
+  DeadLetterEntriesResult,
+  RequeueResult,
 } from "../../core/task-claim-store.js";
 
 /**
@@ -37,6 +40,38 @@ export function acknowledgeTasksResult(result: AcknowledgeResult) {
     return errorResult(result);
   }
   return toolResult({ status: "ok", acknowledged: result.acknowledged });
+}
+
+/** Map a TaskClaimStore renew result to an MCP tool result. */
+export function renewClaimResult(result: RenewResult) {
+  if (!result.ok) {
+    return errorResult(result);
+  }
+  return toolResult({
+    status: "ok",
+    claim_id: result.claim_id,
+    expires_at: result.expires_at,
+  });
+}
+
+/** Map a TaskClaimStore dead-letter queue listing result to an MCP tool result. */
+export function dlqStatusResult(result: DeadLetterEntriesResult) {
+  if (!result.ok) {
+    return errorResult(result);
+  }
+  return toolResult({
+    status: "ok",
+    entries: result.entries,
+    count: result.entries.length,
+  });
+}
+
+/** Map a TaskClaimStore DLQ requeue result to an MCP tool result. */
+export function dlqRequeueResult(result: RequeueResult) {
+  if (!result.ok) {
+    return errorResult(result);
+  }
+  return toolResult({ status: "ok", requeued: result.requeued });
 }
 
 function errorResult(result: { error: { code: string; message: string } }) {
