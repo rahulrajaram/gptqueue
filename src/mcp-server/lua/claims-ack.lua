@@ -13,6 +13,12 @@
 -- ARGV[2] = actor_id expected on the stored claim
 -- ARGV[3] = session_id expected on the stored claim
 --
+-- On success, besides removing the claim, this also DELetes each task's sidecar
+-- recovery counter (gptq:rc:<actor_id>:<message_id>) so an acknowledged message
+-- starts a fresh recovery budget if it is ever re-delivered. Each task's
+-- envelope is decoded to its message id; a legacy / undecodable envelope (no
+-- stable id) simply skips that counter cleanup rather than failing the ack.
+--
 -- Returns { 1, task_count } on success,
 --         { 2, '' }        when the claim does not exist (or is corrupt),
 --         { 3, session_id } when the caller is not the claim owner.
@@ -44,4 +50,12 @@ end
 
 redis.call('HDEL', claims, claimId)
 redis.call('ZREM', index, claimId)
+for _, task in ipairs(claim.tasks) do
+  local msg
+  local msgDecoded = pcall(function() msg = cjson.decode(task) end)
+  if msgDecoded and type(msg) == 'table'
+     and type(msg.id) == 'string' and #msg.id > 0 then
+    redis.call('DEL', 'gptq:rc:' .. actorId .. ':' .. msg.id)
+  end
+end
 return { 1, #claim.tasks }

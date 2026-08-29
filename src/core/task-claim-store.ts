@@ -21,7 +21,12 @@ import { randomUUID } from "crypto";
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { CLAIM_KEYS, SESSION_KEYS } from "./keys.js";
+import {
+  CLAIM_KEYS,
+  DLQ_KEYS,
+  DLQ_PROVISIONAL,
+  SESSION_KEYS,
+} from "./keys.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
@@ -38,10 +43,14 @@ export interface TaskClaim {
 
 export type TaskClaimStoreErrorCode =
   | "invalid_claim_request"
+  | "invalid_renew_request"
   | "concurrency_limit_reached"
   | "unknown_claim"
   | "not_claim_owner"
-  | "store_corrupt";
+  | "claim_expired"
+  | "budget_exceeded"
+  | "store_corrupt"
+  | "dlq_entry_not_found";
 
 export type TaskClaimStoreError = Readonly<{
   code: TaskClaimStoreErrorCode;
@@ -56,7 +65,40 @@ export type AcknowledgeResult =
   | Readonly<{ ok: true; acknowledged: number }>
   | Readonly<{ ok: false; error: TaskClaimStoreError }>;
 
-export type RecoverResult = Readonly<{ ok: true; recovered: number }>;
+export type RenewResult =
+  | Readonly<{ ok: true; claim_id: string; expires_at: string }>
+  | Readonly<{ ok: false; error: TaskClaimStoreError }>;
+
+export type RecoverResult = Readonly<{
+  ok: true;
+  recovered: number;
+  deadlettered: number;
+}>;
+
+export type DeadLetterEntriesInput = Readonly<{
+  actor_id: string;
+  /** Maximum DLQ entries to return (defaults to the DLQ length bound). */
+  limit?: number;
+}>;
+
+export type DeadLetterEntry = Readonly<{
+  message_id: string | null; // null when the envelope carries no stable id (legacy)
+  payload: string; // RAW task payload exactly as stored / requeued
+  deadlettered_at: string | null; // message timestamp (DLQ stores raw payloads only)
+}>;
+
+export type DeadLetterEntriesResult =
+  | Readonly<{ ok: true; entries: readonly DeadLetterEntry[] }>
+  | Readonly<{ ok: false; error: TaskClaimStoreError }>;
+
+export type RequeueInput = Readonly<{
+  actor_id: string;
+  message_id: string;
+}>;
+
+export type RequeueResult =
+  | Readonly<{ ok: true; requeued: number }>
+  | Readonly<{ ok: false; error: TaskClaimStoreError }>;
 
 export type TaskClaimGetResult =
   | Readonly<{ ok: true; claim: TaskClaim | null }>
@@ -89,6 +131,17 @@ export interface AcknowledgeInput {
   readonly session_id: string;
 }
 
+export interface RenewInput {
+  readonly claim_id: string;
+  readonly actor_id: string;
+  readonly session_id: string;
+  /** Lease extension in whole seconds (int 1..3600), applied from the renew instant. */
+  readonly ttl_seconds: number;
+  /** Lifetime budget in whole seconds; renewal expiry is capped at claimed_at + budget. */
+  readonly budget_seconds: number;
+  readonly now: string; // ISO timestamp; the adapter layer reads the clock, not the core
+}
+
 export interface ActiveClaimInput {
   readonly actor_id: string;
   readonly session_id: string;
@@ -103,6 +156,7 @@ export class TaskClaimStore {
   private readonly recoverScript: string;
   private readonly batchClaimScript: string;
   private readonly ackScript: string;
+  private readonly renewScript: string;
 
   constructor(redis: Redis) {
     this.redis = redis;
@@ -115,25 +169,107 @@ export class TaskClaimStore {
       "utf-8"
     );
     this.ackScript = readFileSync(join(LUA_DIR, "claims-ack.lua"), "utf-8");
+    this.renewScript = readFileSync(join(LUA_DIR, "claims-renew.lua"), "utf-8");
   }
 
   /**
    * Lazily recover every expired outstanding claim for an actor back onto its
    * inbox. Run on every claim before issuing a new one (and available to
-   * observers). Returns the number of tasks re-queued. Recovered messages
-   * re-enter at the inbox's tail (see the module doc).
+   * observers). Returns how many tasks were re-queued and how many were
+   * dead-lettered. Recovered messages re-enter at the inbox's tail; a message
+   * whose recovery counter exceeds DLQ_PROVISIONAL.RECOVER_CAP is quarantined
+   * to the actor's DLQ instead (see the module doc).
    */
   async recoverExpired(input: RecoverInput): Promise<RecoverResult> {
     const nowMs = Date.parse(input.now);
-    const result = (await this.redis.eval(
+    const [recovered, deadlettered] = (await this.redis.eval(
       this.recoverScript,
-      3,
+      4,
       CLAIM_KEYS.index(input.actor_id),
       CLAIM_KEYS.claims,
       SESSION_KEYS.queue(input.actor_id),
-      nowMs
-    )) as number;
-    return { ok: true, recovered: result };
+      DLQ_KEYS.list(input.actor_id),
+      nowMs,
+      DLQ_PROVISIONAL.RECOVER_CAP,
+      DLQ_PROVISIONAL.DLQ_MAX_LENGTH,
+      DLQ_PROVISIONAL.RECOVER_COUNTER_TTL_SECONDS
+    )) as [number, number];
+    return { ok: true, recovered, deadlettered };
+  }
+
+  /**
+   * Read the calling actor's dead-letter queue, newest first. DLQ entries are
+   * raw task payloads (the strings LPUSHed by lazy recovery), so each entry's
+   * message_id and deadlettered_at are decoded from the stored envelope;
+   * legacy payloads yield null for both. Returns at most `limit` entries
+   * (defaults to the DLQ length bound).
+   */
+  async deadLetterEntries(
+    input: DeadLetterEntriesInput
+  ): Promise<DeadLetterEntriesResult> {
+    const limit = input.limit ?? DLQ_PROVISIONAL.DLQ_MAX_LENGTH;
+    const clamped = Math.max(1, Math.floor(limit));
+    const list = DLQ_KEYS.list(input.actor_id);
+    const raw = await this.redis.lrange(list, 0, clamped - 1);
+    const entries = raw.map((payload) => {
+      let message_id: string | null = null;
+      let deadlettered_at: string | null = null;
+      try {
+        const msg = JSON.parse(payload) as {
+          id?: unknown;
+          timestamp?: unknown;
+        };
+        if (typeof msg.id === "string") message_id = msg.id;
+        if (typeof msg.timestamp === "string") deadlettered_at = msg.timestamp;
+      } catch {
+        // Legacy / undecodable envelope: leave message_id and deadlettered_at null.
+      }
+      return Object.freeze({ message_id, payload, deadlettered_at });
+    });
+    return { ok: true, entries };
+  }
+
+  /**
+   * Move one dead-lettered message from the actor's DLQ back to the inbox tail,
+   * restoring a fresh recovery budget (the message's counter key is DELeted).
+   * The matching DLQ envelope is LREM'd by exact string match, then the raw
+   * payload is RPUSHed to the inbox. Not found is a typed dlq_entry_not_found
+   * error.
+   */
+  async requeue(input: RequeueInput): Promise<RequeueResult> {
+    const list = DLQ_KEYS.list(input.actor_id);
+    const raw = await this.redis.lrange(list, 0, -1);
+    let target: string | null = null;
+    for (const payload of raw) {
+      let id: unknown;
+      try {
+        id = (JSON.parse(payload) as { id?: unknown }).id;
+      } catch {
+        continue;
+      }
+      if (id === input.message_id) {
+        target = payload;
+        break;
+      }
+    }
+    if (target === null) {
+      return fail(
+        "dlq_entry_not_found",
+        `no DLQ entry for message '${input.message_id}' on actor '${input.actor_id}'`
+      );
+    }
+    const removed = await this.redis.lrem(list, 1, target);
+    if (removed !== 1) {
+      return fail(
+        "dlq_entry_not_found",
+        `DLQ entry for message '${input.message_id}' on actor '${input.actor_id}' could not be removed`
+      );
+    }
+    await this.redis.rpush(SESSION_KEYS.queue(input.actor_id), target);
+    await this.redis.del(
+      CLAIM_KEYS.recoverCount(input.actor_id, input.message_id)
+    );
+    return { ok: true, requeued: 1 };
   }
 
   /**
@@ -247,6 +383,71 @@ export class TaskClaimStore {
       return fail(
         "unknown_claim",
         `no outstanding claim '${input.claim_id}' for actor '${input.actor_id}'`
+      );
+    }
+    return fail(
+      "not_claim_owner",
+      `claim '${input.claim_id}' is owned by session '${detail}'`
+    );
+  }
+
+  /**
+   * Renew an outstanding claim, extending its expiry by `ttl_seconds` (from
+   * the renew instant) but never past the claim's lifetime budget rendered from
+   * its `claimed_at` (claimed_at + budget_seconds). The caller must be the
+   * owning session; the claim must not already be expired (renewal cannot
+   * resurrect a claim). The new expiry is persisted atomically in both the
+   * hash record and the index zset score. A second or foreign renewal, a
+   * post-expiry renewal, or a budget-exhausted renewal are each a typed error.
+   */
+  async renew(input: RenewInput): Promise<RenewResult> {
+    if (
+      input.claim_id.trim().length === 0 ||
+      input.actor_id.trim().length === 0 ||
+      input.session_id.trim().length === 0 ||
+      !Number.isInteger(input.ttl_seconds) ||
+      input.ttl_seconds < 1 ||
+      input.ttl_seconds > 3600
+    ) {
+      return fail(
+        "invalid_renew_request",
+        "renew requires a non-empty claim_id, actor_id and session_id, and ttl_seconds an integer in 1..3600"
+      );
+    }
+
+    const result = (await this.redis.eval(
+      this.renewScript,
+      2,
+      CLAIM_KEYS.claims,
+      CLAIM_KEYS.index(input.actor_id),
+      input.claim_id,
+      input.actor_id,
+      input.session_id,
+      Date.parse(input.now),
+      input.ttl_seconds,
+      input.budget_seconds
+    )) as [number, string];
+    const [code, detail] = result;
+
+    if (code === 1) {
+      return { ok: true, claim_id: input.claim_id, expires_at: detail };
+    }
+    if (code === 2) {
+      return fail(
+        "unknown_claim",
+        `no outstanding claim '${input.claim_id}' for actor '${input.actor_id}'`
+      );
+    }
+    if (code === 4) {
+      return fail(
+        "claim_expired",
+        `claim '${input.claim_id}' for actor '${input.actor_id}' has expired and cannot be renewed`
+      );
+    }
+    if (code === 5) {
+      return fail(
+        "budget_exceeded",
+        `claim '${input.claim_id}' for actor '${input.actor_id}' has exhausted its lifetime budget and cannot be renewed`
       );
     }
     return fail(

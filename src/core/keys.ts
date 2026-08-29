@@ -70,4 +70,41 @@ export const CLAIM_KEYS = {
   claims: "gptq:claims",
   /** Per-actor zset of outstanding claims: member = claim_id, score = expires_at epoch ms. */
   index: (actorId: string) => `gptq:claims-index:${actorId}`,
+  /**
+   * Sidecar recovery counter per message (string, INCR'd in claims-recover.lua):
+   * counts how many times a message has been recovered onto its inbox so lazy
+   * recovery can quarantine a repeatedly-failed message to the DLQ. Gets a long
+   * EX on first INCR to bound orphans.
+   */
+  recoverCount: (actorId: string, messageId: string) =>
+    `gptq:rc:${actorId}:${messageId}`,
+} as const;
+
+/** Dead-letter queue (DLQ) key schema. Lists store RAW task payloads (newest at head). */
+export const DLQ_KEYS = {
+  /** Per-actor list of dead-lettered raw task payloads; length bounded by DLQ_PROVISIONAL.DLQ_MAX_LENGTH. */
+  list: (actorId: string) => `gptq:dlq:${actorId}`,
+} as const;
+
+/**
+ * PROVISIONAL dead-letter / recovery-quarantine / claim-lifecycle policy
+ * constants. These are named, documented placeholders pending principal
+ * calibration: the recovery cap, the DLQ length bound, the per-message
+ * recovery-counter TTL, and the claim lifetime budget. Tuning these is policy,
+ * not code — freezes are imports, so tests that need a smaller value invoke the
+ * relevant Lua directly with a small ARGV.
+ */
+export const DLQ_PROVISIONAL = {
+  /** Max recoveries of one message before lazy recovery quarantines it to the DLQ. */
+  RECOVER_CAP: 5,
+  /** Max DLQ entries kept per actor (newest retained; trimmed entries are dropped). */
+  DLQ_MAX_LENGTH: 1000,
+  /** TTL (seconds) on each per-message recovery counter once created, bounding orphans. */
+  RECOVER_COUNTER_TTL_SECONDS: 604800, // 7 days
+  /**
+   * PROVISIONAL claim lifetime budget (seconds): the hard cap on how far past
+   * its claimed_at instant a claim may be renewed (`claimed_at_ms + budget`),
+   * so an endlessly-renewing runtime cannot hold a batch forever. 86400 = 1 day.
+   */
+  CLAIM_LIFETIME_BUDGET_SECONDS: 86400,
 } as const;

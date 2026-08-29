@@ -33,6 +33,9 @@ import {
   acknowledgeTasksSchema,
   acknowledgeTasks,
 } from "../mcp-server/tools/acknowledge-tasks.js";
+import { renewClaimSchema, renewClaim } from "../mcp-server/tools/renew-claim.js";
+import { dlqStatusSchema, dlqStatus } from "../mcp-server/tools/dlq-status.js";
+import { dlqRequeueSchema, dlqRequeue } from "../mcp-server/tools/dlq-requeue.js";
 import { stableToolError } from "../mcp-server/tool-result.js";
 
 export const GPTQUEUE_INSTRUCTIONS =
@@ -144,5 +147,26 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
     "[safety: writable] Acknowledge a claim_id returned by claim_tasks, confirming delivery of that batch. Only the claiming session may acknowledge its own claim; acknowledged tasks are not re-delivered.",
     acknowledgeTasksSchema.shape,
     async (params) => safeToolCall(() => acknowledgeTasks(redisClient, acknowledgeTasksSchema.parse(params)))
+  );
+
+  server.tool(
+    "renew_claim",
+    "[safety: writable] Renew an outstanding claim_id returned by claim_tasks, extending its expiry by ttl_seconds (default 300, range 1-3600). Only the owning session may renew; the extension is capped by the claim's provisional lifetime budget so an endlessly-renewing runtime cannot hold a batch forever.",
+    renewClaimSchema.shape,
+    async (params) => safeToolCall(() => renewClaim(redisClient, renewClaimSchema.parse(params)))
+  );
+
+  server.tool(
+    "dlq_status",
+    "[safety: readonly] List the calling agent's dead-letter queue (DLQ) entries, newest first. A message is dead-lettered after repeated unacknowledged recovery cycles (a provisional policy).",
+    dlqStatusSchema.shape,
+    async (params) => safeToolCall(() => dlqStatus(redisClient, dlqStatusSchema.parse(params)))
+  );
+
+  server.tool(
+    "dlq_requeue",
+    "[safety: writable] Move one dead-lettered message (by message_id from dlq_status) from the calling agent's DLQ back to the tail of its own inbox with a fresh recovery budget.",
+    dlqRequeueSchema.shape,
+    async (params) => safeToolCall(() => dlqRequeue(redisClient, dlqRequeueSchema.parse(params)))
   );
 }
