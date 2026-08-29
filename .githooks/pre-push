@@ -3,6 +3,16 @@ set -euo pipefail
 COMMITHOOKS_DIR="$(git rev-parse --git-dir)"
 source "$COMMITHOOKS_DIR/lib/common.sh"
 source "$COMMITHOOKS_DIR/lib/pre-push.sh"
+source "$(git rev-parse --show-toplevel)/.githooks/lib/review-gate.sh"
 
-commithooks_reject_wip_commits "$@"
+# Buffer the pre-push ref stream (<local-ref> <local-sha> <remote-ref>
+# <remote-sha> per line) once. The shared WIP check and the review-freshness
+# gate both read from this buffer so neither eats the other's stdin.
+__ref_stream="$(mktemp)"
+cat > "$__ref_stream"
+trap 'rm -f "$__ref_stream"' EXIT
+
+# Review-freshness gate first: hard-stop before pushing unreviewed work.
+commithooks_check_review_freshness "$@" < "$__ref_stream"
+commithooks_reject_wip_commits "$@" < "$__ref_stream"
 commithooks_check_branch_name
