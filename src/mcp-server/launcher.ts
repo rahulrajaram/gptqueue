@@ -10,15 +10,19 @@
  *   - It performs no logging and touches no Redis.
  *   - The child is spawned detached and unref'd so it outlives this server
  *     process.
+ *   - It re-checks the operator launch allowlist on EVERY dispatch, fail-closed,
+ *     so a stale actor-directory entry cannot spawn what the operator has since
+ *     disallowed (defense in depth over admission-time enforcement).
  *
- * A contract that cannot be spawned (e.g. a nonexistent binary) resolves to a
- * `launch_failed` outcome rather than throwing. The caller decides what to do
- * with that outcome; the wake lease TTL independently expires an activation
- * that never came up.
+ * A contract that fails the launch policy or cannot be spawned (e.g. a
+ * nonexistent binary) resolves to a `launch_failed` outcome rather than
+ * throwing. The caller decides what to do with that outcome; the wake lease TTL
+ * independently expires an activation that never came up.
  */
 
 import { spawn } from "child_process";
 import type { RuntimeLaunchContract } from "../core/actor-directory.js";
+import { evaluateLaunchPolicy } from "../core/launch-policy.js";
 
 export interface LaunchOutcome {
   readonly dispatched: boolean;
@@ -49,13 +53,28 @@ export const isPidAlive = (pid: number): boolean => {
 };
 
 /**
- * Dispatch a runtime launch from its contract. Resolves on the child's
- * "spawn" event with the pid, or on "error" with a `launch_failed` outcome.
- * Resolves on the first event and never throws.
+ * Dispatch a runtime launch from its contract. The contract is first
+ * re-checked against the operator launch allowlist (fail-closed: an absent or
+ * unparseable allowlist, a shell delegator, an unconfined cwd, or a
+ * non-allowlisted command all refuse to spawn as a `launch_failed` outcome).
+ * A policy-passing contract then resolves on the child's "spawn" event with
+ * the pid, or on "error" with a `launch_failed` outcome. Resolves on the
+ * first event and never throws.
  */
 export const dispatchLaunch = async (
   contract: RuntimeLaunchContract
 ): Promise<LaunchOutcome> => {
+  const policy = await evaluateLaunchPolicy(contract);
+  if (!policy.ok) {
+    return {
+      dispatched: false,
+      error: {
+        code: "launch_failed",
+        message: policy.error.message,
+      },
+    };
+  }
+
   return new Promise<LaunchOutcome>((resolve) => {
     let child;
     try {

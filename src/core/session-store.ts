@@ -154,6 +154,17 @@ export class SessionStore {
     );
   }
 
+  /**
+   * Whether a name currently has a REGISTERED agent (any session) in the
+   * canonical registry hash. This is a name->existence lookup independent of
+   * any single session: a registered-but-offline agent still counts. Used by
+   * send_message's resolve-then-push recipient validation so a typo'd or
+   * unknown name cannot silently create an orphan mailbox.
+   */
+  async resolveRegistered(name: string): Promise<boolean> {
+    return (await this.redis.hexists(SESSION_KEYS.registry, name)) === 1;
+  }
+
   /** Get lease state for a session. */
   async getLeaseState(sessionId: string): Promise<LeaseState> {
     const ttl = await this.redis.ttl(SESSION_KEYS.lease(sessionId));

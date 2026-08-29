@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { Redis } from "ioredis";
 import {
   WakeLeaseStore,
@@ -7,6 +7,7 @@ import {
 import { ACTOR_KEYS } from "../src/core/keys.js";
 import type { RuntimeLaunchContract } from "../src/core/actor-directory.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
+import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
 import {
   actorStatus,
   actorStatusSchema,
@@ -17,6 +18,19 @@ import {
 } from "../src/mcp-server/tools/register-agent.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+
+// wake_if_offline admission now requires an operator allowlist. Scaffold one
+// permitting the test launchers ("/usr/bin/pi") and point GPTQUEUE_LAUNCH_ALLOWLIST
+// at it so the presence matrix can register durable actors.
+const allowlist = scaffoldLaunchAllowlist([
+  {
+    command: "/usr/bin/pi",
+    allowed_args_prefixes: [[], ["--agent", "matrix"]],
+    comment: "test pi launcher",
+  },
+]);
+allowlist.set();
+afterAll(() => allowlist.cleanup());
 
 async function flushTestKeys(redis: Redis): Promise<void> {
   const keys = await redis.keys("gptq:*");

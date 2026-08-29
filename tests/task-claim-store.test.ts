@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
+import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
 import { Redis } from "ioredis";
 import { spawn } from "child_process";
 import { readFileSync } from "fs";
@@ -28,6 +29,19 @@ import {
 import type { RuntimeLaunchContract } from "../src/core/actor-directory.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+
+// wake_if_offline admission now requires an operator allowlist. Scaffold one
+// permitting the test launcher (process.execPath) and point
+// GPTQUEUE_LAUNCH_ALLOWLIST at it so durable actors can be registered.
+const allowlist = scaffoldLaunchAllowlist([
+  {
+    command: process.execPath,
+    allowed_args_prefixes: [[], ["-e"]],
+    comment: "test process.execPath launcher",
+  },
+]);
+allowlist.set();
+afterAll(() => allowlist.cleanup());
 
 async function flushTestKeys(redis: Redis): Promise<void> {
   const keys = await redis.keys("gptq:*");

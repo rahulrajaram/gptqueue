@@ -47,7 +47,7 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | Tool | Description |
 |---|---|
 | `register_agent` | Register with a name, role, and description. Returns a `session_id` for session resumption |
-| `send_message` | Send a typed message (`task`/`result`/`status`/`error`/`ping`) to another agent's inbox. Supports optional `metadata`, `in_reply_to`, `session_id`, and a caller `idempotency_key` (retained for 24 hours) for retry-safe delivery. For `wake_if_offline` durable-actor recipients whose runtime is offline, the message is persisted first and an additive `wake` field on the result reports whether the actor's runtime was dispatched (`wake_dispatched`), coalesced onto an in-flight wake (`wake_coalesced`), or failed to launch (`launch_failed`) |
+| `send_message` | Send a typed message (`task`/`result`/`status`/`error`/`ping`) to another agent's inbox. Supports optional `metadata`, `in_reply_to`, `session_id`, and a caller `idempotency_key` (retained for 24 hours) for retry-safe delivery. Recipients are resolved BEFORE any queue write: the target must be a durable actor-directory record or a registered agent, otherwise the send is rejected with a structured `unknown_recipient` error and no mailbox/queue keys are created (a typo'd or unknown name can never silently create an orphan mailbox). Self-send remains valid. For `wake_if_offline` durable-actor recipients whose runtime is offline, the message is persisted first and an additive `wake` field on the result reports whether the actor's runtime was dispatched (`wake_dispatched`), coalesced onto an in-flight wake (`wake_coalesced`), or failed to launch (`launch_failed`) |
 | `receive_message` | Blocking pop from your inbox (default timeout: 5s; accepted range: 0–60 whole seconds). Supports optional `session_id` for stateless transports. Plain agents (no actor-directory record) keep this legacy at-most-once `BLPOP`. Durable actors (those with an actor-directory record) are rejected with a structured `durable_actor_claim_required` error and must consume their inbox via `claim_tasks`/`acknowledge_tasks` instead |
 | `list_agents` | Discover all registered agents with online/offline status |
 | `get_queue_status` | Check queue depth and capacity for one or all agents |
@@ -56,7 +56,7 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | `custody_claim` | Claim custody of a worktree for this session. Handles initial claim, graceful re-claim, and successor takeover (forfeited worktrees require an `inventory`) |
 | `custody_release` | Release a held worktree, recording a structured handoff for the next custodian. Only the current custodian session may release |
 | `custody_status` | Inspect a worktree's custody record, or list every stored record. Expired leases are forfeited lazily |
-| `actor_register` | Register a durable actor profile and launch contract in the shared actor directory. The calling session owns the actor's profile; `wake_if_offline` actors must declare a `launch_command` |
+| `actor_register` | Register a durable actor profile and launch contract in the shared actor directory. The durable actor identity is DERIVED from the calling session's registered agent name (there is no `actor_id` argument), so the registered name, directory key, wake/presence key, and delivery/claim identity can never diverge. The calling session owns the actor's profile; `wake_if_offline` actors must declare a `launch_command` |
 | `actor_status` | Classify a durable actor's runtime presence (`active`/`idle`/`starting`/`offline_launchable`/`offline_store_only`/`unavailable`) from its launch contract, live sessions, and any outstanding wake lease |
 | `claim_tasks` | Atomically claim up to `max_batch` messages (default 1, range 1–16) from your own durable inbox as an at-least-once delivery batch for the calling session. Returns the claim (`claim_id`, `tasks`, `expires_at`) or an explicit empty-batch result when nothing is pending. `ttl_seconds` (default 300, range 1–3600) bounds how long an unacknowledged claim stays out of the inbox before lazy recovery re-queues it. For registered durable actors, the directory's admitted `max_concurrency` caps the number of simultaneously outstanding unacked claims: once the ceiling is reached, a further claim is refused with a `concurrency_limit_reached` error until an existing claim is acknowledged or lazily recovered. Plain agents (no directory record) claim without any ceiling |
 | `acknowledge_tasks` | Acknowledge a `claim_id` returned by `claim_tasks`, confirming delivery of that batch. Only the claiming session may acknowledge its own claim; acknowledged tasks are removed so they are not re-delivered |
@@ -114,6 +114,36 @@ node /path/to/gptqueue/dist/transports/http.js --port 3001
 ```
 
 Each connecting client gets its own MCP session backed by Redis. Sessions survive reconnects.
+
+#### Security boundary
+
+The HTTP server binds **loopback (`127.0.0.1`) by default**. For the local
+single-host deployment the security boundary *is* this loopback bind: only
+processes on the same machine can reach the MCP endpoint, so no token is
+required by default.
+
+Two environment variables control the surface:
+
+| Variable | Default | Description |
+|---|---|---|
+| `GPTQUEUE_HOST` | `127.0.0.1` | Interface to bind. Set to a non-loopback address only when the server must be reachable beyond one host. |
+| `GPTQUEUE_HTTP_TOKEN` | _(none)_ | Shared `Bearer` secret. When set (regardless of host), every `/mcp` request must present `Authorization: Bearer <token>`. `/health` stays unauthenticated so process managers can liveness-check the server. |
+
+Refusal rule: if `GPTQUEUE_HOST` is set to a **non-loopback** address and
+`GPTQUEUE_HTTP_TOKEN` is **unset or empty**, the server **refuses to start**
+(exit non-zero before listening, with a clear message) rather than expose an
+unauthenticated MCP surface to every reachable host. If the host is loopback
+(`127.0.0.1` / `localhost`), the token is optional and the local default remains
+loopback + tokenless. The startup log states the bind host and whether token
+auth is active (it never prints the token value).
+
+Example — token-authenticated server reachable from other machines:
+
+```bash
+GPTQUEUE_HOST=0.0.0.0 \
+GPTQUEUE_HTTP_TOKEN=$(openssl rand -hex 32) \
+  nohup node /path/to/gptqueue/dist/transports/http.js --port 3001 > /tmp/gptqueue.log 2>&1 &
+```
 GPTQueue is an external/shared coordination plane; use it in place of native
 in-session agent collaboration for a workflow, not concurrently with it.
 
@@ -122,6 +152,65 @@ Tool responses retain their legacy text JSON and also expose normalized
 `SESSION_UNAVAILABLE`, `AGENT_NOT_REGISTERED`, and `QUEUE_FULL`.
 
 Health check: `GET /health` returns `{"status":"ok","sessions":N}`.
+
+### Wake launch allowlist (PROVISIONAL)
+
+When a durable `wake_if_offline` actor is woken, the server spawns the
+actor's registered `launch_command` directly (`shell:false`, never
+interpolated into a string). Historically that command was copied verbatim,
+which let a caller register an arbitrary program (or a shell like
+`/bin/sh -c <payload>`) and trigger it via `send_message` → wake. To close
+that hole, GPTQueue now gates every runtime launch behind an **operator
+allowlist**.
+
+The allowlist is an operator-authored file at `./.gptqueue/launch-allowlist.json`
+relative to the server's working directory (override the path with the
+`GPTQUEUE_LAUNCH_ALLOWLIST` env var). Format:
+
+```json
+{
+  "version": 1,
+  "commands": [
+    {
+      "command": "/absolute/path/or/name",
+      "allowed_args_prefixes": [["--agent", "alice"], []],
+      "comment": "optional human note"
+    }
+  ]
+}
+```
+
+Matching rules (identical at admission and at dispatch):
+
+- A requested `launch_command` must **exactly match** an allowlisted command
+  string after normalization to its basename (so `node` and `/usr/bin/node`
+  alias).
+- A requested arg vector must be **prefix-compatible** with at least one
+  `allowed_args_prefixes` entry: `requested[i]` must equal `allowed[i]` for the
+  prefix length; args beyond the prefix are free. `[]` accepts any args.
+- `launch_cwd`, when provided, must be an existing directory **within the
+  server workspace root** (`path.resolve` + prefix check; realpath-based
+  symlink-escape handling is intentionally out of scope).
+
+Fail-closed semantics:
+
+- A **new** `wake_if_offline` registration is refused with a typed error
+  (`launch_not_allowlisted`) if the allowlist file is absent, unparseable, or
+  does not permit the requested command/args. Already-admitted actors keep
+  functioning.
+- Dangerous delegators — a command whose basename is a shell (`sh`, `bash`,
+  `zsh`, `dash`, `fish`, `ksh`, `cmd`, `powershell`, `pwsh`) or a shell
+  carrying `-c`/`-lc`/`-Command` — are rejected **regardless of the
+  allowlist** (`launch_command_rejected`).
+- Rejections apply again at **dispatch** (`dispatchLaunch` re-reads the
+  allowlist), so a stale actor-directory entry cannot spawn a command the
+  operator has since disallowed. A refused dispatch surfaces as
+  `wake.status: "launch_failed"` on the send.
+
+> **PROVISIONAL**: the global operator allowlist is a stop-gap. It is slated
+> to be replaced by **per-actor operator grants** (each actor may only launch
+> programs its own operator explicitly granted). Operators should treat the
+> allowlist as the minimum permit set and audit it regularly.
 
 ## Configuration
 
@@ -187,6 +276,9 @@ Optionally add the hook script to `~/.claude/settings.json` for automatic startu
 | Variable | Default | Description |
 |---|---|---|
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
+| `GPTQUEUE_HOST` | `127.0.0.1` | HTTP server bind host; non-loopback requires `GPTQUEUE_HTTP_TOKEN` |
+| `GPTQUEUE_LAUNCH_ALLOWLIST` | `./.gptqueue/launch-allowlist.json` | Path of the operator wake-launch allowlist (see the security section) |
+| `GPTQUEUE_HTTP_TOKEN` | _(none)_ | Bearer token required on every `/mcp` request when set |
 | `GPTQ_AGENT_NAME` | _(none)_ | Pre-register with this agent name on startup (stdio only) |
 | `GPTQ_QUEUE_BOUND` | `10` | Max messages per agent inbox |
 | `GPTQ_HTTP_PORT` | `3001` | HTTP server port |
@@ -215,6 +307,8 @@ durable actor woken through the PTY consumes its batch at-least-once.
 3. **Discovery** -- Any agent (even unregistered) can call `list_agents` to see all registered agents and whether they're online. Online status is computed from active session leases.
 
 4. **Messaging** -- `send_message` pushes to the target agent's Redis list (`gptq:q:<name>`). A Lua script enforces the queue bound atomically. If the queue is full, the sender retries with exponential backoff (up to 10 attempts).
+
+   **Resolve-then-push.** Before any queue write, `send_message` resolves the recipient: it proceeds when the target has a durable actor-directory record or is a registered agent; otherwise it rejects the send with a structured `unknown_recipient` error and creates no queue (`gptq:q:<name>`) or metadata (`gptq:meta:<name>`) keys. A typo'd or unknown name can never silently create an orphan mailbox. Self-send (to the caller's own registered name) remains valid.
 
    **Wake-on-send.** When the recipient is a durable `wake_if_offline` actor (see `actor_register`) with no live runtime and a runnable launch contract, `send_message` persists the message first, then attempts to wake the actor: it acquires a bounded (60s) per-actor wake lease, and if it owns the lease, spawns the actor's launch command (detached, no shell). The send always succeeds regardless of the wake outcome, and the additive result field `wake` reports `wake_dispatched`/`wake_coalesced`/`launch_failed`/`wake_error`. `store_only` actors and plain agents (no durable record) never wake, so their send behavior is unchanged.
 

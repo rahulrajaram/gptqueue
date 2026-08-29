@@ -17,11 +17,44 @@
  */
 
 import { execSync, spawn, type ChildProcess } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Redis } from "ioredis";
 
-// ---------------------------------------------------------------------------
-// Constants (kept together so the isolation story is auditable in one place)
-// ---------------------------------------------------------------------------
+// ---- Launch-allowlist scaffold for the spawned server --------------------
+// The server child enforces the operator launch allowlist fail-closed at
+// admission + dispatch. Scaffold a temp allowlist permitting the commands the
+// wire suites register (process.execPath and the test dead binary) and pass
+// GPTQUEUE_LAUNCH_ALLOWLIST so the server resolves it regardless of cwd.
+const allowlistPath = join(
+  mkdtempSync(join(tmpdir(), "gptqueue-integration-allowlist-")),
+  "launch-allowlist.json"
+);
+writeFileSync(
+  allowlistPath,
+  JSON.stringify(
+    {
+      version: 1,
+      commands: [
+        {
+          command: process.execPath,
+          allowed_args_prefixes: [[], ["-e"]],
+          comment: "integration test node launcher",
+        },
+        {
+          command: "/nonexistent/definitely-not-a-binary-987654",
+          allowed_args_prefixes: [[]],
+          comment: "integration test dead binary (launch failure path)",
+        },
+      ],
+    },
+    null,
+    2
+  )
+);
+
+// ---- Constants (kept together so the isolation story is auditable) -------
 export const INTEGRATION_PORT = 8199;
 export const INTEGRATION_REDIS_URL = "redis://127.0.0.1:6379/15";
 const BASE = `http://127.0.0.1:${INTEGRATION_PORT}/mcp`;
@@ -105,7 +138,11 @@ export async function setupIntegrationServer(): Promise<IntegrationServer> {
     ["dist/transports/http.js", "--port", String(INTEGRATION_PORT)],
     {
       cwd: ROOT,
-      env: { ...process.env, REDIS_URL: INTEGRATION_REDIS_URL },
+      env: {
+        ...process.env,
+        REDIS_URL: INTEGRATION_REDIS_URL,
+        GPTQUEUE_LAUNCH_ALLOWLIST: allowlistPath,
+      },
       stdio: ["ignore", "pipe", "pipe"],
     }
   );

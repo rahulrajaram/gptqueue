@@ -6,6 +6,7 @@ import {
   type RuntimeLaunchContract,
 } from "../src/core/actor-directory.js";
 import { ACTOR_KEYS } from "../src/core/keys.js";
+import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
 
@@ -22,7 +23,6 @@ const profileInput = (overrides: Record<string, unknown> = {}): unknown => ({
   capabilities: ["build"],
   workspace_root: "/workspace",
   working_directory: "/workspace",
-  state_directory: "/state/actor-a",
   runtime: "pi",
   activation_policy: { mode: "wake_if_offline" },
   max_concurrency: 1,
@@ -59,7 +59,21 @@ describe("ActorDirectory", () => {
   let redis: Redis;
   let store: ActorDirectory;
 
+  // wake_if_offline admission now requires an operator allowlist. Scaffold one
+  // in a temp dir for the file's launches ("/usr/bin/pi") and point
+  // GPTQUEUE_LAUNCH_ALLOWLIST at it so the happy-path + ownership tests pass
+  // admission.
+  let allowlist: ReturnType<typeof scaffoldLaunchAllowlist>;
+
   beforeEach(async () => {
+    allowlist = scaffoldLaunchAllowlist([
+      {
+        command: "/usr/bin/pi",
+        allowed_args_prefixes: [[], ["--agent", "alice"]],
+        comment: "test pi launcher",
+      },
+    ]);
+    allowlist.set();
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
     await flushTestKeys(redis);
     store = new ActorDirectory(redis);
@@ -68,6 +82,7 @@ describe("ActorDirectory", () => {
   afterEach(async () => {
     await flushTestKeys(redis);
     await redis.quit();
+    allowlist.cleanup();
   });
 
   it("registers an admitted profile on the happy path, deeply frozen", async () => {

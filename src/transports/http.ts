@@ -11,7 +11,7 @@
  *   node dist/transports/http.js [--port 3001]
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -31,8 +31,88 @@ function parsePort(): number {
   return parseInt(process.env.GPTQ_HTTP_PORT || String(DEFAULT_PORT), 10);
 }
 
+// ---------------------------------------------------------------------------
+// Bind host + token auth (security boundary)
+//
+// Local single-host deployments bind the loopback interface by default. A
+// non-loopback bind is only allowed when a shared Bearer token has been
+// configured; otherwise the server REFUSES to start, because exposing an
+// unauthenticated MCP surface to every reachable host is unsafe.
+// ---------------------------------------------------------------------------
 const port = parsePort();
+
+/** Host to bind. Defaults to loopback unless GPTQUEUE_HOST is provided. */
+function resolveHost(): string {
+  return process.env.GPTQUEUE_HOST || "127.0.0.1";
+}
+
+/** True when the host is a loopback address so token auth is optional. */
+function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+const httpToken = process.env.GPTQUEUE_HTTP_TOKEN || "";
+const tokenActive = httpToken.length > 0;
+const host = resolveHost();
+
+if (!isLoopbackHost(host) && !tokenActive) {
+  console.error(
+    `[gptqueue-http] REFUSING TO START: binding to non-loopback host "${host}" ` +
+      `requires GPTQUEUE_HTTP_TOKEN to be set, but it is unset or empty. ` +
+      `Exposing an unauthenticated MCP server to a non-loopback address lets any ` +
+      `reachable host call every tool. Set GPTQUEUE_HTTP_TOKEN to a shared secret ` +
+      `to bind non-loopback, or leave GPTQUEUE_HOST unset to bind 127.0.0.1.`
+  );
+  process.exit(1);
+}
+
+/** Constant-time token comparison (timing-safe regardless of length). */
+function tokenMatches(expected: string, provided: string): boolean {
+  const a = createHash("sha256").update(expected).digest();
+  const b = createHash("sha256").update(provided).digest();
+  return timingSafeEqual(a, b);
+}
+
+/** Extract the `Bearer <token>` value from an Authorization header, or null. */
+function extractBearerToken(req: {
+  headers: { authorization?: string };
+}): string | null {
+  const auth = req.headers.authorization;
+  if (!auth) return null;
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  const captured = m?.[1];
+  return typeof captured === "string" && captured.length > 0
+    ? captured.trim()
+    : null;
+}
+
 const app = createMcpExpressApp();
+
+// Gate every /mcp request behind the token when it is configured. `/health` is
+// intentionally excluded so process managers can still liveness-check the
+// server without a credential. Failures never reach tool execution.
+if (tokenActive) {
+  app.use("/mcp", (req: unknown, res: unknown, next: unknown) => {
+    const reqTyped = req as { headers: { authorization?: string } };
+    const resTyped = res as {
+      status: (s: number) => { json: (b: unknown) => void };
+    };
+    const nextTyped = next as () => void;
+    const provided = extractBearerToken(reqTyped);
+    if (provided !== null && tokenMatches(httpToken, provided)) {
+      nextTyped();
+      return;
+    }
+    resTyped.status(401).json({
+      jsonrpc: "2.0",
+      id: null,
+      error: {
+        code: -32001,
+        message: "Unauthorized: missing or invalid Bearer token",
+      },
+    });
+  });
+}
 
 // Store transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport> = {};
@@ -114,10 +194,11 @@ app.get("/health", (_req, res) => {
   });
 });
 
-app.listen(port, () => {
-  console.log(`gptqueue HTTP server listening on port ${port}`);
-  console.log(`MCP endpoint: http://127.0.0.1:${port}/mcp`);
-  console.log(`Health check: http://127.0.0.1:${port}/health`);
+app.listen(port, host, () => {
+  console.log(`gptqueue HTTP server listening on ${host}:${port}`);
+  console.log(`  token auth: ${tokenActive ? "active" : "disabled"}`);
+  console.log(`  MCP endpoint: http://${host}:${port}/mcp`);
+  console.log(`  Health check: http://${host}:${port}/health`);
 });
 
 // Graceful shutdown

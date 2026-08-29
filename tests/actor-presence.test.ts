@@ -23,7 +23,6 @@ const profile = (overrides: Partial<DurableActorProfile> = {}): DurableActorProf
   capabilities: ["build"],
   workspace_root: "/workspace",
   working_directory: "/workspace/actor",
-  state_directory: "/state/actor-1",
   runtime: "pi",
   activation_policy: policy("wake_if_offline"),
   max_concurrency: 1,
@@ -197,6 +196,35 @@ describe("durable actor profile admission", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected invalid_policy");
     expect(result.error.code).toBe("invalid_policy");
+  });
+
+  it("rejects identities outside the [A-Za-z0-9._-]{1,64} charset as invalid_identity_charset", () => {
+    expect(
+      admitActorProfile(profile({ actor_id: "has space" })).ok
+    ).toBe(false);
+    if (admitActorProfile(profile({ actor_id: "has space" })).ok) {
+      throw new Error("expected invalid_identity_charset");
+    }
+    expect(
+      admitActorProfile(profile({ actor_id: "has space" }))
+    ).toMatchObject({ ok: false, error: { code: "invalid_identity_charset" } });
+
+    // alias rejects embedded path separators / injection-special chars.
+    expect(
+      admitActorProfile(profile({ alias: "../../etc" }))
+    ).toMatchObject({ ok: false, error: { code: "invalid_identity_charset" } });
+
+    // 65 chars exceeds the length bound.
+    expect(
+      admitActorProfile(profile({ actor_id: "a".repeat(65) }))
+    ).toMatchObject({ ok: false, error: { code: "invalid_identity_charset" } });
+  });
+
+  it("admits identities using the full allowed charset", () => {
+    const result = admitActorProfile(profile({ actor_id: "A.b_c-9", alias: "x.y_z-1" }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.profile.actor_id).toBe("A.b_c-9");
   });
 
   it("rejects invalid max_concurrency as invalid_concurrency", () => {

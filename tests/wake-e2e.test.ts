@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { Redis } from "ioredis";
 import { spawn } from "child_process";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
@@ -24,6 +24,28 @@ import {
   actorStatus,
   actorStatusSchema,
 } from "../src/mcp-server/tools/actor-status.js";
+import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
+
+// wake_if_offline admission + dispatch now require an operator launch
+// allowlist. Scaffold one (temp dir + GPTQUEUE_LAUNCH_ALLOWLIST) permitting
+// process.execPath (empty prefix AND the "-e <script>" arg pattern) and the
+// test dead-binary basename used to exercise launch failure, so the existing
+// suites pass the new policy gate. Top-level hook keeps it scoped to this
+// file's worker.
+const allowlist = scaffoldLaunchAllowlist([
+  {
+    command: process.execPath,
+    allowed_args_prefixes: [[], ["-e"]],
+    comment: "test process.execPath launcher",
+  },
+  {
+    command: "/nonexistent/definitely-not-a-binary-12345",
+    allowed_args_prefixes: [[]],
+    comment: "test dead binary (admission passes, dispatch ENOENT)",
+  },
+]);
+allowlist.set();
+afterAll(() => allowlist.cleanup());
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
 
@@ -110,7 +132,6 @@ async function registerActor(
       capabilities: [],
       workspace_root: "/workspace",
       working_directory: "/workspace",
-      state_directory: `/state/${actorId}`,
       runtime: "node",
       activation_policy: { mode },
       max_concurrency: 1,
