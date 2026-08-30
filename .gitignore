@@ -3,3 +3,9 @@ dist/
 *.tsbuildinfo
 .DS_Store
 .gptqueue/
+# Tool-state files (invisible in normal git via global ignore; MetaBuilder
+# sanitizes HOME/GIT_CONFIG so they must be repo-ignored for clean bindings).
+AGENTS.md
+NEXT_SHELL_PROMPT.md
+.haake-data/
+.yarli/
