@@ -96,6 +96,12 @@
               "/usr/bin/node"
             ]
           }
+        ],
+        "auxiliary_directories": [
+          {
+            "path": "node_modules",
+            "digest": "cab4fb570ff12d07ac1d9c8a98cd84241d18a9c3a8e03921aa1fff606c0a4800"
+          }
         ]
       },
       "timeout_seconds": 600
@@ -118,6 +124,12 @@
               "/usr/bin/node"
             ]
           }
+        ],
+        "auxiliary_directories": [
+          {
+            "path": "node_modules",
+            "digest": "cab4fb570ff12d07ac1d9c8a98cd84241d18a9c3a8e03921aa1fff606c0a4800"
+          }
         ]
       },
       "timeout_seconds": 300
@@ -139,6 +151,12 @@
             "executables": [
               "/usr/bin/node"
             ]
+          }
+        ],
+        "auxiliary_directories": [
+          {
+            "path": "node_modules",
+            "digest": "cab4fb570ff12d07ac1d9c8a98cd84241d18a9c3a8e03921aa1fff606c0a4800"
           }
         ]
       },
