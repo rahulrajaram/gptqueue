@@ -320,6 +320,93 @@ describe("HTTP transport (NXT-018)", () => {
   });
 });
 
+describe("HTTP session recovery (stale session after server restart)", () => {
+  let s: Spawned;
+
+  beforeAll(async () => {
+    s = await spawnHttpServer({});
+    await waitHealthy(s);
+  });
+
+  afterAll(async () => {
+    await killChild(s);
+  });
+
+  const post = async (body: string, headers: Record<string, string> = {}) => {
+    const r = await fetch(`${s.url}/mcp`, {
+      method: "POST",
+      headers: { ...JSON_HEADERS, ...headers },
+      body,
+      signal: AbortSignal.timeout(5000),
+    });
+    const text = await r.text();
+    let parsed: { error?: string; result?: unknown } = {};
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // Streamable responses may be SSE-framed; extract the last data line.
+      const dataLine = text
+        .split("\n")
+        .filter((l) => l.startsWith("data:"))
+        .at(-1);
+      parsed = dataLine ? JSON.parse(dataLine.slice(5).trim()) : { error: text };
+    }
+    return {
+      status: r.status,
+      sid: r.headers.get("mcp-session-id"),
+      body: parsed,
+    };
+  };
+
+  it("re-initializing with a stale session id starts a fresh session", async () => {
+    // Establish a real session, then use a fabricated session id this server
+    // instance never issued to simulate a client surviving a server restart.
+    const r1 = await fetch(`${s.url}/mcp`, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: INIT_BODY,
+    });
+    expect(r1.status).toBe(200);
+    const staleId = r1.headers.get("mcp-session-id") ?? "defunct-session";
+    const neverIssued = `${staleId}-dead`;
+
+    // A tools/call on an unknown session is the spec'd 404 re-initialize signal.
+    const rejected = await post(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "list_agents", arguments: {} },
+      }),
+      { "mcp-session-id": neverIssued }
+    );
+    expect(rejected.status).toBe(404);
+    expect(rejected.body.error).toContain("re-initialize");
+
+    // An initialize carrying the stale id still succeeds and mints a new id,
+    // so clients that cache their session id self-heal after a restart.
+    const recovered = await post(
+      INIT_BODY,
+      { "mcp-session-id": neverIssued }
+    );
+    expect(recovered.status).toBe(200);
+    expect(recovered.sid).toMatch(/[0-9a-f-]{36}/);
+  });
+
+  it("tools/call with no session header gets an instructive 400", async () => {
+    const r = await post(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "list_agents", arguments: {} },
+      })
+    );
+    expect(r.status).toBe(400);
+    expect(r.body.error).toContain("initialize");
+  });
+});
+
 describe("HTTP transport security (loopback bind + Bearer token)", () => {
   it("binds loopback by default; health + MCP work tokenless", async () => {
     const s = await spawnHttpServer({});

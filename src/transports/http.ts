@@ -138,8 +138,11 @@ app.post("/mcp", async (req, res) => {
     return;
   }
 
-  if (!sessionId && isInitializeRequest(req.body)) {
-    // New session
+  if (isInitializeRequest(req.body)) {
+    // New (or re-)session: an initialize with a stale/unknown session id
+    // (e.g. after a server restart) starts a fresh session; the client
+    // adopts the new id from the response header. This makes server
+    // restarts self-healing for clients that cache their session id.
     const { server, redisClient } = createSessionServer();
 
     const transport = new StreamableHTTPServerTransport({
@@ -162,7 +165,19 @@ app.post("/mcp", async (req, res) => {
     return;
   }
 
-  res.status(400).json({ error: "Bad request: missing session or not an init request" });
+  if (sessionId) {
+    // Unknown/expired session with a non-initialize request: the MCP spec
+    // reserves 404 for this so spec-compliant clients re-initialize.
+    res.status(404).json({
+      error: "session expired or unknown; re-initialize to obtain a new session",
+    });
+    return;
+  }
+
+  res.status(400).json({
+    error:
+      "Bad request: no mcp-session-id header and the body is not an initialize request. Send an initialize request first.",
+  });
 });
 
 // GET /mcp -- SSE stream for server-initiated messages
