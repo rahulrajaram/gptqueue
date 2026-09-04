@@ -12,6 +12,7 @@ import { TaskClaimStore } from "../core/task-claim-store.js";
 export class RedisClient {
   private redis: Redis;
   private subscriber: Redis;
+  private connectionsForcedClosed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private _agentName: string | null;
   private _sessionId: string | null = null;
@@ -272,7 +273,19 @@ export class RedisClient {
   async shutdown(): Promise<void> {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.sessionStore.stopLeaseRefresh();
+    if (this.connectionsForcedClosed) return;
     await this.redis.quit();
     await this.subscriber.quit();
+  }
+
+  /** Immediately break both connections when a bounded caller must stop. */
+  forceDisconnect(): void {
+    if (this.connectionsForcedClosed) return;
+    this.connectionsForcedClosed = true;
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    this.sessionStore.stopLeaseRefresh();
+    this.redis.disconnect();
+    this.subscriber.disconnect();
   }
 }

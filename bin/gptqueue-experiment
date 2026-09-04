@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+import { runExperimentalWrapperCli } from "../dist/experimental-wrapper/index.js";
+
+runExperimentalWrapperCli();
