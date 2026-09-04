@@ -184,10 +184,6 @@
             {
               "path": "dist",
               "digest": "c74428731c362e19a34b4d370f4bce5f08a0c5490e39ea48c7193fe9e474e526"
-            },
-            {
-              "path": "harness/lifecycle",
-              "digest": "9182dff9e3433f81073e3d5eaca9fc15769b6505adc9c90896eb6de803065a10"
             }
           ]
         }
@@ -224,10 +220,6 @@
             {
               "path": "dist",
               "digest": "c74428731c362e19a34b4d370f4bce5f08a0c5490e39ea48c7193fe9e474e526"
-            },
-            {
-              "path": "harness/lifecycle",
-              "digest": "9182dff9e3433f81073e3d5eaca9fc15769b6505adc9c90896eb6de803065a10"
             }
           ]
         }
@@ -264,10 +256,6 @@
             {
               "path": "dist",
               "digest": "c74428731c362e19a34b4d370f4bce5f08a0c5490e39ea48c7193fe9e474e526"
-            },
-            {
-              "path": "harness/lifecycle",
-              "digest": "9182dff9e3433f81073e3d5eaca9fc15769b6505adc9c90896eb6de803065a10"
             }
           ]
         }
@@ -304,10 +292,6 @@
             {
               "path": "dist",
               "digest": "c74428731c362e19a34b4d370f4bce5f08a0c5490e39ea48c7193fe9e474e526"
-            },
-            {
-              "path": "harness/lifecycle",
-              "digest": "9182dff9e3433f81073e3d5eaca9fc15769b6505adc9c90896eb6de803065a10"
             }
           ]
         }
@@ -344,10 +328,6 @@
             {
               "path": "dist",
               "digest": "c74428731c362e19a34b4d370f4bce5f08a0c5490e39ea48c7193fe9e474e526"
-            },
-            {
-              "path": "harness/lifecycle",
-              "digest": "9182dff9e3433f81073e3d5eaca9fc15769b6505adc9c90896eb6de803065a10"
             }
           ]
         }
