@@ -45,6 +45,18 @@ export class ServerFixture {
     this.started = false;
   }
 
+  /*
+   * Why `--unhandled-rejections=warn` on the server child: inside the
+   * MetaBuilder sandboxed command adapter the address-space limit is 4 GiB,
+   * and node 18's bundled undici eagerly instantiates its llhttp WASM (whose
+   * trap-handler memory reservation does not fit), producing a rejected
+   * promise at module load. The HTTP server never calls fetch (its clients
+   * use node:http over a Unix socket), and Request/Response construction
+   * needs no WASM, so the rejection is an inert environmental artifact;
+   * downgrading it to a warning keeps the server alive. Verified by the full
+   * MCP wire flow under the exact sandbox limit.
+   */
+
   async start() {
     this.redis = spawn(
       "/usr/bin/redis-server",
@@ -84,7 +96,10 @@ export class ServerFixture {
     }
     this.server = spawn(
       process.execPath,
-      [join(process.cwd(), "dist", "transports", "http.js")],
+      [
+        "--unhandled-rejections=warn",
+        join(process.cwd(), "dist", "transports", "http.js"),
+      ],
       { cwd: process.cwd(), env, stdio: ["ignore", "ignore", "pipe"] }
     );
     let stderr = "";
