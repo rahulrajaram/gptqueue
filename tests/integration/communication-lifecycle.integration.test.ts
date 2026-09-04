@@ -151,4 +151,72 @@ describe("communication lifecycle (H1-H9, deterministic UDS fixtures)", () => {
     },
     SCENARIO_TIMEOUT
   );
+
+  it(
+    "concurrent interleaving: a Promise.all 2x3 bipartite matrix delivers exactly six unique edges with correct attribution and no cross-delivery",
+    async () => {
+      const summary = await runScenario("concurrent");
+      expect(summary.ok).toBe(true);
+      expect(summary.rounds).toBe(3);
+      expect(summary.roundsResults).toHaveLength(3);
+      for (const round of summary.roundsResults) {
+        expect(round["concurrent"]).toBe(true);
+        expect(round["maxInflight"]).toBeGreaterThanOrEqual(2);
+        expect(round["concurrentObserved"]).toBe(true);
+        expect(round["serializedOrSequenced"]).toBe(false);
+        expect(round["senders"]).toBe(2);
+        expect(round["receivers"]).toBe(3);
+        expect(round["edges"]).toBe(6);
+        expect(round["sendResults"]).toBe(6);
+        expect(round["delivered"]).toBe(6);
+        expect(round["missing"]).toBe(0);
+        expect(round["duplicateLogicalDeliveries"]).toBe(0);
+        expect(round["crossDeliveries"]).toBe(0);
+        expect(round["orderedOrSerialized"]).toBe(false);
+        const perReceiver = round["perReceiver"] as Array<{ receiver: string; observed: number }>;
+        expect(perReceiver).toHaveLength(3);
+        for (const pr of perReceiver) {
+          expect(pr["observed"]).toBe(2);
+        }
+        const timings = round["sendTimingsMs"] as Array<{ edgeKey: string; startedAt: number; endedAt: number }>;
+        expect(timings).toHaveLength(6);
+        for (const t of timings) {
+          expect(typeof t["edgeKey"]).toBe("string");
+          expect(t["endedAt"]).toBeGreaterThanOrEqual(t["startedAt"]);
+        }
+        expect(round["readinessBarrier"]).toBe("passed");
+      }
+    },
+    SCENARIO_TIMEOUT
+  );
+
+  it(
+    "restart durability: a message accepted before a real SIGKILL+respawn is received by a fresh child process re-binding the retained session without re-registering",
+    async () => {
+      const summary = await runScenario("restart");
+      expect(summary.ok).toBe(true);
+      expect(summary.rounds).toBe(3);
+      expect(summary.roundsResults).toHaveLength(3);
+      for (const round of summary.roundsResults) {
+        const restart = round["restart"] as Record<string, unknown>;
+        expect(typeof restart["oldServerPid"]).toBe("number");
+        expect(typeof restart["newServerPid"]).toBe("number");
+        expect(restart["pidChanged"]).toBe(true);
+        expect(round["messageAcceptedBeforeKill"]).toBe(true);
+        expect(round["healthObservedAfterRespawn"]).toBe(true);
+        const rebind = round["rebind"] as Record<string, unknown>;
+        expect(rebind["viaChildProcess"]).toBe(true);
+        expect(rebind["childProcess"]).toBe(true);
+        expect(typeof rebind["childPid"]).toBe("number");
+        expect(typeof rebind["childExitCode"]).toBe("number");
+        expect(rebind["reRegistered"]).toBe(false);
+        expect(rebind["messageReceived"]).toBe(true);
+        expect(rebind["contentSurvivedByteForByte"]).toBe(true);
+        expect(typeof rebind["senderAttribution"]).toBe("string");
+        expect(typeof rebind["edgeKey"]).toBe("string");
+        expect(round["healthBaseline"]).toBe(0);
+      }
+    },
+    SCENARIO_TIMEOUT
+  );
 });
