@@ -9,7 +9,7 @@
  * the evidence artifact the communication-lifecycle-v1 Harness Module cites.
  */
 
-import { runTopologyScenario, runIdempotencyScenario, runContinuityScenario, runCleanupScenario, runBackpressureScenario } from "./scenarios.mjs";
+import { runTopologyScenario, runIdempotencyScenario, runContinuityScenario, runCleanupScenario, runBackpressureScenario, runConcurrentInterleavingScenario, runRestartDurabilityScenario } from "./scenarios.mjs";
 
 const SCENARIOS = {
   topology: runTopologyScenario,
@@ -17,6 +17,8 @@ const SCENARIOS = {
   continuity: runContinuityScenario,
   cleanup: runCleanupScenario,
   backpressure: runBackpressureScenario,
+  concurrent: runConcurrentInterleavingScenario,
+  restart: runRestartDurabilityScenario,
 };
 
 function parseArgs(argv) {

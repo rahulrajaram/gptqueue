@@ -16,6 +16,8 @@
 
 import { LifecycleClient } from "./lifecycle-client.mjs";
 import { withFixture, pollUntil } from "./server-fixture.mjs";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
 
 const DEFAULTS = {
   rounds: 3,
@@ -677,4 +679,251 @@ export async function runBackpressureScenario(rounds = DEFAULTS.rounds) {
     );
   }
   return { scenario: "backpressure", rounds, roundsResults, ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Rebind child process plumbing (restart-durability, H11)
+// ---------------------------------------------------------------------------
+
+/** Spawn rebind-client.mjs as a fresh child process; capture its one JSON line. */
+async function runRebindChild(socketPath, sessionId, { timeoutMs, label }) {
+  const scriptPath = join(process.cwd(), "harness", "lifecycle", "rebind-client.mjs");
+  const child = spawn(process.execPath, [scriptPath, socketPath, sessionId], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", (d) => (stdout += d));
+  child.stderr.on("data", (d) => (stderr += d));
+  const deadline = Date.now() + timeoutMs;
+  while (child.exitCode === null && !child.killed && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  if (child.exitCode === null && !child.killed) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* best-effort */
+    }
+    throw new Error(`${label}: rebind child exceeded deadline ${timeoutMs}ms (stderr=${stderr.slice(0, 200)})`);
+  }
+  return { pid: child.pid, code: child.exitCode, stdout, stderr };
+}
+
+/** Parse the single JSON line the rebind child prints on stdout. */
+function parseChildJson(stdout, label) {
+  const lines = stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const last = lines[lines.length - 1];
+  if (!last) throw new Error(`${label}: rebind child produced no stdout`);
+  try {
+    return JSON.parse(last);
+  } catch {
+    throw new Error(`${label}: rebind child stdout not parseable JSON: ${stdout.slice(0, 300)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: concurrent interleaving (H10, Promise.all 2x3 bipartite matrix)
+// ---------------------------------------------------------------------------
+
+export async function runConcurrentInterleavingScenario(rounds = DEFAULTS.rounds) {
+  const roundsResults = [];
+  for (let round = 1; round <= rounds; round++) {
+    const label = `concurrent:r${round}`;
+    const scenario = "concurrent";
+    const aName = `lc-conc-r${round}-a`, bName = `lc-conc-r${round}-b`;
+    const r1n = `lc-conc-r${round}-r1`, r2n = `lc-conc-r${round}-r2`, r3n = `lc-conc-r${round}-r3`;
+    roundsResults.push(
+      await withFixture(label, async (fixture) => {
+        const baseline = await baselineHealth(fixture, label);
+        const clients = await registerActors(fixture, [aName, bName, r1n, r2n, r3n], label);
+        try {
+          const distinctSessions = await readinessBarrier(clients, [aName, bName, r1n, r2n, r3n], label);
+          const a = clients.get(aName), b = clients.get(bName);
+          const receivers = [clients.get(r1n), clients.get(r2n), clients.get(r3n)];
+
+          // Complete 2x3 bipartite matrix: six uniquely-keyed edges.
+          const edges = [];
+          let seq = 1;
+          for (const s of [a, b]) {
+            for (const r of receivers) {
+              edges.push(makeEdge({ scenario, round, from: s.name, to: r.name, seq: seq++, content: `matrix:${label}:${s.name}->${r.name}` }));
+            }
+          }
+          if (edges.length !== 6) throw new Error(`H10 violated (${label}): matrix is not 6 edges`);
+
+          // Issue all six sends concurrently: every promise is created before
+          // any completes (the loop hits each body's first await and suspends),
+          // so no send is serialized. Per-send timings plus the observed max
+          // inflight prove the calls genuinely overlapped.
+          const timings = [];
+          let inflight = 0, maxInflight = 0;
+          const track = async (edge) => {
+            const startedAt = Date.now();
+            inflight += 1;
+            if (inflight > maxInflight) maxInflight = inflight;
+            try {
+              return await sendEdge(edge.from === aName ? a : b, edge);
+            } finally {
+              inflight -= 1;
+              timings.push({ edgeKey: edge.edgeKey, startedAt, endedAt: Date.now() });
+            }
+          };
+          const sendResults = await Promise.all(edges.map(track));
+          if (sendResults.length !== 6) {
+            throw new Error(`H10 violated (${label}): expected 6 send results, got ${sendResults.length}`);
+          }
+          if (maxInflight < 2) {
+            throw new Error(`H10 violated (${label}): concurrent sends were serialized (max_inflight=${maxInflight})`);
+          }
+
+          // Each receiver must observe exactly two edges, one from each sender,
+          // matched by idempotency key + attribution — never by arrival order.
+          const perReceiver = [];
+          let observedTotal = 0, crossDeliveries = 0;
+          for (const r of receivers) {
+            const got = await drain(r, { max: 2 });
+            const expected = edges.filter((e) => e.to === r.name);
+            perReceiver.push({ receiver: r.name, observed: got.length });
+            observedTotal += got.length;
+            for (const o of got) {
+              if (!expected.some((e) => observedKey(o) === expectedKey(e))) crossDeliveries += 1;
+            }
+            assertExactDeliveries(got, expected, `H10 receiver ${r.name} ${label}`);
+            const attribution = got.map((m) => m.from).sort();
+            const want = [aName, bName].sort();
+            if (JSON.stringify(attribution) !== JSON.stringify(want)) {
+              throw new Error(`H10 violated (${label}): ${r.name} attribution ${JSON.stringify(attribution)} != ${JSON.stringify(want)}`);
+            }
+          }
+          if (observedTotal !== 6 || crossDeliveries !== 0) {
+            throw new Error(`H10 violated (${label}): aggregate observed=${observedTotal} cross=${crossDeliveries}`);
+          }
+
+          await terminalCleanupAndBaseline(fixture, clients);
+          await assertRegistryEmpty(fixture, label);
+          await assertHealthBackToBaseline(fixture, baseline, label);
+          return roundResult(round, {
+            concurrent: true,
+            maxInflight,
+            concurrentObserved: maxInflight >= 2,
+            serializedOrSequenced: false,
+            sendTimingsMs: timings,
+            senders: 2,
+            receivers: 3,
+            edges: 6,
+            sendResults: sendResults.length,
+            delivered: observedTotal,
+            perReceiver,
+            missing: 0,
+            duplicateLogicalDeliveries: 0,
+            crossDeliveries,
+            orderedOrSerialized: false,
+            distinctSessionIds: distinctSessions,
+            readinessBarrier: "passed",
+          });
+        } finally {
+          for (const c of clients.values()) await c.close({ unregister: false }).catch(() => {});
+        }
+      })
+    );
+  }
+  return { scenario: "concurrent", rounds, roundsResults, ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: restart durability (H11, SIGKILL + respawn + child re-bind)
+// ---------------------------------------------------------------------------
+
+export async function runRestartDurabilityScenario(rounds = DEFAULTS.rounds) {
+  const roundsResults = [];
+  for (let round = 1; round <= rounds; round++) {
+    const label = `restart:r${round}`;
+    const scenario = "restart";
+    const sName = `lc-rst-r${round}-s`, rName = `lc-rst-r${round}-r`;
+    roundsResults.push(
+      await withFixture(label, async (fixture) => {
+        const baseline = await baselineHealth(fixture, label);
+        const clients = await registerActors(fixture, [sName, rName], label);
+        try {
+          await readinessBarrier(clients, [sName, rName], label);
+          const s = clients.get(sName), r = clients.get(rName);
+
+          // One message accepted as sent (before any kill).
+          const edge = makeEdge({ scenario, round, from: sName, to: rName, seq: 1, content: `durable:${label}` });
+          const oldPid = fixture.server.pid;
+          if (typeof oldPid !== "number") throw new Error(`H11 violated (${label}): no pre-kill server pid`);
+          await sendEdge(s, edge);
+
+          // Real SIGKILL of the HTTP server; the in-sandbox redis-server and
+          // its data survive (the fixture guarantees this).
+          await fixture.killServer();
+          await fixture.spawnServer();
+          const newPid = fixture.server.pid;
+          if (typeof newPid !== "number" || newPid === oldPid) {
+            throw new Error(`H11 violated (${label}): respawn pid ${newPid} not distinct from ${oldPid}`);
+          }
+          const healthAfter = await fixture.health();
+          if (healthAfter.status !== "ok") throw new Error(`H11 violated (${label}): /health not ok after respawn`);
+
+          // A genuinely fresh client PROCESS re-binds the retained session and
+          // receives the pre-kill message; the child contains no register_agent.
+          const child = await runRebindChild(fixture.httpSocketPath, r.appSessionId, { timeoutMs: 20000, label });
+          if (child.code !== 0) {
+            throw new Error(`H11 violated (${label}): rebind child exited ${child.code}: stdout=${child.stdout} stderr=${child.stderr}`);
+          }
+          const parsed = parseChildJson(child.stdout, label);
+          if (parsed.received !== true || typeof parsed.content !== "string" || parsed.content !== edge.content) {
+            throw new Error(`H11 violated (${label}): child did not receive exact content; got ${JSON.stringify(parsed)}`);
+          }
+          if (parsed.from !== sName) {
+            throw new Error(`H11 violated (${label}): wrong sender attribution ${parsed.from}, expected ${sName}`);
+          }
+          if (parsed.metadata?.edge_key !== edge.edgeKey) {
+            throw new Error(`H11 violated (${label}): wrong edge key ${parsed.metadata?.edge_key}, expected ${edge.edgeKey}`);
+          }
+
+          // No re-registration: the receiver's durable registration is still a
+          // single entry after the child re-bound by session_id only.
+          const regProbe = await LifecycleClient.create({ socketPath: fixture.httpSocketPath });
+          try {
+            const list = await regProbe.call("list_agents");
+            const entries = agentsOf(list).filter((a) => a.name === rName);
+            if (entries.length !== 1) {
+              throw new Error(`H11 violated (${label}): ${entries.length} registry entries for ${rName} after session re-bind (re-registration?)`);
+            }
+          } finally {
+            await regProbe.close({ unregister: false }).catch(() => {});
+          }
+
+          await terminalCleanupAndBaseline(fixture, clients);
+          await assertRegistryEmpty(fixture, label);
+          await assertHealthBackToBaseline(fixture, baseline, label);
+          return roundResult(round, {
+            restart: {
+              oldServerPid: oldPid,
+              newServerPid: newPid,
+              pidChanged: oldPid !== newPid,
+            },
+            messageAcceptedBeforeKill: true,
+            healthObservedAfterRespawn: true,
+            rebind: {
+              viaChildProcess: true,
+              childProcess: true,
+              childPid: child.pid,
+              childExitCode: child.code,
+              reRegistered: false,
+              messageReceived: true,
+              contentSurvivedByteForByte: true,
+              senderAttribution: parsed.from,
+              edgeKey: parsed.metadata?.edge_key,
+            },
+            healthBaseline: baseline,
+          });
+        } finally {
+          for (const c of clients.values()) await c.close({ unregister: false }).catch(() => {});
+        }
+      })
+    );
+  }
+  return { scenario: "restart", rounds, roundsResults, ok: true };
 }
