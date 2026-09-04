@@ -209,12 +209,28 @@ app.get("/health", (_req, res) => {
   });
 });
 
-app.listen(port, host, () => {
-  console.log(`gptqueue HTTP server listening on ${host}:${port}`);
-  console.log(`  token auth: ${tokenActive ? "active" : "disabled"}`);
-  console.log(`  MCP endpoint: http://${host}:${port}/mcp`);
-  console.log(`  Health check: http://${host}:${port}/health`);
-});
+// Opt-in Unix-domain-socket listen mode (GPTQUEUE_HTTP_SOCKET). When set, the
+// server listens on that filesystem socket path instead of TCP host:port.
+// Intended for network-less confined environments (e.g. sandboxed harness
+// runners) where TCP loopback is unavailable; wire behavior on /mcp and
+// /health is otherwise identical.
+const udsSocketPath = process.env.GPTQUEUE_HTTP_SOCKET || "";
+
+if (udsSocketPath) {
+  app.listen(udsSocketPath, () => {
+    console.log(`gptqueue HTTP server listening on unix:${udsSocketPath}`);
+    console.log(`  token auth: ${tokenActive ? "active" : "disabled"}`);
+    console.log(`  MCP endpoint: http://unix:${udsSocketPath}/mcp`);
+    console.log(`  Health check: http://unix:${udsSocketPath}/health`);
+  });
+} else {
+  app.listen(port, host, () => {
+    console.log(`gptqueue HTTP server listening on ${host}:${port}`);
+    console.log(`  token auth: ${tokenActive ? "active" : "disabled"}`);
+    console.log(`  MCP endpoint: http://${host}:${port}/mcp`);
+    console.log(`  Health check: http://${host}:${port}/health`);
+  });
+}
 
 // Graceful shutdown
 async function shutdown() {
