@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+import { runRegisteredShell } from "../dist/registered-shell/server.js";
+runRegisteredShell().catch(() => { process.exitCode ||= 1; });

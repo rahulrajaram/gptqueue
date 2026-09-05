@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+import { runCodexHook } from "../dist/registered-shell/codex-hook.js";
+runCodexHook().catch(() => {
+  console.error('[gptqueue] {"event":"runtime_binding_failed","code":"invalid_hook_or_transport"}');
+  process.exitCode = 1;
+});

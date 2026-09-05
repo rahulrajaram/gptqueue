@@ -12,8 +12,41 @@ import { fileURLToPath } from "url";
 import { SESSION_KEYS, SESSION_DEFAULTS } from "./keys.js";
 import type { QueueMessage } from "../mcp-server/types.js";
 
+const eventKey = (agent: string) => `gptq:inbox-events:${agent}`;
+const outstandingKey = (agent: string, id: string) => `gptq:outstanding:${agent}:${id}`;
+const eligible = (message: QueueMessage): boolean =>
+  message.type === "task" || (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
+
+/** Own the blocking socket so cancelling one receive cannot affect another. */
+const cancellablePop = async (
+  subscriber: Redis,
+  key: string,
+  timeout: number,
+  signal: AbortSignal
+) => {
+  signal.throwIfAborted();
+  const connection = subscriber.duplicate({
+    lazyConnect: true,
+    // A destructive pop must never be replayed after a connection failure.
+    retryStrategy: () => null,
+    autoResendUnfulfilledCommands: false,
+    maxRetriesPerRequest: 0,
+    enableOfflineQueue: false,
+  });
+  const cancel = () => connection.disconnect();
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    await connection.connect();
+    signal.throwIfAborted();
+    return await connection.blpop(key, timeout);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    connection.disconnect();
+  }
+};
 
 export class MailboxStore {
   private readonly redis: Redis;
@@ -56,11 +89,19 @@ export class MailboxStore {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const result = await this.redis.eval(
         this.boundedPushScript,
-        2,
+        4,
         queueKey,
         metaKey,
+        eventKey(message.to),
+        outstandingKey(message.type === "task" ? message.from : message.to, message.type === "task" ? message.id : message.payload.in_reply_to || message.id),
         serialized,
-        this.queueBound
+        this.queueBound,
+        message.id,
+        message.type,
+        eligible(message) ? 1 : 0,
+        message.type === "task" ? 1 : 0,
+        message.to,
+        message.from
       );
       if (result === 1) return true;
 
@@ -84,14 +125,21 @@ export class MailboxStore {
     for (let attempt = 0; attempt < 10; attempt++) {
       const raw = await this.redis.eval(
         this.boundedPushIdempotentScript,
-        3,
+        5,
         queueKey,
         metaKey,
         dedupeKey,
+        eventKey(message.to),
+        outstandingKey(message.type === "task" ? message.from : message.to, message.type === "task" ? message.id : message.payload.in_reply_to || message.id),
         serialized,
         this.queueBound,
         message.id,
-        86400
+        86400,
+        eligible(message) ? 1 : 0,
+        message.type,
+        message.type === "task" ? 1 : 0,
+        message.to,
+        message.from
       ) as [number, string];
       if (raw[0] === 1) return { status: "sent", messageId: raw[1] };
       if (raw[0] === 2) return { status: "duplicate", messageId: raw[1] };
@@ -104,12 +152,13 @@ export class MailboxStore {
   /** Blocking pop from an agent's mailbox. */
   async receive(
     agentName: string,
-    timeout: number = 5
+    timeout: number = 5,
+    signal?: AbortSignal
   ): Promise<QueueMessage | null> {
-    const result = await this.subscriber.blpop(
-      SESSION_KEYS.queue(agentName),
-      timeout
-    );
+    const key = SESSION_KEYS.queue(agentName);
+    const result = signal
+      ? await cancellablePop(this.subscriber, key, timeout, signal)
+      : await this.subscriber.blpop(key, timeout);
     if (!result) return null;
 
     const message: QueueMessage = JSON.parse(result[1]);

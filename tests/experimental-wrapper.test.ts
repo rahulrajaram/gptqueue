@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { once } from "node:events";
+import { createHash } from "node:crypto";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -225,6 +226,9 @@ describe("experimental authenticated bound bridge", () => {
     const registration = new RedisClient(null, TEST_REDIS_URL);
     const name = `wrapper-bridge-${Date.now()}`;
     await registration.register("both", name, "bound bridge test");
+    const other = new RedisClient(null, TEST_REDIS_URL);
+    const otherName = `${name}-other`;
+    await other.register("both", otherName, "must not be impersonated");
     const bridge = await startBoundBridge({ agentName: name, redisClient: registration });
 
     try {
@@ -305,7 +309,7 @@ describe("experimental authenticated bound bridge", () => {
       const sent = toolPayload(
         await client.callTool({
           name: "send_message",
-          arguments: { to: name, content: "bound-without-session-id" },
+          arguments: { to: name, content: "bound-without-session-id", session_id: other.sessionId },
         })
       );
       expect(sent.status).toBe("sent");
@@ -333,6 +337,20 @@ describe("experimental authenticated bound bridge", () => {
       );
       expect(emptyReceive).toEqual({ status: "no_messages", timeout: 2 });
 
+      await client.callTool({
+        name: "send_message",
+        arguments: { to: otherName, content: "private-to-other-mailbox" },
+      });
+      const forgedReceive = toolPayload(await client.callTool({
+        name: "receive_message", arguments: { timeout: 1, session_id: other.sessionId },
+      }));
+      expect(forgedReceive.status).toBe("no_messages");
+      expect((await other.receiveMessage(1))?.payload.content).toBe("private-to-other-mailbox");
+      const status = toolPayload(await client.callTool({
+        name: "get_queue_status", arguments: { agent: name },
+      }));
+      expect(status[0]).toMatchObject({ agent: name, depth: 0 });
+
       await client.close();
 
       const bridgeUrl = new URL(bridge.url);
@@ -356,6 +374,8 @@ describe("experimental authenticated bound bridge", () => {
       await bridge.close();
       if (registration.registered) await registration.unregister();
       await registration.shutdown();
+      if (other.registered) await other.unregister();
+      await other.shutdown();
     }
   });
 
@@ -364,19 +384,24 @@ describe("experimental authenticated bound bridge", () => {
     const workspace = join(REPOSITORY_ROOT, ".gptqueue");
     const probePath = join(workspace, `registration-probe-${Date.now()}.mjs`);
     const previousBinary = process.env.GPTQ_EXPERIMENT_CODEX_BIN;
+    vi.stubEnv("GPTQ_SESSION_ID", "wrapper-test-session-sentinel");
+    vi.stubEnv("GPTQUEUE_HTTP_TOKEN", "wrapper-test-token-sentinel");
+    vi.stubEnv("REDIS_URL", TEST_REDIS_URL);
     await writeFile(
       probePath,
       [
         "#!/usr/bin/env node",
         'import { Redis } from "ioredis";',
-        'if (process.env.REDIS_URL || process.env.GPTQ_SESSION_ID || process.env.GPTQUEUE_HTTP_TOKEN) {',
+        'if (["REDIS_URL", "GPTQ_SESSION_ID", "GPTQUEUE_HTTP_TOKEN"].some(key => key in process.env)) {',
         '  console.error("private parent environment leaked into wrapped CLI");',
         "  process.exit(18);",
         "}",
         `const redis = new Redis(${JSON.stringify(TEST_REDIS_URL)}, { maxRetriesPerRequest: 3 });`,
         `const present = await redis.hexists(${JSON.stringify(SESSION_KEYS.registry)}, process.env.GPTQ_AGENT_NAME);`,
+        `const sessions = await redis.smembers(${JSON.stringify(SESSION_KEYS.agentSessions(name))});`,
+        'const live = sessions.length === 1 && await redis.exists("gptq:lease:" + sessions[0]) === 1;',
         "await redis.quit();",
-        "process.exitCode = present === 1 ? 0 : 17;",
+        "process.exitCode = present === 1 && live ? 0 : 17;",
         "",
       ].join("\n"),
       { encoding: "utf8", mode: 0o700 }
@@ -404,6 +429,7 @@ describe("experimental authenticated bound bridge", () => {
       expect(await cleanupRedis.exists(SESSION_KEYS.queue(name))).toBe(0);
       expect(await cleanupRedis.exists(SESSION_KEYS.heartbeat(name))).toBe(0);
     } finally {
+      vi.unstubAllEnvs();
       stderr.mockRestore();
       await rm(probePath, { force: true });
       if (previousBinary === undefined) {
@@ -413,6 +439,57 @@ describe("experimental authenticated bound bridge", () => {
       }
     }
   });
+
+  it.each(["missing", "replaced"] as const)(
+    "closes its claim connection after a %s claim prevents cleanup",
+    async (failure) => {
+      const name = `gptqueue-experiment-lost-claim-${failure}-${Date.now()}`;
+      const claimKey = "gptq:experimental-wrapper-claim:" +
+        createHash("sha256").update(name).digest("hex");
+      const workspace = join(REPOSITORY_ROOT, ".gptqueue");
+      const probePath = join(workspace, `${name}.mjs`);
+      const observedConnections = new Set<Redis>();
+      const originalEval = Redis.prototype.eval;
+      const evalSpy = vi.spyOn(Redis.prototype, "eval").mockImplementation(function (
+        this: Redis, ...args: Parameters<Redis["eval"]>
+      ) {
+        if (args.includes(claimKey)) observedConnections.add(this);
+        return originalEval.apply(this, args);
+      });
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+      await writeFile(probePath, [
+        "#!/usr/bin/env node",
+        'import { Redis } from "ioredis";',
+        `const redis = new Redis(${JSON.stringify(TEST_REDIS_URL)}, { maxRetriesPerRequest: 3 });`,
+        failure === "missing"
+          ? `await redis.del(${JSON.stringify(claimKey)});`
+          : `await redis.set(${JSON.stringify(claimKey)}, "foreign-claim-token");`,
+        "await redis.quit();",
+      ].join("\n"), { mode: 0o700 });
+      vi.stubEnv("GPTQ_EXPERIMENT_CODEX_BIN", probePath);
+      try {
+        await expect(runExperimentalWrapper([
+          "codex", "--agent", name, "--workspace", workspace,
+          "--redis-url", TEST_REDIS_URL, "--cleanup", "unregister", "--", "exit",
+        ])).resolves.toBe(1);
+        expect(observedConnections.size).toBe(1);
+        await expect.poll(() => [...observedConnections].every(
+          connection => connection.status === "end"
+        )).toBe(true);
+        expect(await cleanupRedis.get(claimKey)).toBe(
+          failure === "missing" ? null : "foreign-claim-token"
+        );
+        expect(await cleanupRedis.hexists(SESSION_KEYS.registry, name)).toBe(1);
+        expect(await cleanupRedis.scard(SESSION_KEYS.agentSessions(name))).toBe(1);
+      } finally {
+        for (const connection of observedConnections) connection.disconnect();
+        evalSpy.mockRestore();
+        stderr.mockRestore();
+        vi.unstubAllEnvs();
+        await rm(probePath, { force: true });
+      }
+    }
+  );
 
   it("refuses destructive cleanup for a pre-existing identity", async () => {
     const name = `gptqueue-experiment-existing-${Date.now()}`;

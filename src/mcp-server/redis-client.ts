@@ -8,6 +8,7 @@ import { CustodyStore } from "../core/custody-store.js";
 import { ActorDirectory } from "../core/actor-directory.js";
 import { WakeLeaseStore } from "../core/wake-lease.js";
 import { TaskClaimStore } from "../core/task-claim-store.js";
+import { discoveryRecord, type AgentDiscoveryMetadata, type AgentDiscoveryRecord } from "../core/agent-discovery.js";
 
 export class RedisClient {
   private redis: Redis;
@@ -23,6 +24,11 @@ export class RedisClient {
   private readonly wakeLeaseStore: WakeLeaseStore;
   private readonly taskClaimStore: TaskClaimStore;
   readonly queueBound: number;
+
+  /** Internal adapter connection; lifecycle remains owned by this client. */
+  get adapterConnection(): Redis {
+    return this.redis;
+  }
 
   get custody(): CustodyStore {
     return this.custodyStore;
@@ -109,7 +115,8 @@ export class RedisClient {
   async register(
     role: string,
     name: string,
-    description?: string
+    description?: string,
+    metadata?: AgentDiscoveryMetadata
   ): Promise<{ name: string; session_id: string }> {
     const oldName = this._agentName;
 
@@ -146,6 +153,14 @@ export class RedisClient {
       description: description || undefined,
       registered_at: new Date().toISOString(),
       pid: process.pid,
+      ...(metadata ? {
+        metadata: {
+          label: metadata.label,
+          uuid: metadata.uuid,
+          client: metadata.client,
+          working_directory: metadata.working_directory,
+        },
+      } : {}),
     };
     await this.redis.hset(
       SESSION_KEYS.registry,
@@ -229,32 +244,31 @@ export class RedisClient {
     return this.mailbox.sendIdempotent(message, sender, idempotencyKey);
   }
 
-  async receiveMessage(timeout: number = 5): Promise<QueueMessage | null> {
+  async receiveMessage(timeout: number = 5, signal?: AbortSignal): Promise<QueueMessage | null> {
     const name = this.requireRegistered();
-    return this.mailbox.receive(name, timeout);
+    return this.mailbox.receive(name, timeout, signal);
   }
 
-  async listAgents(): Promise<
-    Array<{
-      name: string;
-      role: string;
-      description?: string;
-      online: boolean;
-    }>
-  > {
+  async listAgents(): Promise<AgentDiscoveryRecord[]> {
     const registry = await this.redis.hgetall(SESSION_KEYS.registry);
     const agents = [];
     for (const [name, json] of Object.entries(registry)) {
-      const reg = JSON.parse(json);
+      let parsed: unknown;
+      try { parsed = JSON.parse(json); } catch { continue; }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const reg = parsed as Record<string, unknown>;
       // Prefer session-based presence; fall back to legacy heartbeat
       const presence = await this.sessionStore.getPresence(name);
       const legacyHeartbeat = await this.redis.get(SESSION_KEYS.heartbeat(name));
-      agents.push({
+      agents.push(discoveryRecord({
         name,
-        role: reg.role,
-        description: reg.description,
+        role: typeof reg.role === "string" ? reg.role : "",
+        description: typeof reg.description === "string" ? reg.description : undefined,
         online: presence.online || legacyHeartbeat !== null,
-      });
+        registered_at: reg.registered_at,
+        pid: reg.pid,
+        metadata: reg.metadata,
+      }));
     }
     return agents;
   }
