@@ -9,8 +9,7 @@ import { Redis } from "ioredis";
  * `flushTestKeys`, which:
  *
  *   1. resolves the target database index from the connection URL,
- *   2. REFUSES to touch db0 unless the operator explicitly opts in with
- *      GPTQUEUE_ALLOW_DB0=1, and
+ *   2. REFUSES to touch db0, and
  *   3. deletes only `gptq:*` keys (never FLUSHDB).
  *
  * Test suites point REDIS_URL (or pass an explicit redisUrl) at an isolated
@@ -20,7 +19,6 @@ import { Redis } from "ioredis";
  */
 
 const DEFAULT_URL = "redis://127.0.0.1:6379";
-const ALLOW_DB0_ENV = "GPTQUEUE_ALLOW_DB0";
 
 /** Extract the database index from a Redis URL; 0 when no db is specified. */
 export function dbIndexOf(url: string): number {
@@ -29,17 +27,15 @@ export function dbIndexOf(url: string): number {
 }
 
 /**
- * Fail closed unless the target database is not the live server's db0, or the
- * operator explicitly allows db0 with GPTQUEUE_ALLOW_DB0=1.
+ * Fail closed when the target database is the live server's db0.
  */
 export function assertNotLiveDb(redisUrl: string, context: string): void {
-  if (dbIndexOf(redisUrl) === 0 && process.env[ALLOW_DB0_ENV] !== "1") {
+  if (dbIndexOf(redisUrl) === 0) {
     throw new Error(
       `${context}: refusing to flush gptq:* keys on Redis db 0. The live ` +
         `GPTQueue server (port 8101) and its mailboxes live on db0, and a ` +
         `test flush here would wipe the live server's data. Point REDIS_URL ` +
-        `at an isolated database (e.g. redis://127.0.0.1:6379/15) or set ` +
-        `${ALLOW_DB0_ENV}=1 to explicitly allow operating on db0.`
+        `at an isolated database (e.g. redis://127.0.0.1:6379/15).`
     );
   }
 }
@@ -54,6 +50,9 @@ export async function flushTestKeys(
   redis: Redis,
   redisUrl?: string
 ): Promise<void> {
+  if (Number(redis.options.db ?? 0) === 0) {
+    throw new Error("flushTestKeys: actual Redis connection targets live db0");
+  }
   const url = redisUrl ?? process.env.REDIS_URL ?? DEFAULT_URL;
   assertNotLiveDb(url, "flushTestKeys");
   const keys: string[] = [];

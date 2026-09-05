@@ -106,3 +106,33 @@ describe("registered agent discovery metadata", () => {
     expect(identity.working_directory).toBe("/");
   });
 });
+
+describe("additive discovery tools", () => {
+  it("finds declared purpose while preserving ambiguity and private credentials", async () => {
+    const first = await connected("/tmp/discovery-purpose");
+    const second = await connected("/tmp/discovery-purpose");
+    for (const current of [first, second]) {
+      await current.client.callTool({ name: "set_agent_profile", arguments: { label: "Delivery controller", purpose: "coordinate delivery audit", kind: "controller" } });
+    }
+    const found = result(await first.client.callTool({ name: "find_agents", arguments: { query: "delivery audit", working_directory: "/tmp/discovery-purpose", limit: 1 } }));
+    expect(found.resolution).toBe("ambiguous");
+    expect(found.total_matches).toBe(2);
+    expect(found.truncated).toBe(true);
+    expect(found.matches[0].profile.authoritative).toBe(false);
+    expect(JSON.stringify(found)).not.toContain(first.shell.sessionId);
+    const details = result(await first.client.callTool({ name: "get_agent_details", arguments: {} }));
+    expect(details.readiness).toBe("unbound");
+    expect(details.capabilities.protocol_version).toBe("2");
+  });
+
+  it("inspects a queued message without exposing content or consuming it", async () => {
+    const { shell, client, redis } = await connected("/tmp/diagnostic-readonly");
+    const id = randomUUID();
+    const raw = JSON.stringify({ id, to: shell.agentName, from: "peer", type: "task", payload: { content: "private fixture content" } });
+    await redis.rpush(SESSION_KEYS.queue(shell.agentName), raw);
+    const inspected = await client.callTool({ name: "get_delivery_status", arguments: { message_id: id } });
+    expect(result(inspected).status).toBe("queued");
+    expect(JSON.stringify(inspected)).not.toContain("private fixture content");
+    expect(await redis.lrange(SESSION_KEYS.queue(shell.agentName), 0, -1)).toEqual([raw]);
+  });
+});

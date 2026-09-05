@@ -181,6 +181,17 @@ export const startRegisteredShell = async (
     const sessionId = redis.sessionId;
     if (!sessionId) throw new Error("Registration returned no session");
     server = createBoundMcpServer({ agentName, redisClient: redis, runtime }, shutdown.signal);
+    // Describe the implementation instantiated by this process, not files currently on disk.
+    const registryKey = "gptq:registry";
+    const registrationRaw = await redis.adapterConnection.hget(registryKey, agentName);
+    if (!registrationRaw) throw new Error("Registered shell metadata disappeared");
+    const registration = JSON.parse(registrationRaw);
+    await redis.adapterConnection.hset(registryKey, agentName, JSON.stringify({ ...registration,
+      metadata: { ...registration.metadata, protocol_version: 2,
+        tool_names: ["send_message", "receive_message", "list_agents", "get_queue_status",
+          "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status",
+          "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] },
+    }));
     const transportStarted = lifecycle.elapsed();
     const previousInitialized = server.server.oninitialized;
     server.server.oninitialized = () => {

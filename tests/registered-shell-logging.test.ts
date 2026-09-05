@@ -120,7 +120,7 @@ describe("registered shell lifecycle logging", () => {
     const client = new Client({ name: "invalid-log-test", version: "1" });
     const redis = new Redis(REDIS_URL);
     try {
-      await client.connect(clientTransport); expect((await client.listTools()).tools.length).toBe(9);
+      await client.connect(clientTransport); expect((await client.listTools()).tools.length).toBe(13);
       await shell.close();
       expect(await redis.scard(SESSION_KEYS.agentSessions(shell.agentName))).toBe(0);
       expect(await redis.exists(SESSION_KEYS.lease(shell.sessionId), SESSION_KEYS.session(shell.sessionId))).toBe(0);

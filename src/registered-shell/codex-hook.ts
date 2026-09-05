@@ -13,7 +13,7 @@ const eventSchema = z.object({
 /** The daemon routes this call through the exact thread's own MCP connection. */
 export const bindCodexHook = async (
   event: unknown, rpc: CodexRpcClient,
-  options: Readonly<{ server?: string; timeoutMs?: number; retryMs?: number }> = {},
+  options: Readonly<{ server?: string; timeoutMs?: number; retryMs?: number; onUnavailable?: (code: string) => void }> = {},
 ): Promise<boolean> => {
   const input = eventSchema.parse(event);
   const deadline = Date.now() + (options.timeoutMs ?? 30_000);
@@ -24,6 +24,12 @@ export const bindCodexHook = async (
         threadId: input.session_id, server: options.server ?? "gptqueue-shared", tool: "bind_runtime",
         arguments: { client: "codex", runtime_id: input.session_id, epoch: input.session_id, working_directory: input.cwd },
       }, signal);
+      const content = Array.isArray(result.content) ? result.content : [];
+      if (result.isError && content.some(item => item?.type === "text" &&
+          typeof item.text === "string" && /Tool bind_runtime not found/u.test(item.text))) {
+        options.onUnavailable?.("legacy_connection_requires_reconnect");
+        return false;
+      }
       const status = result.structuredContent as Record<string, unknown> | undefined;
       if (!result.isError && status?.activation_ready === true) return true;
     } catch { if (signal.aborted) break; }
@@ -40,8 +46,9 @@ export const runCodexHook = async (): Promise<void> => {
   }
   const rpc = new CodexSocketClient();
   try {
-    if (!await bindCodexHook(JSON.parse(input), rpc)) {
-      console.error('[gptqueue] {"event":"runtime_binding_failed","code":"codex_binding_unavailable"}');
+    let code = "codex_binding_unavailable";
+    if (!await bindCodexHook(JSON.parse(input), rpc, { onUnavailable: value => { code = value; } })) {
+      console.error('[gptqueue] ' + JSON.stringify({ event: 'runtime_binding_failed', code }));
       process.exitCode = 1;
     }
   } finally { await rpc.close(); }

@@ -99,4 +99,16 @@ explicit inventory.
 
 The live server uses Redis db0. Every test suite runs against db15
 (`REDIS_URL=redis://127.0.0.1:6379/15`) and the shared flush helper refuses
-db0 unless `GPTQUEUE_ALLOW_DB0=1`. Never flush db0.
+db0 unconditionally. Vitest requires db15 before collecting tests. Never flush db0.
+
+### Test runner environment boundary
+
+When running through Overwatch, put the Redis URL inside the executed command:
+
+```sh
+overwatch run --profile npm_test --stream -- /usr/bin/env REDIS_URL=redis://127.0.0.1:6379/15 /absolute/path/to/node node_modules/vitest/vitest.mjs run
+```
+
+Do not rely on the daemon inheriting environment variables from the caller.
+Vitest enforces db15 before test collection, and cleanup checks the actual
+Redis connection database. Local cleanup helpers must use the shared guard.

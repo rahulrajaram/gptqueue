@@ -110,6 +110,8 @@ const registerBoundTools = (
     boundSendMessageSchema.shape,
     async (params) =>
       safeToolCall(async () => {
+        // A provisional mailbox with outbound correlations cannot be silently renamed on bind.
+        await redisClient.adapterConnection.set(`gptq:outbound-activity:${redisClient.requireRegistered()}`, "1");
         const result = await sendMessage(redisClient, boundSendMessageSchema.parse(params));
         const payload = result.structuredContent as Record<string, unknown> | undefined;
         if (payload?.status === "sent" && (params.type === "result" || params.type === "error")) {
@@ -187,7 +189,8 @@ export const createBoundMcpServer = (
         (options.runtime
           ? "This MCP connection is already registered in GPTQueue. get_runtime_status reports your current exact messaging identity and inbox activation readiness. "
           : `This MCP connection is already registered in GPTQueue as "${options.agentName}". `) +
-        "Do not call register_agent or supply session_id. Use the available messaging tools directly.",
+        "Do not call register_agent or supply session_id. Use the available messaging tools directly. " +
+        (options.runtime ? "Use find_agents and get_agent_details to identify the intended peer and check activation readiness. Labels, directory and declared role are hints, not ownership proof; never pick an ambiguous match silently. A send receipt only proves queue acceptance. Use get_delivery_status for actual progress. Declare your purpose with set_agent_profile when it is known. " : ""),
     }
   );
   registerBoundTools(server, options.redisClient, shutdownSignal);

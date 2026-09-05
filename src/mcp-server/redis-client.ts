@@ -1,4 +1,5 @@
 import { Redis } from "ioredis";
+import { createHash } from "node:crypto";
 import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
 import { SESSION_KEYS, SESSION_DEFAULTS } from "../core/keys.js";
@@ -86,6 +87,46 @@ export class RedisClient {
       );
     }
     return this._agentName;
+  }
+
+  /** Atomically attach this provisional session to an offline, exactly mapped mailbox. */
+  async adoptIdentity(source: string, target: string, mappingKey: string, expectedMapping: string): Promise<void> {
+    if (!this._sessionId || this._agentName !== source || source === target) throw new Error("Continuity source ownership mismatch");
+    const wrapper = (name: string) => `gptq:experimental-wrapper-claim:${createHash("sha256").update(name).digest("hex")}`;
+    const result = await this.redis.eval(`
+      if redis.call('GET', KEYS[1]) ~= ARGV[4] then return -1 end
+      local sourceRaw = redis.call('HGET', KEYS[2], ARGV[1])
+      local targetRaw = redis.call('HGET', KEYS[2], ARGV[2])
+      if not sourceRaw or not targetRaw then return -2 end
+      local sourceReg = cjson.decode(sourceRaw)
+      local targetReg = cjson.decode(targetRaw)
+      if redis.call('HGET', KEYS[3], 'agent_name') ~= ARGV[1] or redis.call('EXISTS', KEYS[4]) ~= 1 then return -3 end
+      if redis.call('SCARD', KEYS[5]) ~= 1 or redis.call('SISMEMBER', KEYS[5], ARGV[3]) ~= 1 then return -4 end
+      if redis.call('EXISTS', KEYS[7]) == 1 or redis.call('EXISTS', KEYS[8]) == 1 or redis.call('EXISTS', KEYS[9]) == 1 then return -5 end
+      for _, sid in ipairs(redis.call('SMEMBERS', KEYS[6])) do
+        if redis.call('EXISTS', 'gptq:lease:'..sid) == 1 then return -6 end
+      end
+      if redis.call('LLEN', KEYS[10]) > 0 or redis.call('ZCARD', KEYS[11]) > 0 or redis.call('EXISTS', KEYS[12]) == 1 or redis.call('EXISTS', KEYS[13]) == 1 then return -7 end
+      targetReg.pid = sourceReg.pid
+      targetReg.metadata = targetReg.metadata or {}
+      if sourceReg.metadata then
+        targetReg.metadata.protocol_version = sourceReg.metadata.protocol_version
+        targetReg.metadata.tool_names = sourceReg.metadata.tool_names
+      end
+      redis.call('HSET', KEYS[3], 'agent_name', ARGV[2])
+      redis.call('SREM', KEYS[5], ARGV[3])
+      redis.call('SADD', KEYS[6], ARGV[3])
+      redis.call('HSET', KEYS[2], ARGV[2], cjson.encode(targetReg))
+      redis.call('HDEL', KEYS[2], ARGV[1])
+      redis.call('DEL', KEYS[14])
+      return 1
+    `, 14, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
+      SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), SESSION_KEYS.heartbeat(target),
+      `gptq:runtime-binding:${target}`, wrapper(target), SESSION_KEYS.queue(source), `gptq:claims-index:${source}`,
+      `gptq:outbound-activity:${source}`, wrapper(source), SESSION_KEYS.heartbeat(source), source, target, this._sessionId, expectedMapping);
+    if (result !== 1) throw new Error(`Continuity adoption refused (${result})`);
+    this._agentName = target;
+    this.startHeartbeat();
   }
 
   /**
