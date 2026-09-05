@@ -73,7 +73,7 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
 
   server.tool(
     "list_agents",
-    "[safety: readonly] List registered GPTQueue agents and their presence. Works before registration.",
+    "[safety: readonly] List agents with readable labels, exact messaging names, public UUIDs, working directories, clients, registration times, process IDs, and presence. Send messages to the full name; labels are for display. Works before registration.",
     {},
     async () => safeToolCall(() => listAgents(redisClient))
   );

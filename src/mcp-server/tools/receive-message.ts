@@ -42,7 +42,8 @@ function durableActorClaimRequired(name: string) {
 
 export async function receiveMessage(
   client: RedisClient,
-  params: z.infer<typeof receiveMessageSchema>
+  params: z.infer<typeof receiveMessageSchema>,
+  signal?: AbortSignal
 ) {
   await ensureSessionBinding(client, params.session_id);
   const name = client.requireRegistered();
@@ -53,7 +54,7 @@ export async function receiveMessage(
     return durableActorClaimRequired(name);
   }
 
-  const message = await client.receiveMessage(params.timeout);
+  const message = await client.receiveMessage(params.timeout, signal);
 
   if (message) {
     return toolResult({ status: "message", message }, false, message);

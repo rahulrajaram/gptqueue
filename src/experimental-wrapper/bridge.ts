@@ -14,7 +14,9 @@ import {
   receiveMessageSchema,
 } from "../mcp-server/tools/receive-message.js";
 import { sendMessage, sendMessageSchema } from "../mcp-server/tools/send-message.js";
-import { stableToolError, toolResult } from "../mcp-server/tool-result.js";
+import { stableToolError } from "../mcp-server/tool-result.js";
+import { registerRuntimeTools, type RuntimeTools } from "../registered-shell/runtime-tools.js";
+import { InboxEvents } from "../core/inbox-events.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const MAX_TRANSPORT_SESSIONS = 4;
@@ -36,6 +38,7 @@ export interface BoundBridge {
 interface BridgeOptions {
   readonly agentName: string;
   readonly redisClient: RedisClient;
+  readonly runtime?: RuntimeTools;
 }
 
 const digest = (value: string): Buffer =>
@@ -76,52 +79,65 @@ const safeToolCall = async <T>(call: () => Promise<T>) => {
 const receiveBoundMessage = async (
   redisClient: RedisClient,
   params: BoundReceiveParams,
-  isClosing: () => boolean
+  requestSignal: AbortSignal,
+  shutdownSignal: AbortSignal
 ) => {
-  const deadline = Date.now() + params.timeout * 1_000;
-  while (!isClosing()) {
-    const result = await receiveMessage(redisClient, {
-      ...params,
-      timeout: 1,
-    });
-    if (result.structuredContent.status !== "no_messages") return result;
-    if (Date.now() >= deadline) {
-      return toolResult({ status: "no_messages", timeout: params.timeout });
-    }
+  const receive = new AbortController();
+  const cancel = () => receive.abort();
+  requestSignal.addEventListener("abort", cancel, { once: true });
+  shutdownSignal.addEventListener("abort", cancel, { once: true });
+  if (requestSignal.aborted || shutdownSignal.aborted) cancel();
+  try {
+    // A single request-owned blocking connection replaces repeated shared pops.
+    // Cancellation closes that connection; an already executed pop still has
+    // the existing at-most-once delivery uncertainty and is never replayed.
+    receive.signal.throwIfAborted();
+    return await receiveMessage(redisClient, params, receive.signal);
+  } finally {
+    requestSignal.removeEventListener("abort", cancel);
+    shutdownSignal.removeEventListener("abort", cancel);
   }
-  return toolResult({ status: "no_messages", timeout: params.timeout });
 };
 
 const registerBoundTools = (
   server: McpServer,
   redisClient: RedisClient,
-  isClosing: () => boolean
+  shutdownSignal: AbortSignal
 ): void => {
   server.tool(
     "send_message",
     "[safety: writable] Send a message as the identity already bound to this wrapper.",
     boundSendMessageSchema.shape,
     async (params) =>
-      safeToolCall(() =>
-        sendMessage(redisClient, boundSendMessageSchema.parse(params))
-      )
+      safeToolCall(async () => {
+        const result = await sendMessage(redisClient, boundSendMessageSchema.parse(params));
+        const payload = result.structuredContent as Record<string, unknown> | undefined;
+        if (payload?.status === "sent" && (params.type === "result" || params.type === "error")) {
+          await new InboxEvents(redisClient.adapterConnection).trace(redisClient.requireRegistered(), {
+            stage: "reply_sent", timestamp: new Date().toISOString(),
+            message_id: String(payload.message_id), in_reply_to: params.in_reply_to,
+          });
+        }
+        return result;
+      })
   );
   server.tool(
     "receive_message",
     "[safety: writable] Receive and consume the next message for the identity already bound to this wrapper.",
     boundReceiveMessageSchema.shape,
-    async (params) =>
+    async (params, extra) =>
       safeToolCall(() =>
         receiveBoundMessage(
           redisClient,
           boundReceiveMessageSchema.parse(params),
-          isClosing
+          extra.signal,
+          shutdownSignal
         )
       )
   );
   server.tool(
     "list_agents",
-    "[safety: readonly] List registered GPTQueue agents and their presence.",
+    "[safety: readonly] List agents with readable labels, exact messaging names, public UUIDs, working directories, clients, registration times, process IDs, and presence. Send messages to the full name; labels are for display.",
     {},
     async () => safeToolCall(() => listAgents(redisClient))
   );
@@ -153,6 +169,32 @@ const delay = (milliseconds: number): Promise<void> =>
     timer.unref();
   });
 
+/** Share the same identity-bound tool surface across HTTP and stdio transports. */
+export const createBoundMcpServer = (
+  options: BridgeOptions,
+  shutdownSignal: AbortSignal
+): McpServer => {
+  if (!options.redisClient.registered || !options.redisClient.sessionId) {
+    throw new Error("Cannot start bridge before GPTQueue registration succeeds.");
+  }
+  if (options.redisClient.agentName !== options.agentName) {
+    throw new Error("Bridge identity does not match the registered session.");
+  }
+  const server = new McpServer(
+    { name: "gptqueue-registered-wrapper", version: "1.0.0-experimental" },
+    {
+      instructions:
+        (options.runtime
+          ? "This MCP connection is already registered in GPTQueue. get_runtime_status reports your current exact messaging identity and inbox activation readiness. "
+          : `This MCP connection is already registered in GPTQueue as "${options.agentName}". `) +
+        "Do not call register_agent or supply session_id. Use the available messaging tools directly.",
+    }
+  );
+  registerBoundTools(server, options.redisClient, shutdownSignal);
+  if (options.runtime) registerRuntimeTools(server, options.redisClient, options.runtime);
+  return server;
+};
+
 /**
  * Start a single-runtime MCP bridge around an already registered RedisClient.
  *
@@ -175,7 +217,7 @@ export async function startBoundBridge(
   const bearerToken = randomBytes(32).toString("base64url");
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const app = createMcpExpressApp();
-  let closing = false;
+  const shutdown = new AbortController();
 
   app.use("/mcp", (req, res, next) => {
     const supplied = bearerFrom(req.headers.authorization);
@@ -189,19 +231,6 @@ export async function startBoundBridge(
       error: { code: -32001, message: "Unauthorized bridge connection" },
     });
   });
-
-  const createSessionServer = (): McpServer => {
-    const server = new McpServer(
-      { name: "gptqueue-registered-wrapper", version: "1.0.0-experimental" },
-      {
-        instructions:
-          `This MCP connection is already registered in GPTQueue as "${options.agentName}". ` +
-          "Do not call register_agent or supply session_id. Use the available messaging tools directly.",
-      }
-    );
-    registerBoundTools(server, options.redisClient, () => closing);
-    return server;
-  };
 
   app.post("/mcp", async (req, res) => {
     const transportSessionId = req.headers["mcp-session-id"] as
@@ -240,7 +269,7 @@ export async function startBoundBridge(
       return;
     }
 
-    const server = createSessionServer();
+    const server = createBoundMcpServer(options, shutdown.signal);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sessionId) => {
@@ -302,7 +331,7 @@ export async function startBoundBridge(
   let closePromise: Promise<void> | null = null;
   const close = async (): Promise<void> => {
     if (closePromise) return closePromise;
-    closing = true;
+    shutdown.abort();
     closePromise = (async () => {
       const transportsClosed = Promise.allSettled(
         [...transports.values()].map((transport) => transport.close())

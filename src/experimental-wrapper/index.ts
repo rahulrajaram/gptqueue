@@ -459,6 +459,10 @@ export async function runExperimentalWrapper(
         }
       } finally {
         clearTimeout(cleanupDeadline);
+        // Fast failures can finish both attempts before the deadline fires.
+        // Close owned sockets even when a lost claim prevents safe deletion.
+        identityClaim?.abandon();
+        redisClient.forceDisconnect();
       }
     } finally {
       process.off("SIGINT", onInterrupt);

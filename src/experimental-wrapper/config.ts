@@ -1,4 +1,5 @@
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { WRAPPER_VISIBLE_TOOLS } from "./bridge.js";
 
 export type WrappedClient = "codex" | "pi";
@@ -247,6 +248,7 @@ export const buildPiInvocation = (
 export const renderPiExtension = (adapterEntry: string): string =>
   [
     `import { createMcpAdapter } from ${JSON.stringify(adapterEntry)};`,
+    `import { restrictPiTools, requirePiTools } from ${JSON.stringify(fileURLToPath(new URL("./pi-tools.js", import.meta.url)))};`,
     "",
     "const requiredEnv = (name) => {",
     "  const value = process.env[name];",
@@ -257,10 +259,12 @@ export const renderPiExtension = (adapterEntry: string): string =>
     '// Redirect adapter metadata/cache writes into this one-run workspace after Pi has loaded its own auth and model configuration.',
     'process.env.PI_CODING_AGENT_DIR = requiredEnv("GPTQ_PI_ADAPTER_STATE_DIR");',
     "",
-    "export default createMcpAdapter({",
+    `const allowed = ${JSON.stringify(WRAPPER_VISIBLE_TOOLS)};`,
+    "const adapter = createMcpAdapter({",
     "  config: {",
     "    settings: {",
     "      disableProxyTool: true,",
+    "      scriptMode: false,",
     "      freezeDirectTools: true,",
     "      sampling: false,",
     "      elicitation: false",
@@ -279,5 +283,20 @@ export const renderPiExtension = (adapterEntry: string): string =>
     "    }",
     "  },",
     "});",
+    "",
+    "export default function messagingOnlyPi(pi) {",
+    "  adapter(restrictPiTools(pi, allowed));",
+    '  pi.on("before_agent_start", async () => {',
+    "    try {",
+    "      const active = await requirePiTools(pi, allowed);",
+    '      console.error("[gptqueue-experiment] Pi active tools: " + JSON.stringify(active));',
+    "    } catch (error) {",
+    '      console.error("[gptqueue-experiment] Pi tool isolation failed: " + error.message);',
+    "      // Pi reports extension exceptions and may continue; terminate this child",
+    "      // so the parent wrapper cleans up instead of allowing inference.",
+    "      process.exit(1);",
+    "    }",
+    "  });",
+    "}",
     "",
   ].join("\n");
