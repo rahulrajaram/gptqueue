@@ -240,3 +240,87 @@ prompt; check `activation_ready` before relying on unattended delivery.
 SDK's idle/busy lifecycle with a deterministic local inference stream. Add
 `--real-sidecar` for the real MCP/Redis task-claim-reply-ack path on db15; this
 checks native transport and execution without using external model credentials.
+
+### Discovering the intended peer and diagnosing delivery
+
+New registered sidecars publish protocol version 2 and add `find_agents`,
+`get_agent_details`, `get_delivery_status`, and `set_agent_profile`. The original
+seven shared MCP tool request/response contracts are unchanged. Existing loaded
+sidecars retain their old implementation until their MCP connection is refreshed.
+Pi accepts the previous nine-tool runtime catalog and the new optional diagnostic
+tools; an old four-tool connection cannot perform native activation.
+
+Use `set_agent_profile` to declare a readable label, purpose and kind (`controller`,
+`worker`, `interactive`, or `unknown`). These are self-declarations, not permissions
+or proof of authority. `find_agents` returns candidates and explicitly reports
+ambiguity, including when pagination hides further matches. Never choose a main
+controller by directory, PID, UUID prefix, registration recency or declared kind
+alone. Confirm the exact intended messaging address with the operator when the
+candidates remain ambiguous.
+
+`get_agent_details` keeps online presence separate from native binding readiness.
+Capabilities describe the implementation instantiated by that sidecar; they are
+not a live probe of another connection's MCP tool table. A binding lease alone reports `bound_unverified` with `activation_ready: null`;
+it can briefly outlive a failed process. A local-controller check, or
+`get_agent_details` with `probe: true` for an exact Codex peer, can establish
+readiness. A remote Pi lease remains unverified until checked through its own
+connection. None of these states proves successful message processing. `get_delivery_status` inspects
+a specified recipient and message ID without consuming the message. Queue, claim
+and DLQ locations are evidence; acknowledgement requires a matching message claim
+and acknowledgement trace. An empty queue without retained evidence means
+`unknown_history`. Observations are bounded, non-atomic snapshots; trace retention
+is approximately 1,024 events and trace writes can fail independently of delivery.
+Neither diagnostic returns message content or private session credentials.
+
+For a legacy connection, use the local read-only doctor (Node 24 on this host):
+
+```sh
+node scripts/gptqueue-doctor.mjs connection --redis-url redis://127.0.0.1:6379/0 --thread-id EXACT_NATIVE_THREAD --agent EXACT_MAILBOX
+node scripts/gptqueue-doctor.mjs delivery --redis-url redis://127.0.0.1:6379/0 --agent EXACT_MAILBOX --message-id MESSAGE_ID
+```
+
+The connection probe invokes `get_runtime_status` on the exact thread. It does
+not trust a daemon-wide catalog listing as proof that this thread loaded the tool.
+If unavailable, the hook now reports `legacy_connection_requires_reconnect`
+instead of retrying the missing tool for 30 seconds.
+
+### Explicit continuity for a legacy mailbox
+
+Ordinary reconnects retain the native runtime's existing mailbox mapping. The
+replacement connection attaches its session atomically to that mailbox. It refuses
+an active old owner, a changed mapping, or a provisional mailbox that already has
+queued messages, claims, or outbound activity. It never moves envelopes to a
+newly named queue. Stale session membership without a live lease does not by itself
+block recovery. Original mailbox addresses and reply correlations remain intact.
+
+When a legacy mailbox never had a runtime mapping, a local operator can prepare an
+explicit plan for a verified native conversation. This does not infer succession
+from directory or label:
+
+```sh
+node scripts/gptqueue-doctor.mjs continuity-plan --redis-url redis://127.0.0.1:6379/0 --client codex --runtime-id EXACT_NATIVE_THREAD --cwd ABSOLUTE_DIRECTORY --agent EXACT_OLD_MAILBOX --legacy yes --out PLAN.json
+```
+
+Review the plan and confirm the operator's identity evidence before applying it.
+The target and any replaced mapped mailbox must have no live owner or outstanding
+claims. A replaced address must also have no queued messages or outbound activity.
+The plan is tied to the Redis namespace, runtime mapping and registry fingerprints;
+changes cause a conflict rather than a guessed retry. Applying requires explicit
+operator approval:
+
+```sh
+node scripts/gptqueue-doctor.mjs continuity-apply --redis-url redis://127.0.0.1:6379/0 --plan PLAN.json --apply yes
+```
+
+Application updates only the native mapping and an audit record; queued messages
+stay at their original address. A new connection binding that exact native runtime
+then attaches to the preserved mailbox. A successful mapping application is not a
+delivery receipt: verify the replacement connection and each pending message.
+The plan file is a reviewed administrative instruction, not an authentication
+credential. This interface assumes the operator is already authorized to write
+that Redis namespace; it does not secure Redis against another administrator.
+
+Do not repoint a busy successor with its own outstanding conversations. For that
+case, preserve both mailboxes and arrange an explicitly authorized resend to the
+verified current address; do not silently rewrite historical envelopes. The doctor
+never reloads the shared Codex daemon or migrates live mailboxes automatically.

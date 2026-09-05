@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { bindCodexHook } from "../src/registered-shell/codex-hook.js";
 
 const session = "123e4567-e89b-12d3-a456-426614174000";
@@ -34,4 +34,13 @@ describe("Codex runtime hook", () => {
     const oversized = await run("x".repeat(70_000));
     expect(oversized.code).not.toBe(0); expect(oversized.stderr).not.toContain("x".repeat(100));
   });
+});
+
+it("reports a legacy loaded connection without retrying or echoing payloads", async () => {
+  const request = vi.fn(async () => ({ isError: true, content: [{ type: "text", text: "Tool bind_runtime not found" }] }));
+  const unavailable = vi.fn();
+  expect(await bindCodexHook({ session_id: session, cwd: "/tmp", hook_event_name: "UserPromptSubmit" },
+    { request, close: async () => {} }, { onUnavailable: unavailable })).toBe(false);
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(unavailable).toHaveBeenCalledWith("legacy_connection_requires_reconnect");
 });

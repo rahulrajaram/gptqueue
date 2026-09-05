@@ -7,6 +7,7 @@ import { renewClaim, renewClaimSchema } from "../mcp-server/tools/renew-claim.js
 import { stableToolError, toolResult } from "../mcp-server/tool-result.js";
 import { InboxEvents } from "../core/inbox-events.js";
 import { runtimeBindingSchema, type RuntimeBinding } from "./runtime.js";
+import { registerDiagnosticTools } from "./diagnostic-tools.js";
 
 export const RUNTIME_TOOL_NAMES = Object.freeze([
   "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status",
@@ -60,4 +61,5 @@ export const registerRuntimeTools = (server: McpServer, client: RedisClient, run
     runtimeBindingSchema.shape, async (params) => safe(async () => toolResult(await runtime.bind(runtimeBindingSchema.parse(params)))));
   server.tool("get_runtime_status", "Report this connection's exact runtime binding and automatic inbox activation readiness.",
     z.object({}).shape, async () => toolResult(runtime.status()));
+  registerDiagnosticTools(server, client, runtime);
 };

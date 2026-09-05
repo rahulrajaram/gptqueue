@@ -1,27 +1,17 @@
-import { createHash } from "node:crypto";
 import type { RedisClient } from "../mcp-server/redis-client.js";
-import { SESSION_KEYS } from "../core/keys.js";
-import { discoveryMetadata } from "../core/agent-discovery.js";
-import type { RuntimeBinding } from "./runtime.js";
+import { runtimeBindingSchema, type RuntimeBinding } from "./runtime.js";
+import { runtimeMailboxKey } from "../core/mailbox-continuity.js";
+import { z } from "zod";
 
-/** Preserve the public queue UUID and backlog when the same native session reconnects. */
+/** Exact native continuity; never move queued envelopes into another address. */
 export const restoreRuntimeMailbox = async (client: RedisClient, binding: RuntimeBinding): Promise<string> => {
-  const redis = client.adapterConnection;
-  const key = `gptq:runtime-mailbox:${createHash("sha256").update(JSON.stringify([binding.client, binding.runtime_id])).digest("hex")}`;
-  const proposed = JSON.stringify({ agent: client.requireRegistered(), working_directory: binding.working_directory });
-  await redis.set(key, proposed, "NX");
-  const raw = await redis.get(key);
+  const validated = runtimeBindingSchema.parse(binding);
+  const source = client.requireRegistered(), key = runtimeMailboxKey(validated);
+  await client.adapterConnection.set(key, JSON.stringify({ agent: source, working_directory: validated.working_directory }), "NX");
+  const raw = await client.adapterConnection.get(key);
   if (!raw) throw new Error("Runtime mailbox mapping unavailable");
-  const mapping = JSON.parse(raw) as { agent?: unknown; working_directory?: unknown };
-  if (typeof mapping.agent !== "string" || mapping.working_directory !== binding.working_directory) {
-    throw new Error("Runtime mailbox mapping does not match binding");
-  }
-  if (mapping.agent === client.agentName) return mapping.agent;
-  const stored = await redis.hget(SESSION_KEYS.registry, mapping.agent);
-  if (!stored) throw new Error("Runtime mailbox registration unavailable");
-  const registry = JSON.parse(stored) as Record<string, unknown>;
-  const metadata = discoveryMetadata(mapping.agent, registry.metadata);
-  await client.register("both", mapping.agent,
-    typeof registry.description === "string" ? registry.description : undefined, metadata);
-  return mapping.agent;
+  const parsed = z.object({ agent: z.string().min(1), working_directory: z.string() }).strict().safeParse(JSON.parse(raw));
+  if (!parsed.success || parsed.data.working_directory !== validated.working_directory) throw new Error("Runtime mailbox mapping does not match binding");
+  if (parsed.data.agent !== source) await client.adoptIdentity(source, parsed.data.agent, key, raw);
+  return client.requireRegistered();
 };

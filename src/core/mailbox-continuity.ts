@@ -1,0 +1,70 @@
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import type { Redis } from "ioredis";
+import { runtimeBindingSchema, type RuntimeBinding } from "../registered-shell/runtime.js";
+
+export const runtimeMailboxKey = (binding: RuntimeBinding): string =>
+  `gptq:runtime-mailbox:${createHash("sha256").update(JSON.stringify([binding.client, binding.runtime_id])).digest("hex")}`;
+const fingerprint = (raw: string | null): string => createHash("sha256").update(raw ?? "<missing>").digest("hex");
+const namespace = (redis: Redis): string => fingerprint(JSON.stringify([redis.options.host, redis.options.port, redis.options.path, redis.options.db]));
+export const continuityPlanSchema = z.object({
+  binding: runtimeBindingSchema, source: z.string().min(1).nullable(), target: z.string().min(1).max(500),
+  mappingKey: z.string().min(1), expectedMapping: z.string().nullable(), namespace: z.string(),
+  sourceFingerprint: z.string(), targetFingerprint: z.string(), legacy_adoption: z.boolean(),
+}).strict();
+export type ContinuityPlan = Readonly<z.infer<typeof continuityPlanSchema>>;
+
+/** Read-only plan. Explicit legacy adoption is an operator action, never cwd inference. */
+export const prepareContinuity = async (redis: Redis, binding: RuntimeBinding, target: string,
+  options: Readonly<{ allowLegacy?: boolean }> = {}): Promise<ContinuityPlan> => {
+  const validated = runtimeBindingSchema.parse(binding);
+  const key = runtimeMailboxKey(validated), raw = await redis.get(key);
+  if (!raw && !options.allowLegacy) throw new Error("Continuity provenance missing; explicit legacy adoption required");
+  const mapping = raw ? z.object({ agent: z.string().min(1), working_directory: z.string() }).strict().parse(JSON.parse(raw)) : null;
+  if (mapping && mapping.working_directory !== validated.working_directory) throw new Error("Runtime mailbox mapping does not match binding");
+  const sourceRaw = mapping ? await redis.hget("gptq:registry", mapping.agent) : null;
+  const targetRaw = await redis.hget("gptq:registry", target);
+  if (!targetRaw || (mapping && !sourceRaw)) throw new Error("Continuity registry metadata unavailable");
+  return Object.freeze(continuityPlanSchema.parse({ binding: validated, source: mapping?.agent ?? null, target,
+    mappingKey: key, expectedMapping: raw, namespace: namespace(redis), sourceFingerprint: fingerprint(sourceRaw),
+    targetFingerprint: fingerprint(targetRaw), legacy_adoption: !mapping }));
+};
+
+/** Local operator-only CAS: preserves queues, addresses, envelopes and correlations. */
+export const applyContinuity = async (redis: Redis, plan: ContinuityPlan): Promise<"applied" | "idempotent"> => {
+  const p = continuityPlanSchema.parse(plan);
+  if (p.mappingKey !== runtimeMailboxKey(p.binding) || p.namespace !== namespace(redis)) throw new Error("Continuity namespace or mapping mismatch");
+  const plannedMapping = p.expectedMapping ? z.object({ agent: z.string(), working_directory: z.string() }).strict().parse(JSON.parse(p.expectedMapping)) : null;
+  if ((plannedMapping?.agent ?? null) !== p.source || (plannedMapping && plannedMapping.working_directory !== p.binding.working_directory) ||
+      (!plannedMapping) !== p.legacy_adoption) throw new Error("Inconsistent continuity plan");
+  const desired = JSON.stringify({ agent: p.target, working_directory: p.binding.working_directory });
+  const [current, sourceRaw, targetRaw] = await Promise.all([redis.get(p.mappingKey),
+    p.source ? redis.hget("gptq:registry", p.source) : Promise.resolve(null), redis.hget("gptq:registry", p.target)]);
+  if (current === desired && targetRaw) return "idempotent";
+  if (current !== p.expectedMapping || fingerprint(sourceRaw) !== p.sourceFingerprint || !targetRaw || fingerprint(targetRaw) !== p.targetFingerprint)
+    throw new Error("Continuity fingerprints or mapping changed");
+  if ((!p.source) !== p.legacy_adoption) throw new Error("Invalid legacy adoption plan");
+  const wrapperKey = (agent: string) => `gptq:experimental-wrapper-claim:${createHash("sha256").update(agent).digest("hex")}`;
+  const result = await redis.eval(`
+    if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] then return -1 end
+    if (redis.call('HGET', KEYS[2], ARGV[2]) or '') ~= ARGV[3] then return -2 end
+    if ARGV[4] ~= '' and (redis.call('HGET', KEYS[2], ARGV[4]) or '') ~= ARGV[5] then return -3 end
+    local function occupied(agent, wrapper)
+      if redis.call('EXISTS','gptq:runtime-binding:'..agent) == 1 or redis.call('EXISTS','gptq:heartbeat:'..agent) == 1 or redis.call('EXISTS',wrapper) == 1 then return true end
+      for _, sid in ipairs(redis.call('SMEMBERS','gptq:agent-sessions:'..agent)) do
+        if redis.call('EXISTS','gptq:lease:'..sid) == 1 then return true end
+      end
+      return redis.call('ZCARD','gptq:claims-index:'..agent) > 0
+    end
+    if occupied(ARGV[2], KEYS[3]) then return -4 end
+    if ARGV[4] ~= '' and ARGV[4] ~= ARGV[2] then
+      if occupied(ARGV[4], KEYS[4]) or redis.call('LLEN','gptq:q:'..ARGV[4]) > 0 or redis.call('EXISTS','gptq:outbound-activity:'..ARGV[4]) == 1 then return -5 end
+    end
+    redis.call('SET',KEYS[1],ARGV[6])
+    redis.call('XADD',KEYS[5],'MAXLEN','~',1000,'*','event','operator_continuity','target',ARGV[2],'source',ARGV[4],'runtime_id',ARGV[7])
+    return 1
+  `, 5, p.mappingKey, "gptq:registry", wrapperKey(p.target), wrapperKey(p.source ?? p.target), "gptq:continuity-audit",
+  p.expectedMapping ?? "", p.target, targetRaw, p.source ?? "", sourceRaw ?? "", desired, p.binding.runtime_id);
+  if (result !== 1) throw new Error(`Continuity apply refused (${result}): mapping changed, live owner, claims or source activity`);
+  return "applied";
+};

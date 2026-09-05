@@ -9,7 +9,8 @@ import { runtimeBindingSchema } from "./runtime.js";
 import { z } from "zod";
 
 export const GPTQUEUE_TOOLS = ["send_message", "receive_message", "list_agents", "get_queue_status"] as const;
-export const RUNTIME_TOOL_NAMES = ["claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status"] as const;
+export const RUNTIME_TOOL_NAMES = ["claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] as const;
+const REQUIRED_RUNTIME_TOOLS = RUNTIME_TOOL_NAMES.slice(0, 5);
 export const STARTUP_TIMEOUT_MS = 10_000;
 type CatalogTool = { name?: string; description?: string; inputSchema?: unknown };
 type BoundTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
@@ -55,13 +56,14 @@ const withTimeout = async <T>(work: (signal: AbortSignal) => Promise<T>, timeout
 };
 
 export const validateCatalog = (catalog: { tools?: CatalogTool[] }, runtimeEnabled = false): readonly BoundTool[] => {
-  const expected: readonly string[] = runtimeEnabled ? [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES] : GPTQUEUE_TOOLS;
+  const expected: readonly string[] = runtimeEnabled ? [...GPTQUEUE_TOOLS, ...REQUIRED_RUNTIME_TOOLS] : GPTQUEUE_TOOLS;
+  const allowed: readonly string[] = runtimeEnabled ? [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES] : GPTQUEUE_TOOLS;
   const tools = catalog.tools ?? [];
   const names = tools.map((tool) => tool.name);
-  if (tools.length !== expected.length || expected.some((name) => !names.includes(name))) {
+  if (new Set(names).size !== names.length || names.some(name => !name || !allowed.includes(name)) || expected.some((name) => !names.includes(name))) {
     throw new Error("GPTQueue tool catalog mismatch");
   }
-  return expected.map((name) => {
+  return allowed.filter(name => names.includes(name)).map((name) => {
     const tool = tools.find((candidate) => candidate.name === name)!;
     const schema = tool.inputSchema;
     if (!schema || typeof schema !== "object" || Array.isArray(schema) ||
@@ -83,7 +85,7 @@ export const createPiExtension = (
   let binding: RuntimeBinding | undefined;
   let context: PiContext | undefined;
   let instructions = "";
-  const expected: readonly string[] = options.runtimeEnabled ? [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES] : GPTQUEUE_TOOLS;
+  const expected: readonly string[] = options.runtimeEnabled ? [...GPTQUEUE_TOOLS, ...REQUIRED_RUNTIME_TOOLS] : GPTQUEUE_TOOLS;
   const close = async () => {
     runtime?.invalidate(); runtime = undefined; binding = undefined;
     const old = client; client = undefined;

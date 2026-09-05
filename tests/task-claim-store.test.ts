@@ -1,3 +1,4 @@
+import { flushTestKeys as guardedFlushTestKeys } from "./helpers/redis-test-utils.js";
 import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
 import { Redis } from "ioredis";
@@ -28,7 +29,7 @@ import {
 } from "../src/mcp-server/tools/register-agent.js";
 import type { RuntimeLaunchContract } from "../src/core/actor-directory.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
 // wake_if_offline admission now requires an operator allowlist. Scaffold one
 // permitting the test launcher (process.execPath) and point
@@ -44,8 +45,7 @@ allowlist.set();
 afterAll(() => allowlist.cleanup());
 
 async function flushTestKeys(redis: Redis): Promise<void> {
-  const keys = await redis.keys("gptq:*");
-  if (keys.length > 0) await redis.del(...keys);
+  await guardedFlushTestKeys(redis, TEST_REDIS_URL);
 }
 
 const T0 = "2030-01-01T00:00:00.000Z";

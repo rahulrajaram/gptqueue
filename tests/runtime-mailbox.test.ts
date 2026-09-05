@@ -1,3 +1,4 @@
+import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { describe, expect, it, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
@@ -7,7 +8,7 @@ import { Redis } from "ioredis";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 const clients: RedisClient[] = []; const redisConnections: Redis[] = [];
-afterEach(async () => { for (const c of clients.splice(0)) c.forceDisconnect(); for (const r of redisConnections.splice(0)) { await r.flushdb(); await r.quit(); } });
+afterEach(async () => { for (const c of clients.splice(0)) c.forceDisconnect(); for (const r of redisConnections.splice(0)) { await flushTestKeys(r, redisUrl); await r.quit(); } });
 
 describe("runtime mailbox restoration", () => {
   it("preserves the mailbox and public agent across native reconnect", async () => {
