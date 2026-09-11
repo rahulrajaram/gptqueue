@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { Redis } from "ioredis";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { applyContinuity, prepareContinuity, runtimeMailboxKey } from "../src/core/mailbox-continuity.js";
@@ -159,6 +159,102 @@ describe("mailbox continuity operator API", () => {
     expect(await applyContinuity(redis, plan)).toBe("applied");
     expect(await redis.lrange(SESSION_KEYS.queue(canonical), 0, -1)).toEqual([envelope]);
     expect(await redis.xlen("gptq:continuity-audit")).toBe(1);
+  });
+
+  // F5: the two adoption state machines (applyContinuity's occupied() and
+  // adoptIdentity's target-occupancy guard) must enforce the SAME occupancy
+  // signal set on the target. Every signal below must be refused by BOTH
+  // paths — the claims-index row is the divergence the review verified
+  // (adoptIdentity previously accepted a claimed target).
+  const wrapperKeyFor = (agent: string) =>
+    `gptq:experimental-wrapper-claim:${createHash("sha256").update(agent).digest("hex")}`;
+
+  const OCCUPANCY_SIGNALS = [
+    {
+      name: "session lease",
+      inject: async (redis: Redis, target: string) => {
+        const sid = randomUUID();
+        await redis.sadd(SESSION_KEYS.agentSessions(target), sid);
+        await redis.set(SESSION_KEYS.lease(sid), "alive", "EX", 30);
+      },
+    },
+    {
+      name: "heartbeat",
+      inject: async (redis: Redis, target: string) => {
+        await redis.set(SESSION_KEYS.heartbeat(target), "alive", "EX", 30);
+      },
+    },
+    {
+      name: "runtime binding",
+      inject: async (redis: Redis, target: string) => {
+        await redis.set(`gptq:runtime-binding:${target}`, "bound");
+      },
+    },
+    {
+      name: "wrapper claim",
+      inject: async (redis: Redis, target: string) => {
+        await redis.set(wrapperKeyFor(target), "claimed");
+      },
+    },
+    {
+      name: "claims-index (F5 divergence)",
+      inject: async (redis: Redis, target: string) => {
+        await redis.zadd(`gptq:claims-index:${target}`, 1, "stale-claim");
+      },
+    },
+  ] as const;
+
+  it.each(OCCUPANCY_SIGNALS)("operator path refuses a target with %s", async ({ inject }) => {
+    const { redis, canonical, b } = await setup();
+    const plan = await prepareContinuity(redis, b, canonical);
+    await inject(redis, canonical);
+    await expect(applyContinuity(redis, plan)).rejects.toThrow();
+  });
+
+  it.each(OCCUPANCY_SIGNALS)("runtime path refuses a target with %s", async ({ inject }) => {
+    const { redis, canonical, provisional, b } = await setup();
+    await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
+    const client = new RedisClient(null, redisUrl); clients.push(client);
+    await client.register("both", provisional);
+    await inject(redis, canonical);
+    await expect(restoreRuntimeMailbox(client, b)).rejects.toThrow();
+    expect(client.agentName).toBe(provisional);
+  });
+
+  // F6: idempotent replay must revalidate the target fingerprint. A target
+  // registry entry rewritten (reclaimed) between applies must be refused,
+  // not reported as an idempotent success.
+  it("rejects idempotent replay after the target registry entry is reclaimed (F6)", async () => {
+    const { redis, canonical, b } = await setup();
+    const plan = await prepareContinuity(redis, b, canonical);
+    expect(await applyContinuity(redis, plan)).toBe("applied");
+
+    // The target entry is deleted and recreated between applies: the mapping
+    // still reads as desired, but the recorded target fingerprint is stale.
+    await redis.hdel(SESSION_KEYS.registry, canonical);
+    await redis.hset(SESSION_KEYS.registry, canonical, JSON.stringify({ name: canonical, reclaimed: true }));
+
+    await expect(applyContinuity(redis, plan)).rejects.toThrow(/fingerprints|changed/);
+  });
+
+  it("idempotent replay still succeeds when nothing changed (F6 control)", async () => {
+    const { redis, canonical, b } = await setup();
+    const plan = await prepareContinuity(redis, b, canonical);
+    expect(await applyContinuity(redis, plan)).toBe("applied");
+    expect(await applyContinuity(redis, plan)).toBe("idempotent");
+  });
+
+  // F8: working-directory comparisons accept lexical `.`/`..` aliases, so a
+  // binding validated with an aliased path still restores a mapping stored
+  // with the canonical form (and vice versa).
+  it("accepts lexically aliased working directories across restore (F8)", async () => {
+    const { redis, canonical, provisional, b } = await setup();
+    await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: "/workspace" }));
+    const client = new RedisClient(null, redisUrl); clients.push(client);
+    await client.register("both", provisional);
+    await expect(
+      restoreRuntimeMailbox(client, { ...b, working_directory: "/workspace/./" })
+    ).resolves.toBe(canonical);
   });
 
 });

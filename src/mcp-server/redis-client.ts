@@ -93,6 +93,14 @@ export class RedisClient {
   async adoptIdentity(source: string, target: string, mappingKey: string, expectedMapping: string): Promise<void> {
     if (!this._sessionId || this._agentName !== source || source === target) throw new Error("Continuity source ownership mismatch");
     const wrapper = (name: string) => `gptq:experimental-wrapper-claim:${createHash("sha256").update(name).digest("hex")}`;
+    // Target-occupancy guard set mirrors applyContinuity's occupied()
+    // (core/mailbox-continuity.ts) exactly: runtime-binding, heartbeat,
+    // wrapper claim, live session leases, and unacknowledged claims-index
+    // entries (review finding F5 — the claims-index check was previously
+    // missing here, letting the runtime path adopt a claimed target that the
+    // operator path would refuse). Source-side guards (-4, -7) are
+    // runtime-path-specific (sole-session ownership, quiet source) and have
+    // no operator-path counterpart.
     const result = await this.redis.eval(`
       if redis.call('GET', KEYS[1]) ~= ARGV[4] then return -1 end
       local sourceRaw = redis.call('HGET', KEYS[2], ARGV[1])
@@ -102,7 +110,7 @@ export class RedisClient {
       local targetReg = cjson.decode(targetRaw)
       if redis.call('HGET', KEYS[3], 'agent_name') ~= ARGV[1] or redis.call('EXISTS', KEYS[4]) ~= 1 then return -3 end
       if redis.call('SCARD', KEYS[5]) ~= 1 or redis.call('SISMEMBER', KEYS[5], ARGV[3]) ~= 1 then return -4 end
-      if redis.call('EXISTS', KEYS[7]) == 1 or redis.call('EXISTS', KEYS[8]) == 1 or redis.call('EXISTS', KEYS[9]) == 1 then return -5 end
+      if redis.call('EXISTS', KEYS[7]) == 1 or redis.call('EXISTS', KEYS[8]) == 1 or redis.call('EXISTS', KEYS[9]) == 1 or redis.call('ZCARD', KEYS[15]) > 0 then return -5 end
       for _, sid in ipairs(redis.call('SMEMBERS', KEYS[6])) do
         if redis.call('EXISTS', 'gptq:lease:'..sid) == 1 then return -6 end
       end
@@ -120,10 +128,10 @@ export class RedisClient {
       redis.call('HDEL', KEYS[2], ARGV[1])
       redis.call('DEL', KEYS[14])
       return 1
-    `, 14, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
+    `, 15, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
       SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), SESSION_KEYS.heartbeat(target),
       `gptq:runtime-binding:${target}`, wrapper(target), SESSION_KEYS.queue(source), `gptq:claims-index:${source}`,
-      `gptq:outbound-activity:${source}`, wrapper(source), SESSION_KEYS.heartbeat(source), source, target, this._sessionId, expectedMapping);
+      `gptq:outbound-activity:${source}`, wrapper(source), SESSION_KEYS.heartbeat(source), `gptq:claims-index:${target}`, source, target, this._sessionId, expectedMapping);
     if (result !== 1) throw new Error(`Continuity adoption refused (${result})`);
     this._agentName = target;
     this.startHeartbeat();
@@ -160,17 +168,22 @@ export class RedisClient {
     metadata?: AgentDiscoveryMetadata
   ): Promise<{ name: string; session_id: string }> {
     const oldName = this._agentName;
+    const oldSessionId = this._sessionId;
+    const renaming =
+      oldSessionId !== null && oldName !== null && name !== oldName;
 
-    // Close previous session if renaming
-    if (this._sessionId && oldName && name !== oldName) {
-      await this.sessionStore.closeSession(this._sessionId);
-      await this.mailbox.migrateMessages(oldName, name);
-
-      await this.redis.hdel(SESSION_KEYS.registry, oldName);
-      await this.redis.del(
-        SESSION_KEYS.mailboxMeta(oldName),
-        SESSION_KEYS.heartbeat(oldName)
-      );
+    // F2 (atomic, recoverable rename): the old session/registry state is
+    // kept intact until the replacement session exists AND the mailbox
+    // transfer has atomically completed. Ordering:
+    //   1. create the new session — a failure changes nothing (the caller
+    //      stays registered under the old name with the mailbox untouched);
+    //   2. migrate the mailbox with one all-or-nothing Lua transfer — on
+    //      failure the messages are provably still under the old name, the
+    //      just-created session is rolled back, and the error propagates;
+    //   3. only then retire the old session/registry/heartbeat state — a
+    //      failure here cannot lose messages (worst case: stale old-name
+    //      keys that lease expiry cleans up), so cleanup is best-effort.
+    if (renaming) {
       if (this.heartbeatTimer) {
         clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = null;
@@ -183,6 +196,28 @@ export class RedisClient {
       role as "publisher" | "consumer" | "both",
       description
     );
+
+    if (renaming) {
+      try {
+        await this.mailbox.migrateMessages(oldName!, name);
+      } catch (error) {
+        // The transfer is all-or-nothing: every message is still under the
+        // old name. Roll the new session back so the visible state is
+        // unchanged, then surface the failure.
+        await this.sessionStore
+          .closeSession(session.session_id)
+          .catch(() => {});
+        await this.redis.hdel(SESSION_KEYS.registry, name).catch(() => {});
+        throw error;
+      }
+
+      // Messages are safe under the new name; retire the old identity.
+      await this.sessionStore.closeSession(oldSessionId!).catch(() => {});
+      await this.redis.hdel(SESSION_KEYS.registry, oldName!).catch(() => {});
+      await this.redis
+        .del(SESSION_KEYS.mailboxMeta(oldName!), SESSION_KEYS.heartbeat(oldName!))
+        .catch(() => {});
+    }
 
     this._agentName = name;
     this._sessionId = session.session_id;

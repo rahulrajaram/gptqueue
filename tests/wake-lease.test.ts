@@ -26,7 +26,7 @@ const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 const allowlist = scaffoldLaunchAllowlist([
   {
     command: "/usr/bin/pi",
-    allowed_args_prefixes: [[], ["--agent", "matrix"]],
+    allowed_args: [[], ["--agent", "matrix"]],
     comment: "test pi launcher",
   },
 ]);

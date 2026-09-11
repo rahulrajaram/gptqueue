@@ -1,4 +1,5 @@
 import type { Redis } from "ioredis";
+import { resolve } from "path";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS } from "./keys.js";
 import { SessionStore } from "./session-store.js";
 import { discoveryRecord, type AgentDiscoveryRecord } from "./agent-discovery.js";
@@ -32,18 +33,55 @@ const kind = (v: unknown): AgentKind => v === "controller" || v === "worker" || 
 const safeBinding = (v: unknown) => { const p = runtimeBindingSchema.safeParse(Object.fromEntries(Object.entries(record(v)).filter(([key]) => ["client", "runtime_id", "epoch", "working_directory"].includes(key)))); return p.success ? Object.freeze({ client: p.data.client, runtime_id: p.data.runtime_id, epoch: p.data.epoch, working_directory: p.data.working_directory }) : null; };
 const now = () => new Date().toISOString();
 
+/**
+ * F8: lexical path-equivalence for working-directory comparison. A binding
+ * validated with `/workspace/./` must satisfy a `/workspace` filter (and vice
+ * versa) everywhere discovery/continuity compare directories; resolve()
+ * equivalence matches the binding validation in registered-shell/runtime.ts.
+ */
+const sameDirectory = (a: string | null, b: string): boolean =>
+  a !== null && resolve(a) === resolve(b);
+
+/**
+ * F7: run one async task per item with a small bounded worker pool instead
+ * of an unbounded Promise.all, so a large registry cannot saturate Redis or
+ * the event loop. Results keep the input order.
+ */
+const withBoundedConcurrency = async <T>(
+  items: readonly string[],
+  concurrency: number,
+  task: (item: string) => Promise<T>
+): Promise<T[]> => {
+  const results = Array.from({ length: items.length }) as T[];
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(concurrency, items.length)) },
+    async () => {
+      for (let i = next++; i < items.length; i = next++) {
+        results[i] = await task(items[i]!);
+      }
+    }
+  );
+  await Promise.all(workers);
+  return results;
+};
+
 export class AgentDiagnostics {
   private readonly sessions: SessionStore;
   constructor(private readonly redis: Redis) { this.sessions = new SessionStore(redis); }
+
+  /** One online signal, shared by details() and find()'s cheap filter path. */
+  private async isOnline(agent: string): Promise<boolean> {
+    const presence = await this.sessions.getPresence(agent);
+    return presence.online || (await this.redis.exists(SESSION_KEYS.heartbeat(agent))) === 1;
+  }
 
   async details(agent: string): Promise<DiagnosticsDetails> {
     const at = now();
     const raw = await this.redis.hget(SESSION_KEYS.registry, agent);
     const reg = record(json(raw));
     if (!raw || !Object.keys(reg).length) return Object.freeze({ name: agent, discovery: null, profile: null, capabilities: { protocol_version: null, tool_names: [], published: false }, online: false, runtime_binding: null, activation: { state: null, attempt: null }, readiness: "offline", activation_ready: false, queue: { queued: 0, claimed: 0, dead_lettered: 0 }, evidence_at: at, snapshot: "bounded_non_atomic", next_action: "unknown_agent" });
-    const presence = await this.sessions.getPresence(agent);
-    const heartbeat = await this.redis.exists(SESSION_KEYS.heartbeat(agent));
-    const online = presence.online || heartbeat === 1;
+    const online = await this.isOnline(agent);
     const discovery = discoveryRecord({ name: agent, role: typeof reg.role === "string" ? reg.role : "unknown", description: typeof reg.description === "string" ? reg.description : undefined, online, registered_at: reg.registered_at, pid: reg.pid, metadata: reg.metadata });
     const metadata = record(reg.metadata); const tools = Array.isArray(metadata.tool_names) ? metadata.tool_names.filter((x): x is string => typeof x === "string").slice(0, 100) : [];
     const binding = safeBinding(json(await this.redis.get(`gptq:runtime-binding:${agent}`)));
@@ -57,23 +95,96 @@ export class AgentDiagnostics {
   }
 
   async find(filters: Readonly<{ query?: string; client?: "codex" | "pi"; cwd?: string; working_directory?: string; kind?: AgentKind; activation_ready?: boolean; online?: boolean; limit?: number }> = {}) {
-    const names = await this.redis.hkeys(SESSION_KEYS.registry);
     const limit = Math.min(100, Math.max(1, Math.floor(filters.limit ?? 50)));
-    const all = await Promise.all(names.map(n => this.details(n)));
     const directory = filters.working_directory ?? filters.cwd;
-    const found = all.filter(d => {
-      const query = filters.query?.toLowerCase();
-      const text = [d.name, d.discovery?.label, d.profile?.label, d.profile?.purpose]
-        .filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
-      return (!query || text.includes(query)) &&
-        (filters.client === undefined || (d.runtime_binding?.client ?? d.discovery?.client) === filters.client) &&
-        (directory === undefined || (d.discovery?.working_directory ?? d.runtime_binding?.working_directory) === directory) &&
-        (filters.kind === undefined || d.profile?.kind === filters.kind) &&
-        (filters.activation_ready === undefined || d.activation_ready === filters.activation_ready) &&
-        (filters.online === undefined || d.online === filters.online);
+    const query = filters.query?.toLowerCase();
+
+    // F7: tiered evaluation. Filters run against the CHEAP data they
+    // actually need — one registry read for every name, then per-name
+    // profile/binding/presence reads only when an active filter requires
+    // them — with bounded concurrency. The expensive full diagnostics run
+    // only for the returned page, while total_matches is still computed
+    // over every name (exact-match semantics preserved).
+    const needProfile = query !== undefined || filters.kind !== undefined;
+    const needBinding =
+      filters.client !== undefined ||
+      directory !== undefined ||
+      filters.activation_ready !== undefined;
+    const needOnline =
+      filters.online !== undefined || filters.activation_ready !== undefined;
+
+    const registry = await this.redis.hgetall(SESSION_KEYS.registry);
+    const names = Object.keys(registry);
+
+    const matched = await withBoundedConcurrency(names, 8, async (name) => {
+      const reg = record(json(registry[name] ?? null));
+      const metadata = record(reg.metadata);
+      const discovery = discoveryRecord({
+        name, role: typeof reg.role === "string" ? reg.role : "unknown",
+        description: typeof reg.description === "string" ? reg.description : undefined,
+        online: false, registered_at: reg.registered_at, pid: reg.pid, metadata,
+      });
+      const profileRaw = needProfile
+        ? record(json(await this.redis.get(`gptq:agent-profile:${name}`)))
+        : {};
+      const binding = needBinding
+        ? safeBinding(json(await this.redis.get(`gptq:runtime-binding:${name}`)))
+        : null;
+      const online = needOnline ? await this.isOnline(name) : false;
+
+      // readiness mirrors details(): derived from online, binding, and
+      // published metadata (all cheap here).
+      const tools = Array.isArray(metadata.tool_names)
+        ? metadata.tool_names.filter((x): x is string => typeof x === "string")
+        : [];
+      const published =
+        (typeof metadata.protocol_version === "string" ||
+          typeof metadata.protocol_version === "number") &&
+        tools.includes("get_runtime_status") && tools.includes("bind_runtime");
+      const readiness: ActivationReadiness = !online
+        ? "offline"
+        : binding !== null
+          ? "bound_unverified"
+          : !published
+            ? "unknown_legacy"
+            : "unbound";
+      const activationReady = readiness === "bound_unverified" ? null : false;
+
+      const text = [
+        name,
+        discovery.label,
+        typeof profileRaw.label === "string" ? profileRaw.label : null,
+        typeof profileRaw.purpose === "string" ? profileRaw.purpose : null,
+      ]
+        .filter((value): value is string => value !== null)
+        .join(" ")
+        .toLowerCase();
+
+      // F9: a validated runtime binding is AUTHORITATIVE over (possibly
+      // stale) discovery metadata for client and working_directory filters,
+      // so an adopted target is discoverable through its live binding.
+      const bindingClient = binding?.client ?? discovery.client;
+      const bindingDirectory = binding?.working_directory ?? discovery.working_directory;
+
+      return (
+        (!query || text.includes(query)) &&
+        (filters.client === undefined || bindingClient === filters.client) &&
+        (directory === undefined || sameDirectory(bindingDirectory, directory)) &&
+        (filters.kind === undefined || kind(profileRaw.kind) === filters.kind) &&
+        (filters.activation_ready === undefined || activationReady === filters.activation_ready) &&
+        (filters.online === undefined || online === filters.online)
+      );
     });
-    return Object.freeze({ matches: Object.freeze(found.slice(0, limit)), total_matches: found.length,
-      truncated: found.length > limit, resolution: found.length === 1 ? "unique" : found.length > 1 ? "ambiguous" : "none" });
+
+    const matchedNames = names.filter((_, i) => matched[i] === true);
+    const total = matchedNames.length;
+    const page = await withBoundedConcurrency(
+      matchedNames.slice(0, limit),
+      8,
+      (name) => this.details(name)
+    );
+    return Object.freeze({ matches: Object.freeze(page), total_matches: total,
+      truncated: total > limit, resolution: total === 1 ? "unique" : total > 1 ? "ambiguous" : "none" });
   }
 
   async delivery(agent: string, messageId: string): Promise<DeliveryDiagnostics> {

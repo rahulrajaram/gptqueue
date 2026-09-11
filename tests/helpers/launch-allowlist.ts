@@ -1,17 +1,18 @@
 /**
- * Test helper: scaffold an operator launch-allowlist file in a temp directory
- * and point GPTQUEUE_LAUNCH_ALLOWLIST at it. Cleanup restores the env var and
- * removes the temp dir so tests never leave stale configuration behind and
- * never depend on a checked-in `.gptqueue/launch-allowlist.json`.
+ * Test helper: scaffold an operator launch-allowlist file (version 2, exact
+ * argv templates) in a temp directory and point GPTQUEUE_LAUNCH_ALLOWLIST at
+ * it. Cleanup restores the env var and removes the temp dir so tests never
+ * leave stale configuration behind and never depend on a checked-in
+ * `.gptqueue/launch-allowlist.json`.
  */
-
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
 export interface AllowlistCommandInput {
   command: string;
-  allowed_args_prefixes?: readonly (readonly string[])[];
+  /** Exact argv templates; a request must equal one fully. */
+  allowed_args?: readonly (readonly string[])[];
   comment?: string;
 }
 
@@ -31,10 +32,10 @@ export function scaffoldLaunchAllowlist(
   const dir = mkdtempSync(join(tmpdir(), "gptqueue-allowlist-"));
   const path = opts.path ?? join(dir, "launch-allowlist.json");
   const config = {
-    version: opts.version ?? 1,
+    version: opts.version ?? 2,
     commands: commands.map((c) => ({
       command: c.command,
-      allowed_args_prefixes: c.allowed_args_prefixes ?? [[]],
+      allowed_args: c.allowed_args ?? [[]],
       ...(c.comment ? { comment: c.comment } : {}),
     })),
   };

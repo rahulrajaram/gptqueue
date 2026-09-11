@@ -66,7 +66,12 @@ describe("ActorDirectory", () => {
     allowlist = scaffoldLaunchAllowlist([
       {
         command: "/usr/bin/pi",
-        allowed_args_prefixes: [[], ["--agent", "alice"]],
+        allowed_args: [
+          [],
+          ["--agent", "alice"],
+          ["--agent", "alice-2"],
+          ["--agent", "bob"],
+        ],
         comment: "test pi launcher",
       },
     ]);

@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { z } from "zod";
 import type { Redis } from "ioredis";
 import { runtimeBindingSchema, type RuntimeBinding } from "../registered-shell/runtime.js";
+
+/**
+ * F8: lexical path equivalence. Runtime bindings accept `.`/`..` aliases
+ * (registered-shell/runtime.ts); every working-directory comparison here must
+ * accept the same aliases instead of demanding byte-identical strings, or a
+ * valid binding fails continuity restore.
+ */
+const sameDirectory = (a: string, b: string): boolean => resolve(a) === resolve(b);
 
 export const runtimeMailboxKey = (binding: RuntimeBinding): string =>
   `gptq:runtime-mailbox:${createHash("sha256").update(JSON.stringify([binding.client, binding.runtime_id])).digest("hex")}`;
@@ -21,7 +30,7 @@ export const prepareContinuity = async (redis: Redis, binding: RuntimeBinding, t
   const key = runtimeMailboxKey(validated), raw = await redis.get(key);
   if (!raw && !options.allowLegacy) throw new Error("Continuity provenance missing; explicit legacy adoption required");
   const mapping = raw ? z.object({ agent: z.string().min(1), working_directory: z.string() }).strict().parse(JSON.parse(raw)) : null;
-  if (mapping && mapping.working_directory !== validated.working_directory) throw new Error("Runtime mailbox mapping does not match binding");
+  if (mapping && !sameDirectory(mapping.working_directory, validated.working_directory)) throw new Error("Runtime mailbox mapping does not match binding");
   const sourceRaw = mapping ? await redis.hget("gptq:registry", mapping.agent) : null;
   const targetRaw = await redis.hget("gptq:registry", target);
   if (!targetRaw || (mapping && !sourceRaw)) throw new Error("Continuity registry metadata unavailable");
@@ -35,12 +44,16 @@ export const applyContinuity = async (redis: Redis, plan: ContinuityPlan): Promi
   const p = continuityPlanSchema.parse(plan);
   if (p.mappingKey !== runtimeMailboxKey(p.binding) || p.namespace !== namespace(redis)) throw new Error("Continuity namespace or mapping mismatch");
   const plannedMapping = p.expectedMapping ? z.object({ agent: z.string(), working_directory: z.string() }).strict().parse(JSON.parse(p.expectedMapping)) : null;
-  if ((plannedMapping?.agent ?? null) !== p.source || (plannedMapping && plannedMapping.working_directory !== p.binding.working_directory) ||
+  if ((plannedMapping?.agent ?? null) !== p.source || (plannedMapping && !sameDirectory(plannedMapping.working_directory, p.binding.working_directory)) ||
       (!plannedMapping) !== p.legacy_adoption) throw new Error("Inconsistent continuity plan");
   const desired = JSON.stringify({ agent: p.target, working_directory: p.binding.working_directory });
   const [current, sourceRaw, targetRaw] = await Promise.all([redis.get(p.mappingKey),
     p.source ? redis.hget("gptq:registry", p.source) : Promise.resolve(null), redis.hget("gptq:registry", p.target)]);
-  if (current === desired && targetRaw) return "idempotent";
+  // F6: idempotent replay must revalidate the recorded target fingerprint,
+  // not just mapping equality — a target registry entry deleted/recreated or
+  // reclaimed between applies must not yield a false success. A changed
+  // fingerprint falls through to the mismatch throw below.
+  if (current === desired && targetRaw && fingerprint(targetRaw) === p.targetFingerprint) return "idempotent";
   if (current !== p.expectedMapping || fingerprint(sourceRaw) !== p.sourceFingerprint || !targetRaw || fingerprint(targetRaw) !== p.targetFingerprint)
     throw new Error("Continuity fingerprints or mapping changed");
   if ((!p.source) !== p.legacy_adoption) throw new Error("Invalid legacy adoption plan");

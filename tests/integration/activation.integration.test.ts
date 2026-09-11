@@ -17,6 +17,7 @@ import {
   setupIntegrationServer,
   type IntegrationServer,
 } from "../helpers/integration-server.js";
+import { WAKE_SLEEPY_SCRIPT, WAKE_EXIT_SCRIPT } from "../helpers/wake-launch.js";
 import { connectAgent, type Agent } from "../helpers/mcp-agent.js";
 import { WakeLeaseStore } from "../../src/core/wake-lease.js";
 import { reconcileWakeLease } from "../../src/mcp-server/tools/reconcile-wake-lease.js";
@@ -35,7 +36,7 @@ const uniq = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2
 /** Launch contract that spawns a real, short-lived node child (20s). */
 const sleeperLaunch = () => ({
   command: process.execPath,
-  args: ["-e", "setTimeout(()=>process.exit(0), 20000)"],
+  args: [WAKE_SLEEPY_SCRIPT],
 });
 
 /** Launch contract pointing at a binary that cannot exist (launch fails). */
@@ -736,7 +737,7 @@ describe("launch allowlist & identity policy (wire)", () => {
       activation_policy_mode: "wake_if_offline",
       max_concurrency: 1,
       launch_command: process.execPath,
-      launch_args: ["-e", "process.exit(0)"],
+      launch_args: [WAKE_EXIT_SCRIPT],
       launch_cwd: join(tmpdir(), "gptqueue-outside-ws"),
     });
     expect(outsideRes.isError).toBe(true);
@@ -750,7 +751,7 @@ describe("launch allowlist & identity policy (wire)", () => {
       activation_policy_mode: "wake_if_offline",
       max_concurrency: 1,
       launch_command: process.execPath,
-      launch_args: ["-e", "process.exit(0)"],
+      launch_args: [WAKE_EXIT_SCRIPT],
       launch_cwd: process.cwd(),
     });
     expect(insideRes.data.status).toBe("ok");
@@ -788,7 +789,7 @@ function actorDirRecord(actorId: string, registeredBy: string) {
       activation_policy: { mode: "wake_if_offline" },
       max_concurrency: 1,
     },
-    launch: { command: process.execPath, args: ["-e", "setTimeout(()=>process.exit(0), 20000)"] },
+    launch: { command: process.execPath, args: [WAKE_SLEEPY_SCRIPT] },
     registered_by: registeredBy,
     registered_at: T0,
   };

@@ -26,6 +26,53 @@ describe("AgentDiagnostics", () => {
   it("reports DLQ entries", async () => { await redis.hset(SESSION_KEYS.registry, "worker", registry("worker")); await redis.rpush(DLQ_KEYS.list("worker"), task("m3")); const d = await diagnostics.details("worker"); expect(d.queue.dead_lettered).toBe(1); expect((await diagnostics.delivery("worker", "m3")).status).toBe("dead_lettered"); });
   it("preserves current queued location over historical acknowledgement", async () => { await redis.hset(SESSION_KEYS.registry, "worker", registry("worker")); await redis.rpush(SESSION_KEYS.queue("worker"), task("m4")); await redis.xadd("gptq:inbox-trace:worker", "*", "stage", "task_acknowledged", "timestamp", new Date().toISOString(), "message_id", "m4", "claim_id", "old"); expect((await diagnostics.delivery("worker", "m4")).status).toBe("queued"); });
   it("returns unknown_history after bounded history has no message", async () => { await redis.hset(SESSION_KEYS.registry, "worker", registry("worker")); const d = await diagnostics.delivery("worker", "never"); expect(d.status).toBe("unknown_history"); expect(d.snapshot).toBe("bounded_non_atomic"); });
+
+  // F7: the expensive per-agent diagnostics run only for the returned page
+  // while total_matches still counts every registry name, so a large
+  // registry cannot trigger an unbounded full-diagnostics fan-out.
+  it("find computes total_matches over every name but runs details() only for the page", async () => {
+    const names = Array.from({ length: 60 }, (_, i) => `scale-${i}`);
+    await redis.hset(SESSION_KEYS.registry, ...names.flatMap((n) => [n, registry(n)]));
+    let detailsCalls = 0;
+    const original = diagnostics.details.bind(diagnostics);
+    (diagnostics as unknown as { details: typeof original }).details = async (agent: string) => {
+      detailsCalls += 1;
+      return original(agent);
+    };
+    const result = await diagnostics.find({ limit: 5 });
+    expect(detailsCalls).toBe(5);
+    expect(result.matches).toHaveLength(5);
+    expect(result.matches.every((m) => /^scale-\d+$/.test(m.name))).toBe(true);
+    expect(result.total_matches).toBe(60);
+    expect(result.truncated).toBe(true);
+    expect(result.resolution).toBe("ambiguous");
+  });
+
+  // F8: working-directory comparison is lexical path equivalence, not exact
+  // string equality, so `.`/`..` aliases of a validated directory match.
+  it("matches working_directory filters through . and .. aliases (F8)", async () => {
+    await redis.hset(SESSION_KEYS.registry,
+      "bound", registry("bound"),
+      "discovered", registry("discovered", { working_directory: "/tmp/dir-b/./" }));
+    await redis.set("gptq:runtime-binding:bound", JSON.stringify({ client: "codex", runtime_id: "r1", epoch: "e1", working_directory: "/tmp/dir-a" }));
+    const viaBinding = await diagnostics.find({ working_directory: "/tmp/dir-a/../dir-a" });
+    expect(viaBinding.matches.map((m) => m.name)).toEqual(["bound"]);
+    const viaDiscovery = await diagnostics.find({ cwd: "/tmp/dir-b/../dir-b" });
+    expect(viaDiscovery.matches.map((m) => m.name)).toEqual(["discovered"]);
+  });
+
+  // F9: a validated runtime binding is authoritative over stale discovery
+  // metadata for client and working_directory filters.
+  it("prefers the runtime binding over discovery metadata for client and working_directory (F9)", async () => {
+    await redis.hset(SESSION_KEYS.registry, "adopted", registry("adopted", { client: "pi", working_directory: "/stale-dir" }));
+    await redis.set("gptq:runtime-binding:adopted", JSON.stringify({ client: "codex", runtime_id: "r2", epoch: "e1", working_directory: "/live-dir" }));
+    const byLive = await diagnostics.find({ client: "codex", working_directory: "/live-dir" });
+    expect(byLive.matches.map((m) => m.name)).toEqual(["adopted"]);
+    const byStaleClient = await diagnostics.find({ client: "pi" });
+    expect(byStaleClient.total_matches).toBe(0);
+    const byStaleDir = await diagnostics.find({ working_directory: "/stale-dir" });
+    expect(byStaleDir.total_matches).toBe(0);
+  });
 });
 
 describe("delivery evidence correlation", () => {

@@ -167,15 +167,15 @@ allowlist**.
 
 The allowlist is an operator-authored file at `./.gptqueue/launch-allowlist.json`
 relative to the server's working directory (override the path with the
-`GPTQUEUE_LAUNCH_ALLOWLIST` env var). Format:
+`GPTQUEUE_LAUNCH_ALLOWLIST` env var). Format (version 2):
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "commands": [
     {
       "command": "/absolute/path/or/name",
-      "allowed_args_prefixes": [["--agent", "alice"], []],
+      "allowed_args": [["--agent", "alice"], []],
       "comment": "optional human note"
     }
   ]
@@ -184,12 +184,14 @@ relative to the server's working directory (override the path with the
 
 Matching rules (identical at admission and at dispatch):
 
-- A requested `launch_command` must **exactly match** an allowlisted command
-  string after normalization to its basename (so `node` and `/usr/bin/node`
-  alias).
-- A requested arg vector must be **prefix-compatible** with at least one
-  `allowed_args_prefixes` entry: `requested[i]` must equal `allowed[i]` for the
-  prefix length; args beyond the prefix are free. `[]` accepts any args.
+- A requested `launch_command` must satisfy an allowlisted entry's identity
+  **exactly** — never by basename aliasing. A bare-name entry matches only the
+  byte-identical bare name; an absolute-path entry matches only an absolute
+  request that `path.resolve`s to the same path. `/attacker/work/node` does
+  NOT match an allowlisted `node`.
+- A requested arg vector must **equal one `allowed_args` template exactly**:
+  same length, every element identical. There is no suffix freedom, and `[]`
+  accepts only a request with no args.
 - `launch_cwd`, when provided, must be an existing directory **within the
   server workspace root** (`path.resolve` + prefix check; realpath-based
   symlink-escape handling is intentionally out of scope).
@@ -204,6 +206,15 @@ Fail-closed semantics:
   `zsh`, `dash`, `fish`, `ksh`, `cmd`, `powershell`, `pwsh`) or a shell
   carrying `-c`/`-lc`/`-Command` — are rejected **regardless of the
   allowlist** (`launch_command_rejected`).
+- Interpreter inline-code flags are rejected **regardless of the allowlist**
+  (`launch_command_rejected`): a command whose basename is an interpreter
+  (`node`, `deno`, `bun`, `tsx`, `ts-node`, `python`, `python2`, `python3`,
+  `ruby`, `perl`, `php`, `awk`) carrying `-e`/`--eval`/`-c`/`--command` is an
+  arbitrary-code channel even under an exact-template grant. Point the
+  interpreter at a fixed script file instead (`node /path/to/runtime.mjs`).
+- Version-1 documents (basename matching + unbounded `allowed_args_prefixes`
+  suffixes) are **rejected at parse time** with a migration message; they
+  cannot be soundly auto-converted to exact templates.
 - Rejections apply again at **dispatch** (`dispatchLaunch` re-reads the
   allowlist), so a stale actor-directory entry cannot spawn a command the
   operator has since disallowed. A refused dispatch surfaces as

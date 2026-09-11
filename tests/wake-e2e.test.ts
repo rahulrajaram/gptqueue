@@ -26,22 +26,24 @@ import {
   actorStatusSchema,
 } from "../src/mcp-server/tools/actor-status.js";
 import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
+import { WAKE_SLEEPY_SCRIPT, WAKE_EXIT_SCRIPT } from "./helpers/wake-launch.js";
 
 // wake_if_offline admission + dispatch now require an operator launch
-// allowlist. Scaffold one (temp dir + GPTQUEUE_LAUNCH_ALLOWLIST) permitting
-// process.execPath (empty prefix AND the "-e <script>" arg pattern) and the
-// test dead-binary basename used to exercise launch failure, so the existing
-// suites pass the new policy gate. Top-level hook keeps it scoped to this
-// file's worker.
+// allowlist with EXACT argv templates (v2). Scaffold one (temp dir +
+// GPTQUEUE_LAUNCH_ALLOWLIST) permitting process.execPath pointed at the
+// fixed wake fixtures (interpreter inline-code flags like `node -e` are
+// rejected unconditionally under the hardened policy) and the test
+// dead-binary used to exercise launch failure. Top-level hook keeps it
+// scoped to this file's worker.
 const allowlist = scaffoldLaunchAllowlist([
   {
     command: process.execPath,
-    allowed_args_prefixes: [[], ["-e"]],
-    comment: "test process.execPath launcher",
+    allowed_args: [[WAKE_SLEEPY_SCRIPT], [WAKE_EXIT_SCRIPT]],
+    comment: "test process.execPath launcher (fixed fixture scripts)",
   },
   {
     command: "/nonexistent/definitely-not-a-binary-12345",
-    allowed_args_prefixes: [[]],
+    allowed_args: [[]],
     comment: "test dead binary (admission passes, dispatch ENOENT)",
   },
 ]);
@@ -57,7 +59,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Harmless, short-lived spawned child (sleeps then exits). */
 const sleepyLaunch = (): RuntimeLaunchContract => ({
   command: process.execPath,
-  args: ["-e", "setTimeout(() => process.exit(0), 15000)"],
+  args: [WAKE_SLEEPY_SCRIPT],
 });
 
 /** A launch contract pointing at a binary that cannot exist. */
@@ -519,12 +521,12 @@ describe("pid-liveness reconciliation", () => {
 
   const immediateExitLaunch = (): RuntimeLaunchContract => ({
     command: process.execPath,
-    args: ["-e", "process.exit(0)"],
+    args: [WAKE_EXIT_SCRIPT],
   });
 
   const liveSleeperLaunch = (): RuntimeLaunchContract => ({
     command: process.execPath,
-    args: ["-e", "setTimeout(() => {}, 15000)"],
+    args: [WAKE_SLEEPY_SCRIPT],
   });
 
   beforeEach(async () => {

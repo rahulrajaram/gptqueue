@@ -53,6 +53,7 @@ export class MailboxStore {
   private readonly subscriber: Redis;
   private readonly boundedPushScript: string;
   private readonly boundedPushIdempotentScript: string;
+  private readonly migrateMessagesScript: string;
   readonly queueBound: number;
 
   constructor(redis: Redis, subscriber: Redis, queueBound?: number) {
@@ -72,6 +73,10 @@ export class MailboxStore {
     );
     this.boundedPushIdempotentScript = readFileSync(
       join(LUA_DIR, "bounded-push-idempotent.lua"),
+      "utf-8"
+    );
+    this.migrateMessagesScript = readFileSync(
+      join(LUA_DIR, "migrate-messages.lua"),
       "utf-8"
     );
   }
@@ -223,19 +228,24 @@ export class MailboxStore {
     );
   }
 
-  /** Migrate messages from one mailbox to another. */
+  /**
+   * Migrate every message from one mailbox to another, atomically and in
+   * order (review finding F2). A single Lua script moves the whole source
+   * list to the destination tail: either every message has moved or none
+   * has, so a failure or crash mid-migration can never strand or lose a
+   * message the way the legacy per-message LPOP/RPUSH loop could. Returns
+   * the number of messages transferred.
+   */
   async migrateMessages(
     fromAgent: string,
     toAgent: string
   ): Promise<number> {
-    let count = 0;
-    let msg: string | null;
-    while (
-      (msg = await this.redis.lpop(SESSION_KEYS.queue(fromAgent))) !== null
-    ) {
-      await this.redis.rpush(SESSION_KEYS.queue(toAgent), msg);
-      count++;
-    }
-    return count;
+    const count = await this.redis.eval(
+      this.migrateMessagesScript,
+      2,
+      SESSION_KEYS.queue(fromAgent),
+      SESSION_KEYS.queue(toAgent)
+    );
+    return typeof count === "number" ? count : parseInt(String(count), 10);
   }
 }

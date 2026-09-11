@@ -22,12 +22,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./redis-test-utils.js";
+import { WAKE_SLEEPY_SCRIPT, WAKE_EXIT_SCRIPT } from "./wake-launch.js";
 
 // ---- Launch-allowlist scaffold for the spawned server --------------------
 // The server child enforces the operator launch allowlist fail-closed at
-// admission + dispatch. Scaffold a temp allowlist permitting the commands the
-// wire suites register (process.execPath and the test dead binary) and pass
-// GPTQUEUE_LAUNCH_ALLOWLIST so the server resolves it regardless of cwd.
+// admission + dispatch (v2: EXACT argv templates). Scaffold a temp allowlist
+// permitting process.execPath pointed at the fixed wake fixtures (interpreter
+// inline-code flags like `node -e` are rejected unconditionally) and the test
+// dead binary, and pass GPTQUEUE_LAUNCH_ALLOWLIST so the server resolves it
+// regardless of cwd.
 const allowlistPath = join(
   mkdtempSync(join(tmpdir(), "gptqueue-integration-allowlist-")),
   "launch-allowlist.json"
@@ -36,16 +39,16 @@ writeFileSync(
   allowlistPath,
   JSON.stringify(
     {
-      version: 1,
+      version: 2,
       commands: [
         {
           command: process.execPath,
-          allowed_args_prefixes: [[], ["-e"]],
-          comment: "integration test node launcher",
+          allowed_args: [[WAKE_SLEEPY_SCRIPT], [WAKE_EXIT_SCRIPT]],
+          comment: "integration test node launcher (fixed fixture scripts)",
         },
         {
           command: "/nonexistent/definitely-not-a-binary-987654",
-          allowed_args_prefixes: [[]],
+          allowed_args: [[]],
           comment: "integration test dead binary (launch failure path)",
         },
       ],
