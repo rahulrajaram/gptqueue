@@ -4,20 +4,70 @@ import { bindCodexHook } from "../src/registered-shell/codex-hook.js";
 
 const session = "123e4567-e89b-12d3-a456-426614174000";
 const event = (overrides: Record<string, unknown> = {}) => ({ session_id: session, cwd: "/workspace/project", hook_event_name: "SessionStart", ...overrides });
-const call = (responses: unknown[]) => ({ calls: [] as unknown[], request: async (_method: string, params: unknown, _signal: AbortSignal) => { const result = responses.length > 1 ? responses.shift() : responses[0]; (call as any).last = params; if (result instanceof Error) throw result; return result; } });
+
+/**
+ * F10: STRICT RPC mock — records every request and asserts the exact method,
+ * thread, server, tool, and bind_runtime argument set (client, runtime_id,
+ * epoch, working_directory). The previous loose mock ignored the method and
+ * most params, so a wrong method, server, or bad client/epoch would pass.
+ */
+interface RecordedCall {
+  method: string;
+  params: Record<string, unknown>;
+  signal: AbortSignal;
+}
+const call = (responses: unknown[]) => {
+  const calls: RecordedCall[] = [];
+  return {
+    calls,
+    request: async (method: string, params: unknown, signal: AbortSignal) => {
+      calls.push({ method, params: params as Record<string, unknown>, signal });
+      const result = responses.length > 1 ? responses.shift() : responses[0];
+      if (result instanceof Error) throw result;
+      return result;
+    },
+  };
+};
+
+const expectedBindParams = {
+  threadId: session,
+  server: "gptqueue-shared",
+  tool: "bind_runtime",
+  arguments: {
+    client: "codex",
+    runtime_id: session,
+    epoch: session,
+    working_directory: "/workspace/project",
+  },
+};
 
 describe("Codex runtime hook", () => {
-  it("binds through the MCP call after transient failures", async () => {
+  it("binds through the MCP call after transient failures, with the exact RPC contract", async () => {
     const rpc = call([new Error("not ready"), { isError: false, structuredContent: { activation_ready: true } }]);
     await expect(bindCodexHook(event(), rpc as never, { retryMs: 1, timeoutMs: 100 })).resolves.toBe(true);
-    expect((call as any).last).toMatchObject({ threadId: session, tool: "bind_runtime", arguments: { runtime_id: session, working_directory: "/workspace/project" } });
+    expect(rpc.calls).toHaveLength(2);
+    expect(rpc.calls[0]).toEqual({ method: "mcpServer/tool/call", params: expectedBindParams, signal: expect.any(AbortSignal) });
+    expect(rpc.calls[1]).toEqual({ method: "mcpServer/tool/call", params: expectedBindParams, signal: expect.any(AbortSignal) });
   });
 
-  it("returns false for errors, wrong structured readiness, and invalid identity", async () => {
-    await expect(bindCodexHook(event(), call([new Error("down")]) as never, { retryMs: 1, timeoutMs: 10 })).resolves.toBe(false);
-    await expect(bindCodexHook(event(), call([{ isError: false, structuredContent: { activation_ready: false } }]) as never, { retryMs: 1, timeoutMs: 10 })).resolves.toBe(false);
-    await expect(bindCodexHook(event({ session_id: "not-a-uuid" }), call([]) as never)).rejects.toThrow();
-    await expect(bindCodexHook(event({ cwd: "relative" }), call([]) as never)).rejects.toThrow();
+  it("returns false for errors and wrong structured readiness, still with the exact RPC contract", async () => {
+    const failing = call([new Error("down")]);
+    await expect(bindCodexHook(event(), failing as never, { retryMs: 1, timeoutMs: 10 })).resolves.toBe(false);
+    expect(failing.calls[0]?.method).toBe("mcpServer/tool/call");
+    expect(failing.calls[0]?.params).toEqual(expectedBindParams);
+
+    const notReady = call([{ isError: false, structuredContent: { activation_ready: false } }]);
+    await expect(bindCodexHook(event(), notReady as never, { retryMs: 1, timeoutMs: 10 })).resolves.toBe(false);
+    expect(notReady.calls[0]?.params).toEqual(expectedBindParams);
+  });
+
+  it("rejects invalid identity events before any RPC", async () => {
+    const badSession = call([]);
+    await expect(bindCodexHook(event({ session_id: "not-a-uuid" }), badSession as never)).rejects.toThrow();
+    expect(badSession.calls).toHaveLength(0);
+    const badCwd = call([]);
+    await expect(bindCodexHook(event({ cwd: "relative" }), badCwd as never)).rejects.toThrow();
+    expect(badCwd.calls).toHaveLength(0);
   });
 
   it("fails closed for malformed or oversized child input without echoing secrets", async () => {
@@ -34,13 +84,18 @@ describe("Codex runtime hook", () => {
     const oversized = await run("x".repeat(70_000));
     expect(oversized.code).not.toBe(0); expect(oversized.stderr).not.toContain("x".repeat(100));
   });
-});
 
-it("reports a legacy loaded connection without retrying or echoing payloads", async () => {
-  const request = vi.fn(async () => ({ isError: true, content: [{ type: "text", text: "Tool bind_runtime not found" }] }));
-  const unavailable = vi.fn();
-  expect(await bindCodexHook({ session_id: session, cwd: "/tmp", hook_event_name: "UserPromptSubmit" },
-    { request, close: async () => {} }, { onUnavailable: unavailable })).toBe(false);
-  expect(request).toHaveBeenCalledTimes(1);
-  expect(unavailable).toHaveBeenCalledWith("legacy_connection_requires_reconnect");
+  it("reports a legacy loaded connection without retrying or echoing payloads, with the exact RPC contract", async () => {
+    const request = vi.fn(async () => ({ isError: true, content: [{ type: "text", text: "Tool bind_runtime not found" }] }));
+    const unavailable = vi.fn();
+    expect(await bindCodexHook({ session_id: session, cwd: "/tmp", hook_event_name: "UserPromptSubmit" },
+      { request, close: async () => {} }, { onUnavailable: unavailable })).toBe(false);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]?.[0]).toBe("mcpServer/tool/call");
+    expect(request.mock.calls[0]?.[1]).toEqual({
+      threadId: session, server: "gptqueue-shared", tool: "bind_runtime",
+      arguments: { client: "codex", runtime_id: session, epoch: session, working_directory: "/tmp" },
+    });
+    expect(unavailable).toHaveBeenCalledWith("legacy_connection_requires_reconnect");
+  });
 });

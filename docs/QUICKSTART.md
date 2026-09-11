@@ -74,14 +74,15 @@ the tasks return to the inbox — process tasks idempotently (see
 Agents that are not running can be launched when work arrives:
 
 1. The **operator** allowlists launchable commands in
-   `.gptqueue/launch-allowlist.json` (fail-closed; shells are always
-   rejected):
+   `.gptqueue/launch-allowlist.json` (fail-closed; exact argv templates only;
+   shells and interpreter inline-code flags like `node -e` are always
+   rejected — point interpreters at a fixed script file instead):
 
    ```json
-   { "version": 1,
+   { "version": 2,
      "commands": [
        { "command": "/usr/bin/node",
-         "allowed_args_prefixes": [[ "-e" ]],
+         "allowed_args": [[ "/srv/runtimes/bob.mjs" ]],
          "comment": "test runtimes" } ] }
    ```
 
@@ -91,7 +92,7 @@ Agents that are not running can be launched when work arrives:
    actor_register { "activation_policy_mode": "wake_if_offline",
                     "max_concurrency": 2,
                     "launch_command": "/usr/bin/node",
-                    "launch_args": ["-e", "..."], "launch_cwd": "/path/inside/workspace" }
+                    "launch_args": ["/srv/runtimes/bob.mjs"], "launch_cwd": "/path/inside/workspace" }
    ```
 
    The actor identity is derived from the registering session's name —

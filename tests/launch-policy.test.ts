@@ -1,45 +1,85 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
-import { writeFileSync, rmSync } from "fs";
+import { writeFileSync, rmSync, mkdtempSync, symlinkSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
 import { ActorDirectory } from "../src/core/actor-directory.js";
 import {
   commandMatches,
-  argsPrefixCompatible,
+  argsMatchTemplate,
   parseLaunchAllowlist,
   launchMatchesConfig,
   evaluateLaunchPolicy,
+  launchCwdIsConfined,
 } from "../src/core/launch-policy.js";
 import { dispatchLaunch } from "../src/mcp-server/launcher.js";
 import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
+import { WAKE_SLEEPY_SCRIPT } from "./helpers/wake-launch.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 const T0 = "2030-01-01T00:00:00.000Z";
 
 // ---------------------------------------------------------------------------
-// Pure matching helpers
+// Pure matching helpers (exact identity — F1)
 // ---------------------------------------------------------------------------
 describe("launch allowlist matching (pure)", () => {
-  it("commandMatches resolves a PATH-style name and an absolute path to the same basename", () => {
+  it("commandMatches: bare names match only identically; absolute paths match only resolve-equal absolutes", () => {
+    // Bare name: byte-identical only.
     expect(commandMatches("node", "node")).toBe(true);
-    expect(commandMatches("/usr/bin/node", "node")).toBe(true);
-    expect(commandMatches("node", "/usr/local/bin/node")).toBe(true);
     expect(commandMatches("node", "python")).toBe(false);
+    // Absolute entry: absolute request that resolves to the same path.
+    expect(commandMatches("/usr/bin/node", "/usr/bin/node")).toBe(true);
+    expect(commandMatches("/usr/./bin/node", "/usr/bin/node")).toBe(true);
+    // F1 basename-colliding absolute path does NOT alias a bare allowlist name.
+    expect(commandMatches("/attacker/work/node", "node")).toBe(false);
+    // A bare request does NOT match an absolute entry, and vice versa.
+    expect(commandMatches("node", "/usr/bin/node")).toBe(false);
+    expect(commandMatches("/usr/bin/node", "node")).toBe(false);
+    // Different absolute paths sharing a basename do not alias.
+    expect(commandMatches("/opt/node/bin/node", "/usr/bin/node")).toBe(false);
   });
 
-  it("argsPrefixCompatible: exact prefix matches, prefix shorter than request is ok, first mismatch rejects", () => {
-    expect(argsPrefixCompatible([], [])).toBe(true);
-    expect(argsPrefixCompatible(["a"], [])).toBe(true);
-    expect(argsPrefixCompatible(["a", "b"], ["a"])).toBe(true);
-    expect(argsPrefixCompatible(["a", "b", "c"], ["a", "b"])).toBe(true);
-    expect(argsPrefixCompatible(["a", "b"], ["a", "b"])).toBe(true);
-    expect(argsPrefixCompatible(["a", "b", "c"], ["a", "b", "c"])).toBe(true);
-    // Mismatch at index 1.
-    expect(argsPrefixCompatible(["a", "z"], ["a", "b"])).toBe(false);
-    // Request shorter than the prefix.
-    expect(argsPrefixCompatible(["a"], ["a", "b"])).toBe(false);
+  it("argsMatchTemplate: full equality only — no suffix freedom, no empty-prefix catch-all", () => {
+    expect(argsMatchTemplate([], [])).toBe(true);
+    expect(argsMatchTemplate(["a", "b"], ["a", "b"])).toBe(true);
+    // Extra trailing args are rejected (v1 allowed them freely).
+    expect(argsMatchTemplate(["a", "b", "-e", "x"], ["a", "b"])).toBe(false);
+    // Fewer args are rejected.
+    expect(argsMatchTemplate(["a"], ["a", "b"])).toBe(false);
+    // Order matters.
+    expect(argsMatchTemplate(["b", "a"], ["a", "b"])).toBe(false);
+    // An empty template accepts ONLY a no-args request.
+    expect(argsMatchTemplate(["anything"], [])).toBe(false);
+    // Leading-dash args are ordinary template elements: they match only when
+    // the operator wrote them explicitly.
+    expect(argsMatchTemplate(["--port", "1234"], ["--port", "1234"])).toBe(true);
+    expect(argsMatchTemplate(["--port", "9999"], ["--port", "1234"])).toBe(false);
+  });
+
+  it("launchMatchesConfig consults every entry", () => {
+    const loaded = parseLaunchAllowlist(
+      JSON.stringify({
+        version: 2,
+        commands: [
+          { command: "node", allowed_args: [["--port", "1234"]] },
+          { command: "git", allowed_args: [[]] },
+        ],
+      }),
+      "test"
+    );
+    expect(loaded.kind).toBe("loaded");
+    if (loaded.kind !== "loaded") throw new Error("expected loaded");
+    const config = loaded.config;
+    expect(launchMatchesConfig("node", ["--port", "1234"], config)).toBe(true);
+    // Absolute path no longer aliases the bare allowlisted name (F1).
+    expect(launchMatchesConfig("/usr/bin/node", ["--port", "1234"], config)).toBe(false);
+    // Suffix freedom is gone.
+    expect(launchMatchesConfig("node", ["--port", "1234", "extra"], config)).toBe(false);
+    expect(launchMatchesConfig("node", ["--foo"], config)).toBe(false);
+    expect(launchMatchesConfig("git", [], config)).toBe(true);
+    expect(launchMatchesConfig("git", ["status"], config)).toBe(false);
+    expect(launchMatchesConfig("python", [], config)).toBe(false);
   });
 });
 
@@ -47,11 +87,11 @@ describe("launch allowlist matching (pure)", () => {
 // Allowlist parsing / rejection of malformed documents
 // ---------------------------------------------------------------------------
 describe("parseLaunchAllowlist", () => {
-  it("loads a valid v1 document", () => {
+  it("loads a valid v2 document", () => {
     const res = parseLaunchAllowlist(
       JSON.stringify({
-        version: 1,
-        commands: [{ command: "node", allowed_args_prefixes: [["--port", "1234"], []] }],
+        version: 2,
+        commands: [{ command: "node", allowed_args: [["--port", "1234"], []] }],
       }),
       "test"
     );
@@ -60,38 +100,34 @@ describe("parseLaunchAllowlist", () => {
     expect(res.config.commands[0]?.command).toBe("node");
   });
 
+  it("hard-rejects version-1 documents with a migration message", () => {
+    const res = parseLaunchAllowlist(
+      JSON.stringify({
+        version: 1,
+        commands: [{ command: "node", allowed_args_prefixes: [["-e"]] }],
+      }),
+      "test"
+    );
+    expect(res.kind).toBe("unparseable");
+    if (res.kind !== "unparseable") throw new Error("expected unparseable");
+    expect(res.reason).toContain("version-1");
+    expect(res.reason).toContain("allowed_args");
+  });
+
   it("rejects malformed JSON / wrong version / bad shape as unparseable", () => {
     expect(parseLaunchAllowlist("not json", "x").kind).toBe("unparseable");
     expect(parseLaunchAllowlist("[]", "x").kind).toBe("unparseable");
-    expect(parseLaunchAllowlist(JSON.stringify({ version: 2, commands: [] }), "x").kind).toBe("unparseable");
-    expect(parseLaunchAllowlist(JSON.stringify({ version: 1 }), "x").kind).toBe("unparseable");
+    expect(parseLaunchAllowlist(JSON.stringify({ version: 3, commands: [] }), "x").kind).toBe("unparseable");
+    expect(parseLaunchAllowlist(JSON.stringify({ version: 2 }), "x").kind).toBe("unparseable");
     expect(
-      parseLaunchAllowlist(JSON.stringify({ version: 1, commands: [{ command: "" }] }), "x").kind
+      parseLaunchAllowlist(JSON.stringify({ version: 2, commands: [{ command: "" }] }), "x").kind
     ).toBe("unparseable");
     expect(
-      parseLaunchAllowlist(JSON.stringify({ version: 1, commands: [{ command: "x", allowed_args_prefixes: "nope" }] }), "x").kind
+      parseLaunchAllowlist(JSON.stringify({ version: 2, commands: [{ command: "x", allowed_args: "nope" }] }), "x").kind
     ).toBe("unparseable");
-  });
-
-  it("launchMatchesConfig consults every entry", () => {
-    const loaded = parseLaunchAllowlist(
-      JSON.stringify({
-        version: 1,
-        commands: [
-          { command: "node", allowed_args_prefixes: [["--port", "1234"]] },
-          { command: "git", allowed_args_prefixes: [[]] },
-        ],
-      }),
-      "x"
-    );
-    expect(loaded.kind).toBe("loaded");
-    if (loaded.kind !== "loaded") throw new Error("expected loaded");
-    const config = loaded.config;
-    expect(launchMatchesConfig("node", ["--port", "1234"], config)).toBe(true);
-    expect(launchMatchesConfig("/usr/bin/node", ["--port", "1234"], config)).toBe(true);
-    expect(launchMatchesConfig("node", ["--foo"], config)).toBe(false); // prefix mismatch
-    expect(launchMatchesConfig("git", [], config)).toBe(true);
-    expect(launchMatchesConfig("python", [], config)).toBe(false);
+    expect(
+      parseLaunchAllowlist(JSON.stringify({ version: 2, commands: [{ command: "x", allowed_args: [["ok"], 5] }] }), "x").kind
+    ).toBe("unparseable");
   });
 });
 
@@ -99,17 +135,24 @@ describe("parseLaunchAllowlist", () => {
 // evaluateLaunchPolicy (filesystem + env, no Redis, no spawn)
 // ---------------------------------------------------------------------------
 describe("evaluateLaunchPolicy", () => {
-  it("approves an allowlisted command/args and rejects a non-allowlisted one", async () => {
+  it("approves an exact allowlisted command/args and rejects any deviation", async () => {
     const s = scaffoldLaunchAllowlist([
-      { command: "node", allowed_args_prefixes: [["--port", "1234"]] },
+      { command: "node", allowed_args: [["--port", "1234"]] },
     ]);
     s.set();
     try {
       const ok = await evaluateLaunchPolicy({
         command: "node",
-        args: ["--port", "1234", "extra"],
+        args: ["--port", "1234"],
       });
       expect(ok).toEqual({ ok: true });
+
+      // Extra args beyond the template are no longer accepted (F1).
+      const extra = await evaluateLaunchPolicy({
+        command: "node",
+        args: ["--port", "1234", "extra.js"],
+      });
+      expect(extra).toMatchObject({ ok: false, error: { code: "launch_not_allowlisted" } });
 
       const rejected = await evaluateLaunchPolicy({
         command: "python",
@@ -123,12 +166,79 @@ describe("evaluateLaunchPolicy", () => {
 
   it("rejects a shell delegator even when it is allowlisted", async () => {
     const s = scaffoldLaunchAllowlist([
-      { command: "/bin/sh", allowed_args_prefixes: [[]] },
+      { command: "/bin/sh", allowed_args: [[]] },
     ]);
     s.set();
     try {
       const res = await evaluateLaunchPolicy({ command: "/bin/sh", args: ["-c", "echo x"] });
       expect(res).toMatchObject({ ok: false, error: { code: "launch_command_rejected" } });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  it("rejects interpreter inline-code flags even when exactly allowlisted (F1)", async () => {
+    const s = scaffoldLaunchAllowlist([
+      {
+        command: "node",
+        allowed_args: [["-e", "process.exit(0)"], ["server.js"]],
+      },
+      { command: "python3", allowed_args: [["-c", "print(1)"], []] },
+    ]);
+    s.set();
+    try {
+      const nodeEval = await evaluateLaunchPolicy({
+        command: "node",
+        args: ["-e", "process.exit(0)"],
+      });
+      expect(nodeEval).toMatchObject({ ok: false, error: { code: "launch_command_rejected" } });
+      if (!nodeEval.ok) expect(nodeEval.error.message).toMatch(/inline-code/);
+
+      const pythonC = await evaluateLaunchPolicy({
+        command: "python3",
+        args: ["-c", "print(1)"],
+      });
+      expect(pythonC).toMatchObject({ ok: false, error: { code: "launch_command_rejected" } });
+
+      // Non-inline interpreter invocations still pass policy (template match).
+      const okScript = await evaluateLaunchPolicy({
+        command: "node",
+        args: ["server.js"],
+      });
+      expect(okScript).toEqual({ ok: true });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  it("rejects basename-colliding absolute paths against bare and absolute entries (F1)", async () => {
+    const s = scaffoldLaunchAllowlist([
+      { command: "node", allowed_args: [[]] },
+      { command: "/usr/bin/node", allowed_args: [["server.js"]] },
+    ]);
+    s.set();
+    try {
+      // Allowlisted bare name; attacker-controlled absolute path sharing the
+      // basename must NOT be admitted.
+      const collision = await evaluateLaunchPolicy({
+        command: "/attacker/work/node",
+        args: [],
+      });
+      expect(collision).toMatchObject({ ok: false, error: { code: "launch_not_allowlisted" } });
+
+      // Absolute entry does not admit a bare-name request either.
+      const bare = await evaluateLaunchPolicy({
+        command: "node",
+        args: ["server.js"],
+      });
+      expect(bare).toMatchObject({ ok: false, error: { code: "launch_not_allowlisted" } });
+
+      // The exact absolute request is admitted.
+      const exact = await evaluateLaunchPolicy({
+        command: "/usr/bin/node",
+        args: ["server.js"],
+      });
+      expect(exact).toEqual({ ok: true });
     } finally {
       s.cleanup();
     }
@@ -145,13 +255,21 @@ describe("evaluateLaunchPolicy", () => {
     }
   });
 
-  it("fail-closes when the allowlist file is unparseable", async () => {
+  it("fail-closes when the allowlist file is unparseable (including a v1 document)", async () => {
     const s = scaffoldLaunchAllowlist([{ command: "node" }]);
     s.set();
     try {
       writeFileSync(s.path, "{ not json");
       const res = await evaluateLaunchPolicy({ command: "node", args: [] });
       expect(res).toMatchObject({ ok: false, error: { code: "launch_not_allowlisted" } });
+
+      writeFileSync(
+        s.path,
+        JSON.stringify({ version: 1, commands: [{ command: "node", allowed_args_prefixes: [[]] }] })
+      );
+      const v1 = await evaluateLaunchPolicy({ command: "node", args: [] });
+      expect(v1).toMatchObject({ ok: false, error: { code: "launch_not_allowlisted" } });
+      if (!v1.ok) expect(v1.error.message).toMatch(/version-1/);
     } finally {
       s.cleanup();
     }
@@ -215,11 +333,13 @@ describe("ActorDirectory admission policy enforcement", () => {
       registered_at: T0,
     });
 
-  it("admits an allowlisted wake_if_offline launch", async () => {
-    const s = scaffoldLaunchAllowlist([{ command: "node" }]);
+  it("admits an exactly-allowlisted wake_if_offline launch", async () => {
+    const s = scaffoldLaunchAllowlist([
+      { command: "/usr/bin/pi", allowed_args: [["--agent", "pol"]] },
+    ]);
     s.set();
     try {
-      const res = await register({ command: "node", args: ["-e", "process.exit(0)"] });
+      const res = await register({ command: "/usr/bin/pi", args: ["--agent", "pol"] });
       expect(res.ok).toBe(true);
     } finally {
       s.cleanup();
@@ -227,7 +347,7 @@ describe("ActorDirectory admission policy enforcement", () => {
   });
 
   it("rejects a non-allowlisted command as launch_not_allowlisted", async () => {
-    const s = scaffoldLaunchAllowlist([{ command: "node" }]);
+    const s = scaffoldLaunchAllowlist([{ command: "/usr/bin/pi", allowed_args: [[]] }]);
     s.set();
     try {
       const res = await register({ command: "python", args: [] });
@@ -248,12 +368,45 @@ describe("ActorDirectory admission policy enforcement", () => {
     }
   });
 
-  it("rejects an args-prefix mismatch as launch_not_allowlisted", async () => {
-    const s = scaffoldLaunchAllowlist([{ command: "node", allowed_args_prefixes: [["--port", "1234"]] }]);
+  it("rejects an interpreter inline-code launch even when exactly allowlisted (F1)", async () => {
+    const s = scaffoldLaunchAllowlist([
+      { command: "node", allowed_args: [["-e", "process.exit(0)"]] },
+    ]);
     s.set();
     try {
-      const res = await register({ command: "node", args: ["--foo"] });
+      const res = await register({ command: "node", args: ["-e", "process.exit(0)"] });
+      expect(res).toMatchObject({ ok: false, error: { code: "launch_command_rejected" } });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  it("rejects a basename-colliding absolute path against a bare allowlist entry (F1)", async () => {
+    const s = scaffoldLaunchAllowlist([{ command: "node", allowed_args: [[]] }]);
+    s.set();
+    try {
+      const res = await register({ command: "/attacker/work/node", args: [] });
       expect(res).toMatchObject({ ok: false, error: { code: "launch_not_allowlisted" } });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  it("rejects an args-template mismatch (extras, missing, wrong value) as launch_not_allowlisted", async () => {
+    const s = scaffoldLaunchAllowlist([
+      { command: "node", allowed_args: [["--port", "1234"]] },
+    ]);
+    s.set();
+    try {
+      // Extra trailing args.
+      const extra = await register({ command: "node", args: ["--port", "1234", "extra.js"] });
+      expect(extra).toMatchObject({ ok: false, error: { code: "launch_not_allowlisted" } });
+      // Missing args.
+      const missing = await register({ command: "node", args: ["--port"] });
+      expect(missing).toMatchObject({ ok: false, error: { code: "launch_not_allowlisted" } });
+      // Wrong value.
+      const wrong = await register({ command: "node", args: ["--foo"] });
+      expect(wrong).toMatchObject({ ok: false, error: { code: "launch_not_allowlisted" } });
     } finally {
       s.cleanup();
     }
@@ -326,14 +479,16 @@ describe("ActorDirectory admission policy enforcement", () => {
 // dispatchLaunch defense-in-depth re-check (real spawns / policy refusal)
 // ---------------------------------------------------------------------------
 describe("dispatchLaunch re-checks the allowlist (defense in depth)", () => {
-  it("dispatches an allowlisted contract", async () => {
-    const s = scaffoldLaunchAllowlist([{ command: process.execPath }]);
+  it("dispatches an exactly-allowlisted contract", async () => {
+    const s = scaffoldLaunchAllowlist([
+      { command: process.execPath, allowed_args: [[WAKE_SLEEPY_SCRIPT]] },
+    ]);
     s.set();
     let pid: number | undefined;
     try {
       const res = await dispatchLaunch({
         command: process.execPath,
-        args: ["-e", "setTimeout(()=>{},5000)"],
+        args: [WAKE_SLEEPY_SCRIPT],
       });
       expect(res.dispatched).toBe(true);
       pid = res.pid;
@@ -346,17 +501,19 @@ describe("dispatchLaunch re-checks the allowlist (defense in depth)", () => {
   });
 
   it("refuses to spawn after the allowlist is rewritten (between admit and wake)", async () => {
-    const s = scaffoldLaunchAllowlist([{ command: "node" }]);
+    const s = scaffoldLaunchAllowlist([
+      { command: process.execPath, allowed_args: [[WAKE_SLEEPY_SCRIPT]] },
+    ]);
     s.set();
     try {
-      // Admit while node is allowlisted.
-      const contract = { command: "node", args: ["-e", "setTimeout(()=>{},1000)"] };
+      // Admit while the exact argv is allowlisted.
+      const contract = { command: process.execPath, args: [WAKE_SLEEPY_SCRIPT] };
       expect(await evaluateLaunchPolicy(contract)).toEqual({ ok: true });
 
-      // Operator rewrites the allowlist to remove node -> dispatch must refuse.
+      // Operator rewrites the allowlist to remove it -> dispatch must refuse.
       writeFileSync(
         s.path,
-        JSON.stringify({ version: 1, commands: [{ command: "python", allowed_args_prefixes: [[]] }] })
+        JSON.stringify({ version: 2, commands: [{ command: "git", allowed_args: [[]] }] })
       );
       const res = await dispatchLaunch(contract);
       expect(res.dispatched).toBe(false);
@@ -368,13 +525,15 @@ describe("dispatchLaunch re-checks the allowlist (defense in depth)", () => {
   });
 
   it("fail-closes at dispatch when the allowlist file is absent", async () => {
-    const s = scaffoldLaunchAllowlist([{ command: "node" }]);
+    const s = scaffoldLaunchAllowlist([
+      { command: process.execPath, allowed_args: [[WAKE_SLEEPY_SCRIPT]] },
+    ]);
     s.set();
     try {
       rmSync(s.path, { force: true });
       const res = await dispatchLaunch({
-        command: "node",
-        args: ["-e", "process.exit(0)"],
+        command: process.execPath,
+        args: [WAKE_SLEEPY_SCRIPT],
       });
       expect(res.dispatched).toBe(false);
       expect(res.error?.code).toBe("launch_failed");
@@ -394,6 +553,66 @@ describe("dispatchLaunch re-checks the allowlist (defense in depth)", () => {
       expect(res.error?.message).toMatch(/dangerous delegator/);
     } finally {
       s.cleanup();
+    }
+  });
+
+  it("refuses to dispatch an interpreter inline-code contract despite a stale directory record (F1)", async () => {
+    const s = scaffoldLaunchAllowlist([
+      { command: process.execPath, allowed_args: [["-e", "process.exit(0)"]] },
+    ]);
+    s.set();
+    try {
+      const res = await dispatchLaunch({
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"],
+      });
+      expect(res.dispatched).toBe(false);
+      expect(res.error?.code).toBe("launch_failed");
+      expect(res.error?.message).toMatch(/inline-code/);
+    } finally {
+      s.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// launch_cwd symlink behavior (F10 documented limitation)
+// ---------------------------------------------------------------------------
+describe("launchCwdIsConfined symlink handling (F10)", () => {
+  it("accepts a symlink whose lexical prefix is inside the workspace (documented limitation)", async () => {
+    // A symlink inside the workspace root pointing at an outside directory
+    // passes the lexical resolve()+prefix check: realpath-based escape
+    // protection is an explicitly documented limitation of this layer.
+    const insideRoot = mkdtempSync(join(process.cwd(), ".tmp-launch-cwd-"));
+    const outsideDir = mkdtempSync(join(tmpdir(), "gptqueue-outside-"));
+    try {
+      const link = join(insideRoot, "escape");
+      symlinkSync(outsideDir, link);
+      const confined = await launchCwdIsConfined(link);
+      expect(confined).toEqual({ ok: true });
+    } finally {
+      rmSync(insideRoot, { recursive: true, force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a lexically escaping path (.. traversal) and outside prefixes", async () => {
+    // A REAL directory outside the workspace root (a sibling of the repo),
+    // addressed both directly and via a lexical .. traversal from the root.
+    const parent = join(process.cwd(), "..");
+    const outsideDir = mkdtempSync(join(parent, ".gptqueue-outside-"));
+    try {
+      const traversal = await launchCwdIsConfined(
+        join(process.cwd(), "..", basename(outsideDir))
+      );
+      expect(traversal).toMatchObject({ ok: false });
+      if (!traversal.ok) expect(traversal.message).toMatch(/outside the server workspace root/);
+
+      const direct = await launchCwdIsConfined(outsideDir);
+      expect(direct).toMatchObject({ ok: false });
+      if (!direct.ok) expect(direct.message).toMatch(/outside the server workspace root/);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
     }
   });
 });

@@ -3,45 +3,54 @@
  * durable actor may register to launch (and therefore which commands the wake
  * launcher may spawn).
  *
- * This is the PROVISIONAL defense-in-depth layer added by review finding H2:
- * previously `buildLaunch`/`dispatchLaunch` copied `launch_command`,
- * `launch_args`, and `launch_cwd` verbatim (shell:false blocked metacharacter
- * injection but NOT arbitrary-program execution). Under this model a caller
- * could register `/bin/sh -c <payload>` and trigger it via
- * `send_message -> maybeWake -> dispatchLaunch`.
- *
- * The ratified model is an operator-managed allowlist (provisional pending
- * per-actor operator grants):
+ * This is the defense-in-depth layer hardened by review finding F1: the
+ * original provisional model matched commands by BASENAME and accepted any
+ * args SUFFIX after a configured prefix, so a caller could register
+ * `node -e <payload>` or an attacker-controlled path sharing an allowlisted
+ * basename (`/attacker/work/node`) and have it spawned under the server's OS
+ * identity. The ratified model is exact argv identity:
  *
  *   1. `.gptqueue/launch-allowlist.json` at the server's working directory
  *      governs new `wake_if_offline` registrations (fail-closed: an absent or
  *      unparseable file refuses admission).
- *   2. Dangerous delegators (shells and `-c`-style arg flags) are rejected
- *      regardless of the allowlist.
- *   3. dispatchLaunch re-checks the allowlist fail-closed as defense in depth,
+ *   2. Command identity is exact: a bare-name entry matches only the identical
+ *      bare name, and an absolute-path entry matches only an absolute request
+ *      that lexically `resolve()`s to the same path. Basename aliasing is
+ *      rejected (`/attacker/node` does NOT match an allowlisted `node`).
+ *   3. Args match only by EXACT template: a request's full argv must equal one
+ *      of the entry's `allowed_args` templates element-for-element and in
+ *      length. There is no suffix freedom, and `[]` accepts only "no args".
+ *   4. Dangerous delegators (shells) and interpreter inline-code flags
+ *      (`node -e …`, `python -c …`) are rejected regardless of the allowlist.
+ *   5. dispatchLaunch re-checks the allowlist fail-closed as defense in depth,
  *      so a stale actor-directory entry cannot spawn what the operator has
  *      since disallowed.
- *   4. `launch_cwd` is confined to the server workspace root via
+ *   6. `launch_cwd` is confined to the server workspace root via
  *      path.resolve + prefix check (no realpath-required symlink-escape
- *      handling — documented limitation).
+ *      handling — documented limitation, shared with command identity).
+ *
+ * Version 1 documents (basename + unbounded `allowed_args_prefixes` semantics)
+ * are rejected at parse time with a migration message; they cannot be soundly
+ * auto-converted to exact templates.
  *
  * This module reads the filesystem for the allowlist only; it performs no
  * spawns and touches no Redis.
  */
 
 import { readFile, stat } from "fs/promises";
-import { basename, resolve, sep } from "path";
+import { basename, isAbsolute, resolve, sep } from "path";
 
 /** One command the operator has permitted to be launched. */
 export interface LaunchAllowlistEntry {
   readonly command: string;
   /**
-   * Each entry is an accepted args prefix. A request's args are acceptable
-   * when they are prefix-compatible with at least one entry (requested[i]
-   * must equal allowed[i] for the prefix length; args beyond the prefix are
-   * free). `[]` accepts any args.
+   * Exact argv templates. A request's args are acceptable only when they
+   * equal one template completely (same length, every element equal).
+   * `[]` accepts only a request with no args. There is deliberately no
+   * prefix/suffix freedom: a suffix such as `node … -e <payload>` must
+   * never silently extend an operator grant.
    */
-  readonly allowed_args_prefixes: readonly (readonly string[])[];
+  readonly allowed_args: readonly (readonly string[])[];
   readonly comment?: string;
 }
 
@@ -104,7 +113,7 @@ export const DANGEROUS_SHELL_BASENAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Flag-style args that turn a shell into an arbitrary-program delelgator
+ * Flag-style args that turn a shell into an arbitrary-program delegator
  * (`sh -c "<payload>"`). Subsumed by rejecting every shell basename above,
  * but kept explicit so the rejection reason is auditable.
  */
@@ -114,41 +123,83 @@ export const DANGEROUS_SHELL_ARGS: ReadonlySet<string> = new Set([
   "-Command",
 ]);
 
+/**
+ * Interpreters whose inline-code flags execute an arbitrary string supplied
+ * in argv (`node -e`, `python -c`, `perl -e`, ...). Combined with
+ * DANGEROUS_INTERPRETER_ARGS these are rejected regardless of the allowlist:
+ * even an exact-template grant must not become an arbitrary-code channel
+ * (F1). Operators who need scripted behavior point the interpreter at a
+ * fixed script FILE instead.
+ */
+export const DANGEROUS_INTERPRETER_BASENAMES: ReadonlySet<string> = new Set([
+  "node",
+  "deno",
+  "bun",
+  "tsx",
+  "ts-node",
+  "python",
+  "python2",
+  "python3",
+  "ruby",
+  "perl",
+  "php",
+  "awk",
+]);
+
+/** Inline-code flags that make an interpreter execute an argv string. */
+export const DANGEROUS_INTERPRETER_ARGS: ReadonlySet<string> = new Set([
+  "-e",
+  "--eval",
+  "-c",
+  "--command",
+]);
+
 /** Path of the operator allowlist file, overridable for tests. */
 export const allowlistFilePath = (): string =>
   process.env.GPTQUEUE_LAUNCH_ALLOWLIST?.trim() ||
   ".gptqueue/launch-allowlist.json";
 
 /**
- * Normalize a command to its basename. `path.basename` handles both shapes:
- * a PATH-style bare name (`"node"` -> `"node"`) and a path
- * (`"/usr/bin/node"` -> `"node"`). Matching therefore compares basenames so
- * an absolute request path aliases the same allowlisted name.
+ * Reduce a command to its basename. Used ONLY by the rejection predicates
+ * (`isDangerousDelegator`, `isDangerousInterpreter`): for rejection, basename
+ * matching is conservative — it over-rejects aliases, never under-rejects.
+ * Admission (`commandMatches`) never aliases by basename.
  */
 export const normalizeCommand = (command: string): string =>
   basename(command);
 
-/** Whether a requested command's basename matches an allowlisted entry's. */
+/**
+ * Whether a requested command satisfies an allowlisted entry's identity
+ * (F1: exact identity, never basename aliasing):
+ *   - bare-name entry matches only the byte-identical bare name;
+ *   - absolute-path entry matches only an absolute request that lexically
+ *     `resolve()`s to the same path;
+ *   - a bare request NEVER matches an absolute entry and vice versa.
+ */
 export const commandMatches = (
   requestedCommand: string,
   allowlistedCommand: string
-): boolean =>
-  normalizeCommand(requestedCommand) === normalizeCommand(allowlistedCommand);
+): boolean => {
+  const requestedAbsolute = isAbsolute(requestedCommand);
+  const allowlistedAbsolute = isAbsolute(allowlistedCommand);
+  if (requestedAbsolute !== allowlistedAbsolute) return false;
+  return requestedAbsolute
+    ? resolve(requestedCommand) === resolve(allowlistedCommand)
+    : requestedCommand === allowlistedCommand;
+};
 
 /**
- * Whether `requestedArgs` are prefix-compatible with `allowedPrefix`: every
- * requested arg[i] must equal allowedPrefix[i] for the prefix length; args
- * beyond the prefix are free.
+ * Whether `requestedArgs` EQUAL `template` exactly: same length and every
+ * element identical. This replaces the v1 prefix semantics — there is no
+ * suffix freedom, so `["--port", "1234", "-e", "<payload>"]` can never extend
+ * a `["--port", "1234"]` grant, and `[]` accepts only "no args".
  */
-export const argsPrefixCompatible = (
+export const argsMatchTemplate = (
   requestedArgs: readonly string[],
-  allowedPrefix: readonly string[]
-): boolean => {
-  for (let i = 0; i < allowedPrefix.length; i += 1) {
-    if (requestedArgs[i] !== allowedPrefix[i]) return false;
-  }
-  return true;
-};
+  template: readonly string[]
+): boolean =>
+  requestedArgs.length === template.length &&
+  template.every((arg, i) => requestedArgs[i] === arg);
 
 /** Whether a request command+args match at least one allowlist entry. */
 export const launchMatchesConfig = (
@@ -159,16 +210,15 @@ export const launchMatchesConfig = (
   config.commands.some(
     (entry) =>
       commandMatches(command, entry.command) &&
-      entry.allowed_args_prefixes.some((prefix) =>
-        argsPrefixCompatible(args, prefix)
+      entry.allowed_args.some((template) =>
+        argsMatchTemplate(args, template)
       )
   );
 
 /**
  * True when the command is a dangerous delegator (a shell) regardless of its
- * args, OR a shell carrying a `-c`-style flag. The first clause already
- * rejects every listed shell; the arg clause is retained for explicit,
- * auditable rejection messaging.
+ * args. The `-c`-style arg clause is subsumed by the basename rejection but
+ * kept explicit so the rejection reason is auditable.
  */
 export const isDangerousDelegator = (
   command: string,
@@ -180,6 +230,22 @@ export const isDangerousDelegator = (
     DANGEROUS_SHELL_BASENAMES.has(normalized) &&
     args.some((arg) => DANGEROUS_SHELL_ARGS.has(arg))
   );
+};
+
+/**
+ * True when an allowlisted interpreter is asked to execute an inline code
+ * string (`node -e …`, `python -c …`). Rejected regardless of the allowlist
+ * (F1): an interpreter plus an inline-code flag is an arbitrary-code channel
+ * even under an exact-template grant, because the executed string is only as
+ * trustworthy as whoever authored the registration.
+ */
+export const isDangerousInterpreter = (
+  command: string,
+  args: readonly string[]
+): boolean => {
+  const normalized = normalizeCommand(command).toLowerCase();
+  if (!DANGEROUS_INTERPRETER_BASENAMES.has(normalized)) return false;
+  return args.some((arg) => DANGEROUS_INTERPRETER_ARGS.has(arg));
 };
 
 export type CwdConfinement =
@@ -238,7 +304,7 @@ export const loadLaunchAllowlist = async (): Promise<AllowlistLoad> => {
   return parseLaunchAllowlist(raw, path);
 };
 
-/** Parse + validate the allowlist JSON document. */
+/** Parse + validate the allowlist JSON document (version 2 only). */
 export const parseLaunchAllowlist = (
   raw: string,
   source: string
@@ -256,10 +322,14 @@ export const parseLaunchAllowlist = (
     return { kind: "unparseable", reason: `${source}: allowlist must be a JSON object` };
   }
   const obj = parsed as Record<string, unknown>;
-  if (obj.version !== 1) {
+  if (obj.version !== 2) {
+    const hint =
+      obj.version === 1
+        ? "version-1 prefix-based documents are no longer accepted (basename matching and unbounded args suffixes permitted arbitrary interpreter execution); migrate each 'allowed_args_prefixes' entry to an exact 'allowed_args' template — a full argv, or [] for no args"
+        : "expected 2";
     return {
       kind: "unparseable",
-      reason: `${source}: unsupported allowlist version ${JSON.stringify(obj.version)} (expected 1)`,
+      reason: `${source}: unsupported allowlist version ${JSON.stringify(obj.version)} (${hint})`,
     };
   }
   if (!Array.isArray(obj.commands)) {
@@ -280,36 +350,36 @@ export const parseLaunchAllowlist = (
         reason: `${source}: allowlisted 'command' must be a non-empty string`,
       };
     }
-    const rawPrefixes = e.allowed_args_prefixes;
-    if (!Array.isArray(rawPrefixes)) {
+    const rawTemplates = e.allowed_args;
+    if (!Array.isArray(rawTemplates)) {
       return {
         kind: "unparseable",
-        reason: `${source}: 'allowed_args_prefixes' must be an array for command '${e.command}'`,
+        reason: `${source}: 'allowed_args' must be an array for command '${e.command}'`,
       };
     }
-    const prefixes: string[][] = [];
-    for (const p of rawPrefixes) {
+    const templates: string[][] = [];
+    for (const t of rawTemplates) {
       if (
-        !Array.isArray(p) ||
-        !p.every((a) => typeof a === "string")
+        !Array.isArray(t) ||
+        !t.every((a) => typeof a === "string")
       ) {
         return {
           kind: "unparseable",
-          reason: `${source}: each args prefix must be an array of strings for command '${e.command}'`,
+          reason: `${source}: each allowed_args template must be an array of strings for command '${e.command}'`,
         };
       }
-      prefixes.push([...p]);
+      templates.push([...t]);
     }
     commands.push({
-      command: e.command,
-      allowed_args_prefixes: prefixes,
+      command: e.command.trim(),
+      allowed_args: templates,
       ...(typeof e.comment === "string" ? { comment: e.comment } : {}),
     });
   }
   return {
     kind: "loaded",
     config: Object.freeze({
-      version: 1,
+      version: 2,
       commands: Object.freeze(commands.map((c) => Object.freeze(c))),
     }),
   };
@@ -317,9 +387,10 @@ export const parseLaunchAllowlist = (
 
 /**
  * Evaluate a launch contract against the full operator policy (cwd
- * confinement, dangerous-delegator rejection, allowlist membership). Used at
- * admission (new wake_if_offline registrations) and at dispatch (defense in
- * depth), so both paths share identical rules and ordering.
+ * confinement, dangerous-delegator and dangerous-interpreter rejection,
+ * exact allowlist membership). Used at admission (new wake_if_offline
+ * registrations) and at dispatch (defense in depth), so both paths share
+ * identical rules and ordering.
  */
 export const evaluateLaunchPolicy = async (
   contract: LaunchContractLike
@@ -343,6 +414,18 @@ export const evaluateLaunchPolicy = async (
       error: Object.freeze({
         code: "launch_command_rejected",
         message: `command '${contract.command}' is a dangerous delegator (shell) and is rejected regardless of the launch allowlist`,
+      }),
+    });
+  }
+
+  if (isDangerousInterpreter(contract.command, [...contract.args])) {
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({
+        code: "launch_command_rejected",
+        message: `command '${contract.command}' carries an inline-code flag (${[...contract.args].find((arg) =>
+          DANGEROUS_INTERPRETER_ARGS.has(arg)
+        )}) and is rejected regardless of the launch allowlist; point the interpreter at a fixed script file instead`,
       }),
     });
   }

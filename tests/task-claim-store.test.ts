@@ -1,6 +1,7 @@
 import { flushTestKeys as guardedFlushTestKeys } from "./helpers/redis-test-utils.js";
 import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
+import { WAKE_EXIT_SCRIPT } from "./helpers/wake-launch.js";
 import { Redis } from "ioredis";
 import { spawn } from "child_process";
 import { readFileSync } from "fs";
@@ -31,14 +32,15 @@ import type { RuntimeLaunchContract } from "../src/core/actor-directory.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
-// wake_if_offline admission now requires an operator allowlist. Scaffold one
-// permitting the test launcher (process.execPath) and point
-// GPTQUEUE_LAUNCH_ALLOWLIST at it so durable actors can be registered.
+// wake_if_offline admission now requires an operator allowlist with EXACT
+// argv templates (v2). Scaffold one permitting process.execPath pointed at
+// the fixed wake fixture and point GPTQUEUE_LAUNCH_ALLOWLIST at it so
+// durable actors can be registered.
 const allowlist = scaffoldLaunchAllowlist([
   {
     command: process.execPath,
-    allowed_args_prefixes: [[], ["-e"]],
-    comment: "test process.execPath launcher",
+    allowed_args: [[WAKE_EXIT_SCRIPT]],
+    comment: "test process.execPath launcher (fixed fixture script)",
   },
 ]);
 allowlist.set();
@@ -523,7 +525,7 @@ describe("task claim tools + workload derivation", () => {
 
   const launchOf = (): RuntimeLaunchContract => ({
     command: process.execPath,
-    args: ["-e", "process.exit(0)"],
+    args: [WAKE_EXIT_SCRIPT],
   });
 
   beforeEach(async () => {
@@ -747,7 +749,7 @@ describe("attachSpawn (wake lease spawn evidence)", () => {
 
   const launchOf = (): RuntimeLaunchContract => ({
     command: process.execPath,
-    args: ["-e", "process.exit(0)"],
+    args: [WAKE_EXIT_SCRIPT],
   });
 
   beforeEach(async () => {

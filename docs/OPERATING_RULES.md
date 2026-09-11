@@ -68,7 +68,9 @@ correlation ids in payloads.
   launch never loses accepted work.
 - One wake lease per actor: concurrent sends coalesce onto a single launch.
 - Launch contracts are governed by the operator allowlist
-  (`.gptqueue/launch-allowlist.json`); dispatch re-checks it fail-closed.
+  (`.gptqueue/launch-allowlist.json`, v2 exact argv templates); dispatch
+  re-checks it fail-closed. Shells and interpreter inline-code flags are
+  rejected regardless of the allowlist.
 - A launched runtime proves itself by registering under the actor's name —
   that clears the wake lease (`runtime_ready`). A lease whose spawned pid
   dies is reconciled back to offline at the next presence read.
