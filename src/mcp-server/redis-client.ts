@@ -2,7 +2,8 @@ import { Redis } from "ioredis";
 import { createHash } from "node:crypto";
 import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
-import { SESSION_KEYS, SESSION_DEFAULTS } from "../core/keys.js";
+import { SESSION_KEYS, CLAIM_KEYS, SESSION_DEFAULTS } from "../core/keys.js";
+import { occupancyGuardLua } from "../core/occupancy-guard.js";
 import { MailboxStore } from "../core/mailbox-store.js";
 import { SessionStore } from "../core/session-store.js";
 import { CustodyStore } from "../core/custody-store.js";
@@ -90,18 +91,29 @@ export class RedisClient {
   }
 
   /** Atomically attach this provisional session to an offline, exactly mapped mailbox. */
-  async adoptIdentity(source: string, target: string, mappingKey: string, expectedMapping: string): Promise<void> {
+  async adoptIdentity(
+    source: string,
+    target: string,
+    mappingKey: string,
+    expectedMapping: string,
+    runtimeId?: string
+  ): Promise<void> {
     if (!this._sessionId || this._agentName !== source || source === target) throw new Error("Continuity source ownership mismatch");
     const wrapper = (name: string) => `gptq:experimental-wrapper-claim:${createHash("sha256").update(name).digest("hex")}`;
-    // Target-occupancy guard set mirrors applyContinuity's occupied()
-    // (core/mailbox-continuity.ts) exactly: runtime-binding, heartbeat,
-    // wrapper claim, live session leases, and unacknowledged claims-index
-    // entries (review finding F5 — the claims-index check was previously
-    // missing here, letting the runtime path adopt a claimed target that the
-    // operator path would refuse). Source-side guards (-4, -7) are
+    // D5: the target-occupancy guard is generated from the SAME shared
+    // signal table as applyContinuity's occupied() (core/occupancy-guard.ts):
+    // runtime-binding, heartbeat, wrapper claim, live session leases, and
+    // unacknowledged claims-index entries, enforced by one occupied_target()
+    // call (review finding F5 — the claims-index check was previously
+    // missing here entirely, letting the runtime path adopt a claimed target
+    // the operator path would refuse). Source-side guards (-4, -6) are
     // runtime-path-specific (sole-session ownership, quiet source) and have
     // no operator-path counterpart.
+    // D6: the success path XADDs a runtime_continuity audit event to the
+    // same bounded stream the operator path uses, so the identity transfer
+    // that runs WITHOUT a human in the loop is audited like one that doesn't.
     const result = await this.redis.eval(`
+      ${occupancyGuardLua("occupied_target")}
       if redis.call('GET', KEYS[1]) ~= ARGV[4] then return -1 end
       local sourceRaw = redis.call('HGET', KEYS[2], ARGV[1])
       local targetRaw = redis.call('HGET', KEYS[2], ARGV[2])
@@ -110,11 +122,8 @@ export class RedisClient {
       local targetReg = cjson.decode(targetRaw)
       if redis.call('HGET', KEYS[3], 'agent_name') ~= ARGV[1] or redis.call('EXISTS', KEYS[4]) ~= 1 then return -3 end
       if redis.call('SCARD', KEYS[5]) ~= 1 or redis.call('SISMEMBER', KEYS[5], ARGV[3]) ~= 1 then return -4 end
-      if redis.call('EXISTS', KEYS[7]) == 1 or redis.call('EXISTS', KEYS[8]) == 1 or redis.call('EXISTS', KEYS[9]) == 1 or redis.call('ZCARD', KEYS[15]) > 0 then return -5 end
-      for _, sid in ipairs(redis.call('SMEMBERS', KEYS[6])) do
-        if redis.call('EXISTS', 'gptq:lease:'..sid) == 1 then return -6 end
-      end
-      if redis.call('LLEN', KEYS[10]) > 0 or redis.call('ZCARD', KEYS[11]) > 0 or redis.call('EXISTS', KEYS[12]) == 1 or redis.call('EXISTS', KEYS[13]) == 1 then return -7 end
+      if occupied_target(ARGV[2], KEYS[7]) then return -5 end
+      if redis.call('LLEN', KEYS[8]) > 0 or redis.call('ZCARD', KEYS[9]) > 0 or redis.call('EXISTS', KEYS[10]) == 1 or redis.call('EXISTS', KEYS[11]) == 1 then return -6 end
       targetReg.pid = sourceReg.pid
       targetReg.metadata = targetReg.metadata or {}
       if sourceReg.metadata then
@@ -126,12 +135,13 @@ export class RedisClient {
       redis.call('SADD', KEYS[6], ARGV[3])
       redis.call('HSET', KEYS[2], ARGV[2], cjson.encode(targetReg))
       redis.call('HDEL', KEYS[2], ARGV[1])
-      redis.call('DEL', KEYS[14])
+      redis.call('DEL', KEYS[12])
+      redis.call('XADD', KEYS[13], 'MAXLEN', '~', 1000, '*', 'event', 'runtime_continuity', 'target', ARGV[2], 'source', ARGV[1], 'runtime_id', ARGV[5], 'session_id', ARGV[3])
       return 1
-    `, 15, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
-      SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), SESSION_KEYS.heartbeat(target),
-      `gptq:runtime-binding:${target}`, wrapper(target), SESSION_KEYS.queue(source), `gptq:claims-index:${source}`,
-      `gptq:outbound-activity:${source}`, wrapper(source), SESSION_KEYS.heartbeat(source), `gptq:claims-index:${target}`, source, target, this._sessionId, expectedMapping);
+    `, 13, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
+      SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), wrapper(target),
+      SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), `gptq:outbound-activity:${source}`, wrapper(source),
+      SESSION_KEYS.heartbeat(source), "gptq:continuity-audit", source, target, this._sessionId, expectedMapping, runtimeId ?? "");
     if (result !== 1) throw new Error(`Continuity adoption refused (${result})`);
     this._agentName = target;
     this.startHeartbeat();
@@ -191,11 +201,19 @@ export class RedisClient {
     }
 
     // Create a new session
-    const session = await this.sessionStore.createSession(
-      name,
-      role as "publisher" | "consumer" | "both",
-      description
-    );
+    let session: Awaited<ReturnType<SessionStore["createSession"]>>;
+    try {
+      session = await this.sessionStore.createSession(
+        name,
+        role as "publisher" | "consumer" | "both",
+        description
+      );
+    } catch (error) {
+      // D4: the old identity keeps serving — restore the heartbeat the
+      // rename prologue stopped.
+      if (renaming) this.startHeartbeat();
+      throw error;
+    }
 
     if (renaming) {
       try {
@@ -203,11 +221,27 @@ export class RedisClient {
       } catch (error) {
         // The transfer is all-or-nothing: every message is still under the
         // old name. Roll the new session back so the visible state is
-        // unchanged, then surface the failure.
-        await this.sessionStore
-          .closeSession(session.session_id)
-          .catch(() => {});
-        await this.redis.hdel(SESSION_KEYS.registry, name).catch(() => {});
+        // unchanged, then surface the failure. D4: rollback steps must not
+        // vanish silently — any failure is named in the thrown error, and
+        // the old identity's heartbeat is restarted before rethrowing.
+        const rollbackFailures: string[] = [];
+        try {
+          await this.sessionStore.closeSession(session.session_id);
+        } catch {
+          rollbackFailures.push(`closeSession(${session.session_id})`);
+        }
+        try {
+          await this.redis.hdel(SESSION_KEYS.registry, name);
+        } catch {
+          rollbackFailures.push(`registry:${name}`);
+        }
+        this.startHeartbeat();
+        if (rollbackFailures.length > 0) {
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)} ` +
+              `(rename rollback incomplete; new-name '${name}' may hold inconsistent session/registry state: ${rollbackFailures.join(", ")})`
+          );
+        }
         throw error;
       }
 

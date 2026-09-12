@@ -4,6 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { Redis } from 'ioredis';
 import { AgentDiagnostics } from '../dist/core/agent-diagnostics.js';
 import { prepareContinuity, applyContinuity } from '../dist/core/mailbox-continuity.js';
+import { probeActivationReady, bindingAgrees } from '../dist/core/doctor-probe.js';
 import { CodexSocketClient } from '../dist/registered-shell/codex-socket.js';
 
 const [command, ...args] = process.argv.slice(2);
@@ -33,10 +34,25 @@ try {
           server: 'gptqueue-shared', tool: 'get_runtime_status', arguments: {} }, AbortSignal.timeout(10000));
         const status = response.structuredContent;
         const agent = status?.agent ?? options['--agent'];
+        // D7: read the recorded runtime binding (if any) so readiness uses
+        // the same identity/binding conjunction as the MCP probe.
+        let binding = null;
+        if (agent) {
+          try {
+            const raw = await redis.get(`gptq:runtime-binding:${agent}`);
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (typeof parsed?.runtime_id === 'string' && typeof parsed?.epoch === 'string') {
+                binding = { runtime_id: parsed.runtime_id, epoch: parsed.epoch };
+              }
+            }
+          } catch { binding = null; }
+        }
         result = { probe: response.isError ? 'runtime_tool_unavailable' : 'runtime_tool_available',
           exact_thread_id: options['--thread-id'], identity_verified: typeof status?.agent === 'string',
           expected_identity_matches: options['--agent'] && status?.agent ? options['--agent'] === status.agent : null,
-          activation_ready: status?.activation_ready === true,
+          binding_matches: bindingAgrees(status, binding),
+          activation_ready: probeActivationReady(response.isError, status, options['--agent'], binding),
           details: agent ? await diagnostics.details(agent) : null,
           action: response.isError ? 'Refresh this legacy MCP connection; review exact mailbox continuity first. Global reload is not performed.' : null };
       } finally { await rpc.close(); }

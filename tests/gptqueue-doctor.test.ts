@@ -13,6 +13,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
+import {
+  probeActivationReady,
+  bindingAgrees,
+} from "../src/core/doctor-probe.js";
 
 const ROOT = process.cwd();
 const SCRIPT = join(ROOT, "scripts/gptqueue-doctor.mjs");
@@ -225,5 +229,43 @@ describe("gptqueue-doctor CLI", () => {
     const plan = JSON.parse(await readFile(out, "utf8"));
     expect(plan.legacy_adoption).toBe(true);
     expect(plan.source).toBeNull();
+  });
+
+  // D7: the doctor's connection probe gates activation_ready on the same
+  // identity/binding conjunction as the MCP probe — not on
+  // `status.activation_ready === true` alone.
+  describe("connection probe readiness conjunction (D7)", () => {
+    const ready = {
+      agent: "probe-target",
+      activation_ready: true,
+      runtime: { runtime_id: "r-1", epoch: "e-1" },
+    };
+    const binding = { runtime_id: "r-1", epoch: "e-1" };
+
+    it("reports ready only on the full conjunction", () => {
+      expect(probeActivationReady(false, ready, "probe-target", binding)).toBe(true);
+    });
+
+    it.each([
+      { name: "error response", isError: true, status: ready, expected: "probe-target", binding },
+      { name: "not activation_ready", isError: false, status: { ...ready, activation_ready: false }, expected: "probe-target", binding },
+      { name: "wrong agent vs --agent", isError: false, status: { ...ready, agent: "someone-else" }, expected: "probe-target", binding },
+      { name: "no agent in status", isError: false, status: { activation_ready: true, runtime: ready.runtime }, expected: undefined, binding },
+      { name: "binding runtime_id mismatch", isError: false, status: { ...ready, runtime: { runtime_id: "other", epoch: "e-1" } }, expected: "probe-target", binding },
+      { name: "binding epoch mismatch", isError: false, status: { ...ready, runtime: { runtime_id: "r-1", epoch: "other" } }, expected: "probe-target", binding },
+    ])("refuses readiness for $name", ({ isError, status, expected, binding: b }) => {
+      expect(probeActivationReady(isError, status, expected, b)).toBe(false);
+    });
+
+    it("skips binding agreement only when no binding is known", () => {
+      expect(bindingAgrees(ready, null)).toBeNull();
+      expect(probeActivationReady(false, ready, undefined, null)).toBe(true);
+      expect(bindingAgrees(ready, binding)).toBe(true);
+      expect(bindingAgrees({ ...ready, runtime: { runtime_id: "x", epoch: "e-1" } }, binding)).toBe(false);
+    });
+
+    it("does not gate on --agent when it was not supplied", () => {
+      expect(probeActivationReady(false, ready, undefined, binding)).toBe(true);
+    });
   });
 });

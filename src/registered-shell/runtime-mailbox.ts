@@ -15,6 +15,6 @@ export const restoreRuntimeMailbox = async (client: RedisClient, binding: Runtim
   // F8: accept `.`/`..` lexical aliases, matching binding validation and the
   // continuity plan checks in core/mailbox-continuity.ts.
   if (!parsed.success || resolve(parsed.data.working_directory) !== resolve(validated.working_directory)) throw new Error("Runtime mailbox mapping does not match binding");
-  if (parsed.data.agent !== source) await client.adoptIdentity(source, parsed.data.agent, key, raw);
+  if (parsed.data.agent !== source) await client.adoptIdentity(source, parsed.data.agent, key, raw, validated.runtime_id);
   return client.requireRegistered();
 };

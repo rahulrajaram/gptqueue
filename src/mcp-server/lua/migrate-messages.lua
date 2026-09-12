@@ -5,8 +5,14 @@
 -- finding F2). Redis executes the whole script atomically: no reader can
 -- observe a partial transfer, and any failure leaves the source exactly as
 -- it was — either every element has moved or none has.
+--
+-- D3: a same-key call (from == to) would LRANGE, RPUSH (doubling), then DEL
+-- the only copy — silent total mailbox loss. Refuse it as a no-op.
 local src = KEYS[1]
 local dst = KEYS[2]
+if src == dst then
+  return 0
+end
 local msgs = redis.call('LRANGE', src, 0, -1)
 if #msgs == 0 then
   return 0

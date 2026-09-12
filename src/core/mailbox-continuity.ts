@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import type { Redis } from "ioredis";
 import { runtimeBindingSchema, type RuntimeBinding } from "../registered-shell/runtime.js";
+import { occupancyGuardLua } from "./occupancy-guard.js";
 
 /**
  * F8: lexical path equivalence. Runtime bindings accept `.`/`..` aliases
@@ -58,17 +59,13 @@ export const applyContinuity = async (redis: Redis, plan: ContinuityPlan): Promi
     throw new Error("Continuity fingerprints or mapping changed");
   if ((!p.source) !== p.legacy_adoption) throw new Error("Invalid legacy adoption plan");
   const wrapperKey = (agent: string) => `gptq:experimental-wrapper-claim:${createHash("sha256").update(agent).digest("hex")}`;
+  // D5: the occupied() guard is generated from the shared signal table
+  // (core/occupancy-guard.ts) — identical to adoptIdentity's target guard.
   const result = await redis.eval(`
+    ${occupancyGuardLua("occupied")}
     if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] then return -1 end
     if (redis.call('HGET', KEYS[2], ARGV[2]) or '') ~= ARGV[3] then return -2 end
     if ARGV[4] ~= '' and (redis.call('HGET', KEYS[2], ARGV[4]) or '') ~= ARGV[5] then return -3 end
-    local function occupied(agent, wrapper)
-      if redis.call('EXISTS','gptq:runtime-binding:'..agent) == 1 or redis.call('EXISTS','gptq:heartbeat:'..agent) == 1 or redis.call('EXISTS',wrapper) == 1 then return true end
-      for _, sid in ipairs(redis.call('SMEMBERS','gptq:agent-sessions:'..agent)) do
-        if redis.call('EXISTS','gptq:lease:'..sid) == 1 then return true end
-      end
-      return redis.call('ZCARD','gptq:claims-index:'..agent) > 0
-    end
     if occupied(ARGV[2], KEYS[3]) then return -4 end
     if ARGV[4] ~= '' and ARGV[4] ~= ARGV[2] then
       if occupied(ARGV[4], KEYS[4]) or redis.call('LLEN','gptq:q:'..ARGV[4]) > 0 or redis.call('EXISTS','gptq:outbound-activity:'..ARGV[4]) == 1 then return -5 end
