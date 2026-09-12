@@ -14,6 +14,34 @@ harness executes).
 
 ## Execution contract
 
+0. **Dispatch throttling and provider backoff (mandatory).** Reviewer arms
+   share one provider account, so an unbounded fan-out trips provider rate
+   limits (observed 2026-09-12: ten simultaneous sub-agent dispatches; two
+   arms failed with "Rate limit reached for requests" from the GLM
+   provider). The controlling policy lives in the review package at
+   `review-pipeline/scripts/provider_backoff.py` (`dispatch_wave`,
+   `retry_with_backoff`, `backoff_delay`; covered by
+   `tests/test_provider_backoff.py`) and is:
+
+   - Dispatch arms in **bounded waves**: at most **4 concurrent arms**
+     (`DEFAULT_CONCURRENCY`). An orchestrator using interactive sub-agents
+     (e.g. the Task tool) applies the same bound by staggering dispatch —
+     launch the next arm only as earlier ones complete.
+   - A rate-limited arm is **re-dispatched with full-jitter exponential
+     backoff**: delay = `random() * min(30s, 1s * 2**attempt)`, hard cap
+     **30 seconds** (`MAX_BACKOFF_SECONDS`), up to 8 attempts
+     (`DEFAULT_MAX_ATTEMPTS`). Randomization prevents a throttled fleet
+     from re-synchronizing on the cap boundary.
+   - Rate-limit detection is **provider-tolerant**: GLM/z.ai ("Rate limit
+     reached for requests"), DeepSeek ("rate limit exceeded"), and
+     OpenAI/Codex ("429", "insufficient_quota", "overloaded_error")
+     phrasings all count as retryable throttles.
+   - **Anything else fails loud and is never retried** — structural
+     contract violations, identity mismatches, and genuine defects must
+     surface immediately, as in an unassisted run.
+   - A completed arm is never re-run; only the failed arm is. The barrier
+     still requires every arm to produce a fresh, non-empty report.
+
 1. **Arms.** Ten reviewer arms, one per perspective prompt in the package's
    `prompts/` directory: cleanliness, correctness, cyclomatic-complexity,
    fp-refine-adherence, idiomaticity, proximity-consistency, security,
