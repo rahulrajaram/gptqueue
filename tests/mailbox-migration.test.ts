@@ -63,6 +63,15 @@ describe("MailboxStore.migrateMessages (atomic transfer, F2)", () => {
     expect(await contents(redis, "dst")).toEqual([msg(9)]);
   });
 
+  // D3: a same-key migration would double the list and then DEL it — silent
+  // total mailbox loss. It must be a no-op.
+  it("is a no-op for a same-key migration and leaves the mailbox intact (D3)", async () => {
+    await redis.rpush(SESSION_KEYS.queue("same"), msg(1), msg(2), msg(3));
+    const count = await store.migrateMessages("same", "same");
+    expect(count).toBe(0);
+    expect(await contents(redis, "same")).toEqual([msg(1), msg(2), msg(3)]);
+  });
+
   it("moves a large mailbox in exact order (chunked RPUSH path)", async () => {
     const N = 2000; // exercises the script's bounded-chunk loop
     const seeded: string[] = [];
@@ -97,6 +106,64 @@ describe("MailboxStore.migrateMessages (atomic transfer, F2)", () => {
     internals.redis = realRedis;
     expect(await contents(redis, "src")).toEqual([msg(1), msg(2)]);
     expect(await contents(redis, "dst")).toEqual([msg(3)]);
+  });
+
+  // D14: the atomicity oracle. A refactor that reintroduces the F2 crash
+  // window via eval-per-chunk (or any multi-command transfer) MUST fail the
+  // suite: the transfer is observable as exactly ONE eval carrying the
+  // migration script (LRANGE/RPUSH/DEL, two keys).
+  it("issues the transfer as exactly ONE eval carrying the migrate script (D14)", async () => {
+    await redis.rpush(SESSION_KEYS.queue("src"), msg(1), msg(2), msg(3));
+
+    const internals = store as unknown as { redis: Redis };
+    const realRedis = internals.redis;
+    const evalCalls: unknown[][] = [];
+    internals.redis = {
+      eval: async (...callArgs: unknown[]) => {
+        evalCalls.push(callArgs);
+        return (realRedis.eval as (...a: unknown[]) => Promise<unknown>)(...callArgs);
+      },
+    } as unknown as Redis;
+
+    const count = await store.migrateMessages("src", "dst");
+    internals.redis = realRedis;
+
+    expect(count).toBe(3);
+    expect(evalCalls).toHaveLength(1);
+    const script = String(evalCalls[0]?.[0]);
+    expect(script).toContain("LRANGE");
+    expect(script).toContain("RPUSH");
+    expect(script).toContain("DEL");
+    expect(evalCalls[0]?.[1]).toBe(2); // numkeys: src + dst
+    expect(await contents(redis, "src")).toEqual([]);
+    expect(await contents(redis, "dst")).toEqual([msg(1), msg(2), msg(3)]);
+  });
+
+  it("succeed-then-fail across two transfers isolates each call (D14)", async () => {
+    await redis.rpush(SESSION_KEYS.queue("src"), msg(1));
+    const internals = store as unknown as { redis: Redis };
+    const realRedis = internals.redis;
+    let failNext = false;
+    internals.redis = {
+      eval: async (...callArgs: unknown[]) => {
+        if (failNext) throw new Error("connection lost mid-sequence");
+        return (realRedis.eval as (...a: unknown[]) => Promise<unknown>)(...callArgs);
+      },
+    } as unknown as Redis;
+
+    // First transfer succeeds completely.
+    expect(await store.migrateMessages("src", "dst")).toBe(1);
+    expect(await contents(redis, "src")).toEqual([]);
+    expect(await contents(redis, "dst")).toEqual([msg(1)]);
+
+    // Second transfer fails after re-seeding: the failed call must move
+    // nothing and corrupt nothing from the first call.
+    await redis.rpush(SESSION_KEYS.queue("src"), msg(2));
+    failNext = true;
+    await expect(store.migrateMessages("src", "dst")).rejects.toThrow(/connection lost/);
+    internals.redis = realRedis;
+    expect(await contents(redis, "src")).toEqual([msg(2)]);
+    expect(await contents(redis, "dst")).toEqual([msg(1)]);
   });
 });
 
@@ -219,5 +286,58 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
     const retried = await client.register("both", "new-name", "second");
     expect(retried.name).toBe("new-name");
     expect(await contents(redis, "new-name")).toEqual([msg(1), msg(2), msg(3)]);
+  });
+
+  it("a failed rename restores the old identity's heartbeat (D4)", async () => {
+    await client.register("both", "old-name", "first");
+    await seedOldMailbox(1);
+
+    // Remove the live heartbeat so its reappearance proves the restart.
+    await redis.del(SESSION_KEYS.heartbeat("old-name"));
+
+    const internals = client as unknown as { mailbox: MailboxStore };
+    const realMigrate = internals.mailbox.migrateMessages.bind(internals.mailbox);
+    internals.mailbox.migrateMessages = (async () => {
+      throw new Error("migration failed");
+    }) as typeof realMigrate;
+
+    await expect(
+      client.register("both", "new-name", "second")
+    ).rejects.toThrow(/migration failed/);
+
+    internals.mailbox.migrateMessages = realMigrate;
+
+    // startHeartbeat fires an immediate beat; poll briefly for the key.
+    const deadline = Date.now() + 3000;
+    while ((await redis.exists(SESSION_KEYS.heartbeat("old-name"))) !== 1) {
+      if (Date.now() > deadline) throw new Error("heartbeat not restored after failed rename");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(client.agentName).toBe("old-name");
+  });
+
+  it("a rollback failure during a failed rename is named in the thrown error (D4)", async () => {
+    await client.register("both", "old-name", "first");
+    await seedOldMailbox(1);
+
+    const internals = client as unknown as {
+      mailbox: MailboxStore;
+      sessionStore: SessionStore;
+    };
+    const realMigrate = internals.mailbox.migrateMessages.bind(internals.mailbox);
+    const realClose = internals.sessionStore.closeSession.bind(internals.sessionStore);
+    internals.mailbox.migrateMessages = (async () => {
+      throw new Error("migration failed");
+    }) as typeof realMigrate;
+    internals.sessionStore.closeSession = (async () => {
+      throw new Error("redis blip");
+    }) as typeof realClose;
+
+    await expect(
+      client.register("both", "new-name", "second")
+    ).rejects.toThrow(/rollback incomplete/);
+
+    internals.mailbox.migrateMessages = realMigrate;
+    internals.sessionStore.closeSession = realClose;
   });
 });

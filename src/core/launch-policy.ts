@@ -113,26 +113,16 @@ export const DANGEROUS_SHELL_BASENAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Flag-style args that turn a shell into an arbitrary-program delegator
- * (`sh -c "<payload>"`). Subsumed by rejecting every shell basename above,
- * but kept explicit so the rejection reason is auditable.
- */
-export const DANGEROUS_SHELL_ARGS: ReadonlySet<string> = new Set([
-  "-c",
-  "-lc",
-  "-Command",
-]);
-
-/**
  * Interpreters whose inline-code flags execute an arbitrary string supplied
- * in argv (`node -e`, `python -c`, `perl -e`, ...). Combined with
- * DANGEROUS_INTERPRETER_ARGS these are rejected regardless of the allowlist:
- * even an exact-template grant must not become an arbitrary-code channel
- * (F1). Operators who need scripted behavior point the interpreter at a
+ * in argv (`node -e`, `python -c`, `perl -e`, ...). Combined with the
+ * inline-code predicate below these are rejected regardless of the allowlist
+ * (F1/D1): even an exact-template grant must not become an arbitrary-code
+ * channel. Operators who need scripted behavior point the interpreter at a
  * fixed script FILE instead.
  */
 export const DANGEROUS_INTERPRETER_BASENAMES: ReadonlySet<string> = new Set([
   "node",
+  "nodejs",
   "deno",
   "bun",
   "tsx",
@@ -143,16 +133,42 @@ export const DANGEROUS_INTERPRETER_BASENAMES: ReadonlySet<string> = new Set([
   "ruby",
   "perl",
   "php",
-  "awk",
 ]);
 
-/** Inline-code flags that make an interpreter execute an argv string. */
+/**
+ * The awk family takes its PROGRAM as its first non-flag positional argv
+ * element — every invocation executes an argv-supplied string, so no flag
+ * predicate can make it safe. Rejected unconditionally, like shells (D1).
+ */
+export const DANGEROUS_AWK_BASENAMES: ReadonlySet<string> = new Set([
+  "awk",
+  "gawk",
+  "mawk",
+]);
+
+/** Detached inline-code flags that make an interpreter execute an argv string. */
 export const DANGEROUS_INTERPRETER_ARGS: ReadonlySet<string> = new Set([
   "-e",
   "--eval",
   "-c",
   "--command",
+  "-p",
+  "--print",
+  "-E",
+  "-r",
 ]);
+
+/**
+ * Whether one argv element is an inline-code flag in any spelling: detached
+ * (`-e`), equals-glued (`--eval=<code>`), or value-glued short form
+ * (`python -c<code>`, `perl -e<code>`, `node -p<code>`). D1: the predicate
+ * previously matched only exact detached tokens, so `--eval=x` and `-cfoo`
+ * bypassed the documented unconditional rejection.
+ */
+export const isInlineCodeArg = (arg: string): boolean =>
+  DANGEROUS_INTERPRETER_ARGS.has(arg) ||
+  /^--(eval|print|command)=/.test(arg) ||
+  /^-[ecEpr].+/.test(arg);
 
 /** Path of the operator allowlist file, overridable for tests. */
 export const allowlistFilePath = (): string =>
@@ -217,35 +233,29 @@ export const launchMatchesConfig = (
 
 /**
  * True when the command is a dangerous delegator (a shell) regardless of its
- * args. The `-c`-style arg clause is subsumed by the basename rejection but
- * kept explicit so the rejection reason is auditable.
+ * args — the basename rejection is what carries the audit story; there is
+ * deliberately no args clause (D9: the previous second disjunct re-tested
+ * the same set membership and could never fire).
  */
-export const isDangerousDelegator = (
-  command: string,
-  args: readonly string[]
-): boolean => {
-  const normalized = normalizeCommand(command).toLowerCase();
-  if (DANGEROUS_SHELL_BASENAMES.has(normalized)) return true;
-  return (
-    DANGEROUS_SHELL_BASENAMES.has(normalized) &&
-    args.some((arg) => DANGEROUS_SHELL_ARGS.has(arg))
-  );
-};
+export const isDangerousDelegator = (command: string): boolean =>
+  DANGEROUS_SHELL_BASENAMES.has(normalizeCommand(command).toLowerCase());
 
 /**
  * True when an allowlisted interpreter is asked to execute an inline code
- * string (`node -e …`, `python -c …`). Rejected regardless of the allowlist
- * (F1): an interpreter plus an inline-code flag is an arbitrary-code channel
- * even under an exact-template grant, because the executed string is only as
- * trustworthy as whoever authored the registration.
+ * string in ANY spelling (`node -e …`, `python -c<code>`, `--eval=<code>`,
+ * `node -p …`, the awk family's positional program). Rejected regardless of
+ * the allowlist (F1/D1): an interpreter executing an argv-supplied string is
+ * an arbitrary-code channel even under an exact-template grant, because the
+ * executed string is only as trustworthy as whoever authored the registration.
  */
 export const isDangerousInterpreter = (
   command: string,
   args: readonly string[]
 ): boolean => {
   const normalized = normalizeCommand(command).toLowerCase();
+  if (DANGEROUS_AWK_BASENAMES.has(normalized)) return true;
   if (!DANGEROUS_INTERPRETER_BASENAMES.has(normalized)) return false;
-  return args.some((arg) => DANGEROUS_INTERPRETER_ARGS.has(arg));
+  return args.some(isInlineCodeArg);
 };
 
 export type CwdConfinement =
@@ -408,7 +418,7 @@ export const evaluateLaunchPolicy = async (
     }
   }
 
-  if (isDangerousDelegator(contract.command, [...contract.args])) {
+  if (isDangerousDelegator(contract.command)) {
     return Object.freeze({
       ok: false,
       error: Object.freeze({

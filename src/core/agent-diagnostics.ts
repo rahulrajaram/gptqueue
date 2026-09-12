@@ -34,6 +34,37 @@ const safeBinding = (v: unknown) => { const p = runtimeBindingSchema.safeParse(O
 const now = () => new Date().toISOString();
 
 /**
+ * D2: the ONE derivation of published/readiness/activation_ready, shared by
+ * details() and find()'s cheap filter path. The two copies drifted once
+ * already (find() omitted the display-only slice and inherited a different
+ * `published` basis); `published` is now computed from the UNSLICED tool
+ * list in both paths — the 100-cap is display-only (capabilities.tool_names).
+ */
+export const deriveReadiness = (
+  online: boolean,
+  binding: Readonly<{ client: string; runtime_id: string; epoch: string; working_directory: string }> | null,
+  metadata: Readonly<Record<string, unknown>>
+): Readonly<{ published: boolean; readiness: ActivationReadiness; activation_ready: boolean | null }> => {
+  const tools = Array.isArray(metadata.tool_names) ? metadata.tool_names.filter((x): x is string => typeof x === "string") : [];
+  const published =
+    (typeof metadata.protocol_version === "string" || typeof metadata.protocol_version === "number") &&
+    tools.includes("get_runtime_status") &&
+    tools.includes("bind_runtime");
+  const readiness: ActivationReadiness = !online
+    ? "offline"
+    : binding !== null
+      ? "bound_unverified"
+      : !published
+        ? "unknown_legacy"
+        : "unbound";
+  return Object.freeze({
+    published,
+    readiness,
+    activation_ready: readiness === "bound_unverified" ? null : false,
+  });
+};
+
+/**
  * F8: lexical path-equivalence for working-directory comparison. A binding
  * validated with `/workspace/./` must satisfy a `/workspace` filter (and vice
  * versa) everywhere discovery/continuity compare directories; resolve()
@@ -83,15 +114,16 @@ export class AgentDiagnostics {
     if (!raw || !Object.keys(reg).length) return Object.freeze({ name: agent, discovery: null, profile: null, capabilities: { protocol_version: null, tool_names: [], published: false }, online: false, runtime_binding: null, activation: { state: null, attempt: null }, readiness: "offline", activation_ready: false, queue: { queued: 0, claimed: 0, dead_lettered: 0 }, evidence_at: at, snapshot: "bounded_non_atomic", next_action: "unknown_agent" });
     const online = await this.isOnline(agent);
     const discovery = discoveryRecord({ name: agent, role: typeof reg.role === "string" ? reg.role : "unknown", description: typeof reg.description === "string" ? reg.description : undefined, online, registered_at: reg.registered_at, pid: reg.pid, metadata: reg.metadata });
-    const metadata = record(reg.metadata); const tools = Array.isArray(metadata.tool_names) ? metadata.tool_names.filter((x): x is string => typeof x === "string").slice(0, 100) : [];
+    const metadata = record(reg.metadata);
     const binding = safeBinding(json(await this.redis.get(`gptq:runtime-binding:${agent}`)));
     const operation = record(json(await this.redis.get(`gptq:activation:${agent}`)));
     const activation = { state: typeof operation.state === "string" ? operation.state : null, attempt: Number.isSafeInteger(operation.attempt) ? operation.attempt as number : null };
     const profile = await safeProfile(this.redis, agent);
-    const published = (typeof metadata.protocol_version === "string" || typeof metadata.protocol_version === "number") && tools.includes("get_runtime_status") && tools.includes("bind_runtime");
-    const readiness: ActivationReadiness = !online ? "offline" : binding !== null ? "bound_unverified" : !published ? "unknown_legacy" : "unbound";
+    const derived = deriveReadiness(online, binding, metadata);
+    // Display-only cap: published/readiness derive from the full tool list.
+    const tools = Array.isArray(metadata.tool_names) ? metadata.tool_names.filter((x): x is string => typeof x === "string").slice(0, 100) : [];
     const [queued, claimed, dead_lettered] = await Promise.all([this.redis.llen(SESSION_KEYS.queue(agent)), this.redis.zcard(CLAIM_KEYS.index(agent)), this.redis.llen(DLQ_KEYS.list(agent))]);
-    return Object.freeze({ name: agent, discovery, profile, capabilities: Object.freeze({ protocol_version: typeof metadata.protocol_version === "string" || typeof metadata.protocol_version === "number" ? String(metadata.protocol_version) : null, tool_names: Object.freeze(tools), published }), online, runtime_binding: binding, activation: Object.freeze(activation), readiness, activation_ready: readiness === "bound_unverified" ? null : false, queue: Object.freeze({ queued, claimed, dead_lettered }), evidence_at: at, snapshot: "bounded_non_atomic", next_action: readiness === "bound_unverified" ? "probe_exact_runtime_before_relying_on_activation" : readiness });
+    return Object.freeze({ name: agent, discovery, profile, capabilities: Object.freeze({ protocol_version: typeof metadata.protocol_version === "string" || typeof metadata.protocol_version === "number" ? String(metadata.protocol_version) : null, tool_names: Object.freeze(tools), published: derived.published }), online, runtime_binding: binding, activation: Object.freeze(activation), readiness: derived.readiness, activation_ready: derived.activation_ready, queue: Object.freeze({ queued, claimed, dead_lettered }), evidence_at: at, snapshot: "bounded_non_atomic", next_action: derived.readiness === "bound_unverified" ? "probe_exact_runtime_before_relying_on_activation" : derived.readiness });
   }
 
   async find(filters: Readonly<{ query?: string; client?: "codex" | "pi"; cwd?: string; working_directory?: string; kind?: AgentKind; activation_ready?: boolean; online?: boolean; limit?: number }> = {}) {
@@ -132,23 +164,9 @@ export class AgentDiagnostics {
         : null;
       const online = needOnline ? await this.isOnline(name) : false;
 
-      // readiness mirrors details(): derived from online, binding, and
-      // published metadata (all cheap here).
-      const tools = Array.isArray(metadata.tool_names)
-        ? metadata.tool_names.filter((x): x is string => typeof x === "string")
-        : [];
-      const published =
-        (typeof metadata.protocol_version === "string" ||
-          typeof metadata.protocol_version === "number") &&
-        tools.includes("get_runtime_status") && tools.includes("bind_runtime");
-      const readiness: ActivationReadiness = !online
-        ? "offline"
-        : binding !== null
-          ? "bound_unverified"
-          : !published
-            ? "unknown_legacy"
-            : "unbound";
-      const activationReady = readiness === "bound_unverified" ? null : false;
+      // D2: the SAME derivation details() uses — no second copy to drift.
+      const derived = deriveReadiness(online, binding, metadata);
+      const activationReady = derived.activation_ready;
 
       const text = [
         name,

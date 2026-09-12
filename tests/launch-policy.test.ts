@@ -211,6 +211,53 @@ describe("evaluateLaunchPolicy", () => {
     }
   });
 
+  it.each([
+    ["node", ["--eval=process.exit(1)"]],
+    ["node", ["-e=process.exit(1)"]],
+    ["node", ["-p", "process.exit(1)"]],
+    ["nodejs", ["-e", "process.exit(1)"]],
+    ["python", ["-cprint(1)"]],
+    ["python3", ["--command=import os"]],
+    ["perl", ["-E'say 1'"]],
+    ["php", ["-r", "exit(1);"]],
+    ["ruby", ["-e", "exit(1)"]],
+    ["awk", ["{ print }", "file.txt"]],
+    ["gawk", ["{ print }"]],
+  ])("rejects the inline-code spelling %s %s in any form (D1)", async (command, args) => {
+    const s = scaffoldLaunchAllowlist([
+      { command: command as string, allowed_args: [args as string[]] },
+    ]);
+    s.set();
+    try {
+      // Even an exact operator template for the hostile argv is refused:
+      // inline-code spellings are rejected regardless of the allowlist.
+      const res = await evaluateLaunchPolicy({
+        command: command as string,
+        args: args as string[],
+      });
+      expect(res).toMatchObject({ ok: false, error: { code: "launch_command_rejected" } });
+      if (!res.ok) expect(res.error.message).toMatch(/inline-code|dangerous delegator/);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  it("still admits non-interpreter commands carrying dash args (D1 negative control)", async () => {
+    const s = scaffoldLaunchAllowlist([
+      { command: "git", allowed_args: [["-c", "foo.bar=1", "status"]] },
+    ]);
+    s.set();
+    try {
+      const res = await evaluateLaunchPolicy({
+        command: "git",
+        args: ["-c", "foo.bar=1", "status"],
+      });
+      expect(res).toEqual({ ok: true });
+    } finally {
+      s.cleanup();
+    }
+  });
+
   it("rejects basename-colliding absolute paths against bare and absolute entries (F1)", async () => {
     const s = scaffoldLaunchAllowlist([
       { command: "node", allowed_args: [[]] },

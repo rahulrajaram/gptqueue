@@ -3,6 +3,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { Redis } from "ioredis";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { applyContinuity, prepareContinuity, runtimeMailboxKey } from "../src/core/mailbox-continuity.js";
+import { OCCUPANCY_SIGNALS } from "../src/core/occupancy-guard.js";
 import { restoreRuntimeMailbox } from "../src/registered-shell/runtime-mailbox.js";
 import type { RuntimeBinding } from "../src/registered-shell/runtime.js";
 import { flushTestKeys, assertNotLiveDb } from "./helpers/redis-test-utils.js";
@@ -169,49 +170,41 @@ describe("mailbox continuity operator API", () => {
   const wrapperKeyFor = (agent: string) =>
     `gptq:experimental-wrapper-claim:${createHash("sha256").update(agent).digest("hex")}`;
 
-  const OCCUPANCY_SIGNALS = [
-    {
-      name: "session lease",
-      inject: async (redis: Redis, target: string) => {
-        const sid = randomUUID();
-        await redis.sadd(SESSION_KEYS.agentSessions(target), sid);
-        await redis.set(SESSION_KEYS.lease(sid), "alive", "EX", 30);
-      },
+  // D5: the occupancy matrix is DERIVED from the shared guard table
+  // (core/occupancy-guard.ts). Adding a signal to the table without an
+  // injector here fails the completeness check; adding an injector without
+  // a table entry is flagged below the matrix.
+  const SIGNAL_INJECTORS: Record<string, (redis: Redis, target: string) => Promise<unknown>> = {
+    runtime_binding: (redis, target) => redis.set(`gptq:runtime-binding:${target}`, "bound"),
+    heartbeat: (redis, target) => redis.set(SESSION_KEYS.heartbeat(target), "alive", "EX", 30),
+    wrapper_claim: (redis, target) => redis.set(wrapperKeyFor(target), "claimed"),
+    live_session_lease: async (redis, target) => {
+      const sid = randomUUID();
+      await redis.sadd(SESSION_KEYS.agentSessions(target), sid);
+      await redis.set(SESSION_KEYS.lease(sid), "alive", "EX", 30);
     },
-    {
-      name: "heartbeat",
-      inject: async (redis: Redis, target: string) => {
-        await redis.set(SESSION_KEYS.heartbeat(target), "alive", "EX", 30);
-      },
-    },
-    {
-      name: "runtime binding",
-      inject: async (redis: Redis, target: string) => {
-        await redis.set(`gptq:runtime-binding:${target}`, "bound");
-      },
-    },
-    {
-      name: "wrapper claim",
-      inject: async (redis: Redis, target: string) => {
-        await redis.set(wrapperKeyFor(target), "claimed");
-      },
-    },
-    {
-      name: "claims-index (F5 divergence)",
-      inject: async (redis: Redis, target: string) => {
-        await redis.zadd(`gptq:claims-index:${target}`, 1, "stale-claim");
-      },
-    },
-  ] as const;
+    claims_index: (redis, target) => redis.zadd(`gptq:claims-index:${target}`, 1, "stale-claim"),
+  };
 
-  it.each(OCCUPANCY_SIGNALS)("operator path refuses a target with %s", async ({ inject }) => {
+  it("the injector map covers every signal in the shared guard table (D5)", () => {
+    for (const signal of OCCUPANCY_SIGNALS) {
+      expect(SIGNAL_INJECTORS[signal.name], `missing injector for guard-table signal '${signal.name}'`).toBeDefined();
+    }
+  });
+
+  const OCCUPANCY_INJECTORS = OCCUPANCY_SIGNALS.map((signal) => ({
+    name: signal.name,
+    inject: SIGNAL_INJECTORS[signal.name]!,
+  }));
+
+  it.each(OCCUPANCY_INJECTORS)("operator path refuses a target with %s", async ({ inject }) => {
     const { redis, canonical, b } = await setup();
     const plan = await prepareContinuity(redis, b, canonical);
     await inject(redis, canonical);
     await expect(applyContinuity(redis, plan)).rejects.toThrow();
   });
 
-  it.each(OCCUPANCY_SIGNALS)("runtime path refuses a target with %s", async ({ inject }) => {
+  it.each(OCCUPANCY_INJECTORS)("runtime path refuses a target with %s", async ({ inject }) => {
     const { redis, canonical, provisional, b } = await setup();
     await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
     const client = new RedisClient(null, redisUrl); clients.push(client);
@@ -255,6 +248,41 @@ describe("mailbox continuity operator API", () => {
     await expect(
       restoreRuntimeMailbox(client, { ...b, working_directory: "/workspace/./" })
     ).resolves.toBe(canonical);
+  });
+
+  // D6: runtime-path identity adoption must be audited on the same bounded
+  // stream the operator path uses — it is exactly the path with no human in
+  // the loop. Refusals must write nothing.
+  it("audits successful runtime adoption with source, target, and runtime_id (D6)", async () => {
+    const { redis, canonical, provisional, b } = await setup();
+    await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
+    const client = new RedisClient(null, redisUrl); clients.push(client);
+    await client.register("both", provisional);
+    const before = await redis.xlen("gptq:continuity-audit");
+    expect(before).toBe(0);
+
+    expect(await restoreRuntimeMailbox(client, b)).toBe(canonical);
+
+    expect(await redis.xlen("gptq:continuity-audit")).toBe(before + 1);
+    const [last] = await redis.xrevrange("gptq:continuity-audit", "+", "-", "COUNT", 1);
+    const fields = last?.[1] ?? [];
+    const entry: Record<string, string> = {};
+    for (let i = 0; i + 1 < fields.length; i += 2) entry[String(fields[i])] = String(fields[i + 1]);
+    expect(entry.event).toBe("runtime_continuity");
+    expect(entry.source).toBe(provisional);
+    expect(entry.target).toBe(canonical);
+    expect(entry.runtime_id).toBe(b.runtime_id);
+    expect(entry.session_id).toBe(client.sessionId);
+  });
+
+  it("a refused adoption writes no audit event (D6)", async () => {
+    const { redis, canonical, provisional, b } = await setup();
+    await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
+    const client = new RedisClient(null, redisUrl); clients.push(client);
+    await client.register("both", provisional);
+    await redis.rpush(SESSION_KEYS.queue(provisional), "queued");
+    await expect(restoreRuntimeMailbox(client, b)).rejects.toThrow();
+    expect(await redis.xlen("gptq:continuity-audit")).toBe(0);
   });
 
 });

@@ -27,6 +27,51 @@ describe("AgentDiagnostics", () => {
   it("preserves current queued location over historical acknowledgement", async () => { await redis.hset(SESSION_KEYS.registry, "worker", registry("worker")); await redis.rpush(SESSION_KEYS.queue("worker"), task("m4")); await redis.xadd("gptq:inbox-trace:worker", "*", "stage", "task_acknowledged", "timestamp", new Date().toISOString(), "message_id", "m4", "claim_id", "old"); expect((await diagnostics.delivery("worker", "m4")).status).toBe("queued"); });
   it("returns unknown_history after bounded history has no message", async () => { await redis.hset(SESSION_KEYS.registry, "worker", registry("worker")); const d = await diagnostics.delivery("worker", "never"); expect(d.status).toBe("unknown_history"); expect(d.snapshot).toBe("bounded_non_atomic"); });
 
+  // D2: find()'s cheap filter path must classify online/activation_ready
+  // EXACTLY as details() does — one shared derivation, verified across the
+  // four lifecycle states plus a >100-tool agent (the drift case).
+  it("find's online/activation_ready filters agree with details() for every state (D2)", async () => {
+    const publishedTools = ["claim_tasks", "get_runtime_status", "bind_runtime"];
+    await redis.hset(SESSION_KEYS.registry,
+      "offline-legacy", registry("offline-legacy"),
+      "online-legacy", registry("online-legacy"),
+      "online-published", registry("online-published", { protocol_version: "1", tool_names: publishedTools }),
+      "online-bound", registry("online-bound", { protocol_version: "1", tool_names: publishedTools }));
+    await redis.set(SESSION_KEYS.heartbeat("online-legacy"), "alive", "EX", 30);
+    await redis.set(SESSION_KEYS.heartbeat("online-published"), "alive", "EX", 30);
+    await redis.set(SESSION_KEYS.heartbeat("online-bound"), "alive", "EX", 30);
+    await redis.set("gptq:runtime-binding:online-bound", JSON.stringify({ client: "codex", runtime_id: "r1", epoch: "e1", working_directory: "/tmp/work" }));
+
+    for (const name of ["offline-legacy", "online-legacy", "online-published", "online-bound"]) {
+      const d = await diagnostics.details(name);
+      const readyMatches = await diagnostics.find({ activation_ready: true });
+      const notReadyMatches = await diagnostics.find({ activation_ready: false });
+      const onlineMatches = await diagnostics.find({ online: true });
+      expect(readyMatches.matches.map((m) => m.name).includes(name)).toBe(d.activation_ready === true);
+      expect(notReadyMatches.matches.map((m) => m.name).includes(name)).toBe(d.activation_ready === false);
+      expect(onlineMatches.matches.map((m) => m.name).includes(name)).toBe(d.online);
+    }
+    // The exact state ladder the agreement walk relies on.
+    expect((await diagnostics.details("offline-legacy")).readiness).toBe("offline");
+    expect((await diagnostics.details("online-legacy")).readiness).toBe("unknown_legacy");
+    expect((await diagnostics.details("online-published")).readiness).toBe("unbound");
+    expect((await diagnostics.details("online-bound")).readiness).toBe("bound_unverified");
+  });
+
+  it("published derives from the full tool list; the 100-cap is display-only (D2)", async () => {
+    const many = Array.from({ length: 150 }, (_, i) => `tool-${i}`);
+    many[140] = "get_runtime_status";
+    many[141] = "bind_runtime";
+    await redis.hset(SESSION_KEYS.registry, "wide", registry("wide", { protocol_version: "1", tool_names: many }));
+    await redis.set(SESSION_KEYS.heartbeat("wide"), "alive", "EX", 30);
+    const d = await diagnostics.details("wide");
+    // Both paths agree the agent is published (required tools past index 99),
+    // while the displayed tool_names stay capped.
+    expect(d.readiness).toBe("unbound");
+    expect(d.capabilities.published).toBe(true);
+    expect(d.capabilities.tool_names).toHaveLength(100);
+    expect((await diagnostics.find({ online: true })).total_matches).toBe(1);
+  });
   // F7: the expensive per-agent diagnostics run only for the returned page
   // while total_matches still counts every registry name, so a large
   // registry cannot trigger an unbounded full-diagnostics fan-out.
