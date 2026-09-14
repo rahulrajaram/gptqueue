@@ -5,7 +5,7 @@ import { Redis } from "ioredis";
 import { describe, expect, it } from "vitest";
 import { SESSION_KEYS } from "../src/core/keys.js";
 
-const launch = (url = "redis://127.0.0.1:6379/15") => {
+const launch = (url = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15") => {
   const child = spawn(process.execPath, [resolve("bin/gptqueue-session"), "--client", "codex", "--redis-url", url], { stdio: "pipe" });
   let stderr = "";
   const done = new Promise<{ code: number | null; signal: string | null }>((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
@@ -33,7 +33,7 @@ const launch = (url = "redis://127.0.0.1:6379/15") => {
 describe("registered stdio process lifetime", () => {
   it.each([{ event: "EOF", code: 0 }, { event: "SIGINT", code: 130 }, { event: "SIGTERM", code: 143 }] as const)(
     "retires its session on $event and exits $code", async ({ event, code }) => {
-      const redis = new Redis("redis://127.0.0.1:6379/15");
+      const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15");
       const job = launch(); let name: string | undefined;
       try {
         name = await job.ready;

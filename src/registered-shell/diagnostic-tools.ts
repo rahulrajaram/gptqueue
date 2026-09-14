@@ -12,6 +12,12 @@ export const agentProfileSchema = z.object({
   purpose: z.string().trim().min(1).max(500),
   kind: z.enum(["controller", "worker", "interactive", "unknown"]),
 }).strict();
+export const findAgentsSchema = z.object({ query: z.string().max(200).optional(), client: z.enum(["codex", "pi"]).optional(),
+  working_directory: z.string().max(4096).optional(), kind: agentProfileSchema.shape.kind.optional(),
+  online: z.boolean().optional(), activation_ready: z.boolean().optional(), limit: z.number().int().min(1).max(100).default(50),
+}).strict();
+export const agentDetailsSchema = z.object({ agent: z.string().min(1).max(500).optional(), probe: z.boolean().default(false) }).strict();
+export const deliveryStatusSchema = agentDetailsSchema.extend({ message_id: z.string().min(1).max(200) }).strict();
 
 /** Additive tools: original messaging/discovery schemas retain their contracts. */
 export const registerDiagnosticTools = (server: McpServer, client: RedisClient, runtime: RuntimeTools): void => {
@@ -20,15 +26,10 @@ export const registerDiagnosticTools = (server: McpServer, client: RedisClient, 
     try { return toolResult(await work() as Record<string, unknown>); }
     catch (error) { return stableToolError(error); }
   };
-  const find = z.object({ query: z.string().max(200).optional(), client: z.enum(["codex", "pi"]).optional(),
-    working_directory: z.string().max(4096).optional(), kind: agentProfileSchema.shape.kind.optional(),
-    online: z.boolean().optional(), activation_ready: z.boolean().optional(), limit: z.number().int().min(1).max(100).default(50),
-  }).strict();
   server.tool("find_agents", "[safety: readonly] Find exact agent candidates by declared purpose and identity. Ambiguous matches are never routed automatically; online does not imply activation readiness.",
-    find.shape, params => safe(() => diagnostics.find(find.parse(params))));
-  const details = z.object({ agent: z.string().min(1).max(500).optional(), probe: z.boolean().default(false) }).strict();
+    findAgentsSchema.shape, params => safe(() => diagnostics.find(findAgentsSchema.parse(params))));
   server.tool("get_agent_details", "[safety: readonly] Inspect an exact mailbox, runtime binding, published capabilities, declared role and activation readiness. Omit agent for this connection. No message content or credentials.",
-    details.shape, params => safe(async () => {
+    agentDetailsSchema.shape, params => safe(async () => {
       const agent = params.agent ?? client.requireRegistered();
       const observed = await diagnostics.details(agent);
       if (agent === client.requireRegistered()) {
@@ -50,9 +51,8 @@ export const registerDiagnosticTools = (server: McpServer, client: RedisClient, 
       } catch { return { ...observed, activation_ready: null, readiness_evidence: "probe_unavailable" }; }
       finally { await rpc.close(); }
     }));
-  const delivery = details.extend({ message_id: z.string().min(1).max(200) }).strict();
   server.tool("get_delivery_status", "[safety: readonly] Inspect one message's queue, claim, acknowledgement or dead-letter evidence without consuming it. Missing retained evidence means unknown, not delivered.",
-    delivery.shape, params => safe(() => diagnostics.delivery(params.agent ?? client.requireRegistered(), params.message_id)));
+    deliveryStatusSchema.shape, params => safe(() => diagnostics.delivery(params.agent ?? client.requireRegistered(), params.message_id)));
   server.tool("set_agent_profile", "[safety: writable] Declare this connection's readable label, purpose and kind. A declaration is a discovery hint, never proof of controller authority or permission to take over another mailbox.",
     agentProfileSchema.shape, params => safe(async () => {
       const profile = Object.freeze({ ...agentProfileSchema.parse(params), declaration_source: "self", updated_at: new Date().toISOString() });

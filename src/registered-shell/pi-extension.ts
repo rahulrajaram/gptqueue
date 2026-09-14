@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { createPiRuntime, type PiRuntimeHost } from "./pi-runtime.js";
 import type { ActivationRequest, ActivationOutcome, RuntimeBinding } from "./runtime.js";
 import { runtimeBindingSchema } from "./runtime.js";
@@ -77,7 +78,7 @@ export const validateCatalog = (catalog: { tools?: CatalogTool[] }, runtimeEnabl
 };
 
 export const createPiExtension = (
-  makeClient: (signal: AbortSignal) => Promise<SessionClient>, timeout = STARTUP_TIMEOUT_MS,
+  makeClient: (signal: AbortSignal, context?: PiContext) => Promise<SessionClient>, timeout = STARTUP_TIMEOUT_MS,
   options: { readonly runtimeEnabled?: boolean } = {}
 ) => async (pi: PiAPI): Promise<void> => {
   let client: SessionClient | undefined;
@@ -85,6 +86,7 @@ export const createPiExtension = (
   let binding: RuntimeBinding | undefined;
   let context: PiContext | undefined;
   let instructions = "";
+  const registered = new Set<string>();
   const expected: readonly string[] = options.runtimeEnabled ? [...GPTQUEUE_TOOLS, ...REQUIRED_RUNTIME_TOOLS] : GPTQUEUE_TOOLS;
   const close = async () => {
     runtime?.invalidate(); runtime = undefined; binding = undefined;
@@ -99,7 +101,7 @@ export const createPiExtension = (
   };
   const connect = async () => {
     if (!client) client = await withTimeout(async (signal) => {
-      const connected = await makeClient(signal);
+      const connected = await makeClient(signal, context);
       if (signal.aborted) { await connected.close(); throw new Error("GPTQueue startup aborted"); }
       return connected;
     }, timeout);
@@ -108,13 +110,31 @@ export const createPiExtension = (
     if (!instructions.trim()) throw new Error("GPTQueue server instructions are missing or empty");
     return catalog;
   };
+  const registerCatalog = (catalog: readonly BoundTool[]) => {
+    for (const definition of catalog) {
+      if (registered.has(definition.name)) continue;
+      registered.add(definition.name);
+      pi.registerTool({
+        name: definition.name, label: `GPTQueue ${definition.name}`,
+        description: definition.description ?? `GPTQueue ${definition.name}`, parameters: definition.inputSchema,
+        async execute(_id, params, signal) {
+          if (!client) throw new Error("Pi GPTQueue session is not connected");
+          const result = await client.callTool({ name: definition.name, arguments: params }, undefined, { signal });
+          const content = result.content.filter((item): item is { type: "text"; text: string } => item.type === "text");
+          if (result.isError) throw new Error(content.map((item) => item.text).join("\n") || "GPTQueue tool failed");
+          return { content, details: result };
+        },
+      });
+    }
+  };
   const startRuntime = async (current: PiContext) => {
     context = current;
     if (!options.runtimeEnabled) return;
-    if (!current.cwd || !current.sessionManager.getSessionId() || !pi.sendMessage) throw new Error("Pi session identity or native message API unavailable");
+    if (!current.cwd || !isAbsolute(current.cwd) || !current.sessionManager.getSessionId() || !pi.sendMessage) throw new Error("Pi session identity or native message API unavailable");
     if (binding?.runtime_id === current.sessionManager.getSessionId() && runtime && client) return;
     if (binding) await close();
-    await connect();
+    const catalog = await connect();
+    registerCatalog(catalog);
     const session = client!;
     if (!session.setActivationHandler) throw new Error("Pi activation request transport unavailable");
     binding = Object.freeze({ client: "pi", runtime_id: current.sessionManager.getSessionId(), epoch: randomUUID(), working_directory: current.cwd });
@@ -135,25 +155,15 @@ export const createPiExtension = (
     if (result.isError || result.structuredContent?.activation_ready !== true) throw new Error("Pi inbox activation binding failed");
   };
   try {
-    for (const definition of await connect()) {
-      pi.registerTool({
-        name: definition.name, label: `GPTQueue ${definition.name}`,
-        description: definition.description ?? `GPTQueue ${definition.name}`, parameters: definition.inputSchema,
-        async execute(_id, params, signal) {
-          if (!client) throw new Error("Pi GPTQueue session is not connected");
-          const result = await client.callTool({ name: definition.name, arguments: params }, undefined, { signal });
-          const content = result.content.filter((item): item is { type: "text"; text: string } => item.type === "text");
-          if (result.isError) throw new Error(content.map((item) => item.text).join("\n") || "GPTQueue tool failed");
-          return { content, details: result };
-        },
-      });
-    }
+    if (!options.runtimeEnabled) registerCatalog(await connect());
     pi.on("before_agent_start", async (event) => {
       try {
-        await connect();
-        if (options.runtimeEnabled && !runtime) {
+        if (options.runtimeEnabled) {
           if (!context) throw new Error("Pi session_start has not supplied runtime identity");
-          await startRuntime(context);
+          if (!runtime) await startRuntime(context);
+          await connect();
+        } else {
+          await connect();
         }
         const active = pi.getActiveTools();
         const missing = expected.filter((name) => !active.includes(name));
@@ -186,10 +196,12 @@ export const createPiExtension = (
 
 export const createRegisteredPiExtension = (options: {
   readonly redisUrl: string; readonly nodePath?: string; readonly sidecarPath?: string;
-}) => createPiExtension(async (signal) => {
+}) => createPiExtension(async (signal, context) => {
   if (!options.redisUrl) throw new Error("An explicit GPTQueue Redis URL is required");
+  if (!context || typeof context.cwd !== "string" || !isAbsolute(context.cwd)) throw new Error("An absolute Pi host cwd is required");
   const transport = new StdioClientTransport({
     command: options.nodePath ?? process.execPath,
+    cwd: context.cwd,
     args: [options.sidecarPath ?? fileURLToPath(new URL("../../bin/gptqueue-session", import.meta.url)),
       "--client", "pi", "--redis-url", options.redisUrl],
   });

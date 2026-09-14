@@ -1,3 +1,4 @@
+import { isAbsolute, resolve } from "node:path";
 import type { RuntimeAdapter, RuntimeBinding } from "./runtime.js";
 
 type Entry = { type?: string; customType?: string; data?: unknown; message?: { role?: string; customType?: unknown; details?: unknown } };
@@ -19,7 +20,8 @@ export const createPiRuntime = (binding: RuntimeBinding, host: PiRuntimeHost): R
   const current = () => {
     const context = host.getContext();
     return context.sessionManager.getSessionId() === binding.runtime_id &&
-      context.cwd === binding.working_directory && (!host.getEpoch || host.getEpoch() === binding.epoch);
+      typeof context.cwd === "string" && isAbsolute(context.cwd) && isAbsolute(binding.working_directory) &&
+      resolve(context.cwd) === resolve(binding.working_directory) && (!host.getEpoch || host.getEpoch() === binding.epoch);
   };
   const recorded = (operationId: string): false | "queued" | { completed: string } => {
     const entries = host.getContext().sessionManager.getEntries?.() ?? [];

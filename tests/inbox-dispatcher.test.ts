@@ -7,7 +7,7 @@ import { TaskClaimStore } from "../src/core/task-claim-store.js";
 import { startInboxDispatcher } from "../src/registered-shell/inbox-dispatcher.js";
 import type { RuntimeAdapter, RuntimeBinding } from "../src/registered-shell/runtime.js";
 
-const url = "redis://127.0.0.1:6379/15";
+const url = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 const redis = new Redis(url);
 const live: Array<{ agent: string; dispatcher: Awaited<ReturnType<typeof startInboxDispatcher>> }> = [];
 const owned = new Set<string>();
@@ -50,6 +50,7 @@ describe("inbox dispatcher", () => {
     expect(requests[0]?.recover_only).toBe(false);
     await eventually(async () => secondCalls.length >= 1);
     expect(secondCalls.every((request) => request.recover_only === true)).toBe(true);
+    expect(secondCalls[0]?.operation_id).toBe(requests[0]?.operation_id);
     expect(secondCalls[0]?.recover_only).toBe(true);
     expect(await old.close()).toBeUndefined();
   });

@@ -14,6 +14,15 @@ nine bound tools: `send_message`, `receive_message`, `list_agents`,
 `bind_runtime`, and `get_runtime_status`. The connection supplies its session internally. There is no
 need for the model to call `register_agent` or pass a session ID.
 
+When an owned Codex app-server is started with `codex app-server --listen
+unix://PATH`, set `GPTQUEUE_CODEX_APP_SERVER_SOCKET=PATH` in every GPTQueue
+process that must reach it. This includes both the Codex hook command and the
+registered-shell sidecar process. The value is read when each
+`CodexSocketClient` is constructed and affects only that process; it does not
+change Codex global configuration or start a daemon. If unset, the integration
+uses Codex's managed `$CODEX_HOME/app-server-control/app-server-control.sock`
+endpoint.
+
 ## Agent labels and discovery
 
 `list_agents({})` returns each agent's readable `label` alongside its exact

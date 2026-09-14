@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { startRegisteredShell, shellAgentName, parseRegisteredShellArgs } from "../src/registered-shell/server.js";
 
-const URL15 = "redis://127.0.0.1:6379/15";
+const URL15 = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 const active: Array<any> = [];
 const json = (result: any) => JSON.parse(result.content[0].text);
 afterEach(async () => { await Promise.all(active.splice(0).map(async ({ shell, client, peer, redis }) => { await shell.close(); await client.close(); await peer.close(); await redis.hdel(SESSION_KEYS.registry, shell.agentName); await redis.del(SESSION_KEYS.queue(shell.agentName), SESSION_KEYS.agent(shell.agentName), SESSION_KEYS.mailboxMeta(shell.agentName), SESSION_KEYS.heartbeat(shell.agentName), SESSION_KEYS.agentSessions(shell.agentName)); await redis.quit(); })); });
@@ -61,23 +61,23 @@ describe("registered shell boundaries", () => {
 
   it("aborts a pending receive without losing a later message", async () => {
     const { shell, client, redis } = await connected();
-    const before = new Set((await redis.client("LIST")).split("\n").filter(Boolean).map((line) => line.match(/(?:^| )id=(\d+)/u)?.[1]).filter((id): id is string => Boolean(id)));
+    const before = new Set((await redis.client("LIST") as string).split("\n").filter(Boolean).map((line: string) => line.match(/(?:^| )id=(\d+)/u)?.[1]).filter((id): id is string => Boolean(id)));
     const abort = new AbortController();
     const pending = client.callTool({ name: "receive_message", arguments: { timeout: 30 } }, undefined, { signal: abort.signal }).catch((error) => error);
     let blocking = new Set<string>();
     await vi.waitFor(async () => {
-      const clients = (await redis.client("LIST")).split("\n").filter(Boolean);
+      const clients = (await redis.client("LIST") as string).split("\n").filter(Boolean);
       blocking = new Set(clients
         .filter((line) => line.includes(" db=15 ") && line.includes(" cmd=blpop "))
         .map((line) => line.match(/(?:^| )id=(\d+)/u)?.[1])
-        .filter((id): id is string => Boolean(id) && !before.has(id)));
+        .filter((id): id is string => typeof id === "string" && !before.has(id)));
       expect(blocking.size).toBeGreaterThan(0);
     }, { timeout: 2_000, interval: 10 });
     abort.abort();
     expect(await pending).toBeInstanceOf(Error);
     await vi.waitFor(async () => {
-      const clients = (await redis.client("LIST")).split("\n").filter(Boolean);
-      const activeIds = new Set(clients.map((line) => line.match(/(?:^| )id=(\d+)/u)?.[1]).filter((id): id is string => Boolean(id)));
+      const clients = (await redis.client("LIST") as string).split("\n").filter(Boolean);
+      const activeIds = new Set(clients.map((line: string) => line.match(/(?:^| )id=(\d+)/u)?.[1]).filter((id): id is string => Boolean(id)));
       expect([...blocking].some((id) => activeIds.has(id))).toBe(false);
     }, { timeout: 2_000, interval: 10 });
     const sent = json(await client.callTool({ name: "send_message", arguments: { to: shell.agentName, content: "after-abort" } }));

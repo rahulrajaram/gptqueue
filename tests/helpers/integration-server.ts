@@ -60,7 +60,10 @@ writeFileSync(
 
 // ---- Constants (kept together so the isolation story is auditable) -------
 export const INTEGRATION_PORT = 8199;
-export const INTEGRATION_REDIS_URL = "redis://127.0.0.1:6379/15";
+export const INTEGRATION_REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+if (new URL(INTEGRATION_REDIS_URL).pathname !== "/15") {
+  throw new Error("GPTQueue integration tests require isolated Redis database 15");
+}
 const BASE = `http://127.0.0.1:${INTEGRATION_PORT}/mcp`;
 const HEALTH = `http://127.0.0.1:${INTEGRATION_PORT}/health`;
 const ROOT = new URL("../..", import.meta.url).pathname;
@@ -102,7 +105,7 @@ type Glob = typeof globalThis & { [GLOBAL_KEY]?: Singleton };
 /** Scan-based deletion of gptq:* keys on a given client + db. Never FLUSHDB. */
 export async function flushGptqKeys(redis: Redis): Promise<void> {
   // Route through the shared guarded flush. The integration server is
-  // hardwired to db15, so the db0 guard always passes here; keeping the call
+  // constrained to db15, so the db0 guard always passes here; keeping the call
   // in one place guarantees this helper can never be pointed at the live
   // server's database by accident (M11).
   await flushTestKeys(redis, INTEGRATION_REDIS_URL);

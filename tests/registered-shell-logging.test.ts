@@ -9,7 +9,7 @@ import { Redis } from "ioredis";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { startRegisteredShell, type RegisteredShellHandle } from "../src/registered-shell/server.js";
 
-const REDIS_URL = "redis://127.0.0.1:6379/15";
+const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 const dirs: string[] = [];
 const removeOwned = async (redis: Redis, agent: string) => {
   await redis.hdel(SESSION_KEYS.registry, agent);
