@@ -25,4 +25,19 @@ describe("runtime binding contract", () => {
     expect(inboxPrompt("agent", "operation")).toContain("claim_tasks");
     expect(inboxPrompt("agent", "operation")).toContain("Do not acknowledge unfinished work");
   });
+
+  it("specifies reply message types so a completed task is not sent as a new task", () => {
+    const prompt = inboxPrompt("agent", "operation");
+    expect(prompt).toContain("send_message");
+    expect(prompt).toContain('type: "result"');
+    expect(prompt).toContain('type: "error"');
+    expect(prompt).toContain("in_reply_to");
+  });
+
+  it.each([{ client: "pi" }, { runtime_id: "runtime-2" }])("separates activation identity for binding %j", changed => {
+    const original = runtimeBindingSchema.parse(binding());
+    const other = runtimeBindingSchema.parse(binding(changed));
+    expect(activationOperationId("agent", other, ["message"], 1))
+      .not.toBe(activationOperationId("agent", original, ["message"], 1));
+  });
 });

@@ -1,6 +1,6 @@
 import type { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
-import type { RuntimeBinding } from "./runtime.js";
+import type { RuntimeIdentity } from "./runtime.js";
 
 export type ActivationRecord = Readonly<{
   operation_id: string;
@@ -20,7 +20,7 @@ export class ActivationStore {
 
   constructor(private readonly redis: Redis, readonly agent: string) {}
 
-  async attach(binding: RuntimeBinding): Promise<void> {
+  async attach(binding: RuntimeIdentity): Promise<void> {
     const owner = JSON.stringify({ ...binding, token: this.token });
     if (await this.redis.set(bindingKey(this.agent), owner, "EX", 30, "NX") !== "OK") {
       throw new Error("Runtime inbox already has a live dispatcher");

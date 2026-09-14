@@ -54,7 +54,7 @@ const bearerFrom = (authorization: string | undefined): string | null => {
 };
 
 const boundSendMessageSchema = sendMessageSchema.omit({ session_id: true });
-const boundReceiveMessageSchema = receiveMessageSchema
+export const boundReceiveMessageSchema = receiveMessageSchema
   .omit({ session_id: true })
   .extend({
     timeout: z

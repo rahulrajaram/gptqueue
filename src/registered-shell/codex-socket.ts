@@ -7,6 +7,16 @@ const MAX_MESSAGE = 16 * 1024 * 1024;
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 type Pending = Readonly<{ resolve(value: Record<string, unknown>): void; reject(error: Error): void }>;
 
+/**
+ * Resolve the app-server control endpoint once per client construction. The
+ * override is intentionally process-local so an owned acceptance app-server
+ * can be selected without changing Codex global configuration.
+ */
+export const defaultCodexSocketPath = (): string => {
+  const configured = process.env.GPTQUEUE_CODEX_APP_SERVER_SOCKET?.trim();
+  return configured || join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-control", "app-server-control.sock");
+};
+
 const frame = (payload: Buffer, opcode = 1): Buffer => {
   if (payload.length > MAX_MESSAGE) throw new Error("Codex message exceeds size limit");
   const mask = randomBytes(4);
@@ -32,7 +42,7 @@ export class CodexSocketClient {
   private closed = false;
 
   constructor(
-    private readonly path = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-control", "app-server-control.sock"),
+    private readonly path = defaultCodexSocketPath(),
     private readonly timeoutMs = 10_000,
   ) {}
 
@@ -134,6 +144,8 @@ export class CodexSocketClient {
       const message = JSON.parse(Buffer.concat(this.fragments).toString("utf8")) as Record<string, unknown>;
       this.fragments = []; this.fragmentBytes = 0;
       if (typeof message.id !== "number") continue; // Unsubscribed notifications are intentionally not buffered.
+      if (typeof message.method === "string") continue; // Server requests are not client responses; never auto-approve them.
+      if (!Object.prototype.hasOwnProperty.call(message, "result") && !Object.prototype.hasOwnProperty.call(message, "error")) continue;
       const pending = this.pending.get(message.id);
       if (!pending) continue;
       if (message.error) pending.reject(new Error(`Codex RPC rejected: ${JSON.stringify(message.error)}`));
