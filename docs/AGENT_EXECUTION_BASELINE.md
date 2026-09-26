@@ -48,16 +48,16 @@ rejection signature under `never` and the remedy under `approve` — run it
 after any codex upgrade, since upstream enum/key changes are the main
 drift risk.
 
-## Required keys (linted)
+## Required keys
 
-| Key | Value | Tier | Why |
-|---|---|---|---|
-| `sandbox_mode` | `workspace-write` | base | headless builds/tests need writes without escalation |
-| `sandbox_workspace_write.network_access` | `true` | base | loopback LLM gateway, MCP servers, package installs |
-| `mcp_servers."gptqueue-shared".default_tools_approval_mode` | `approve` | base | peer lookup + messaging usable under any approval policy |
-| `projects.<path>.trust_level` | `trusted` | base | no per-project trust prompts for known trees |
-| `$CODEX_HOME/sandbox-auto.config.toml` | exists | sandbox | automation tier |
-| `$CODEX_HOME/sandbox-max.config.toml` | exists | sandbox | VM-contained maximum liberty tier |
+| Key | Value | Tier | Verified by | Why |
+|---|---|---|---|---|
+| `sandbox_mode` | `workspace-write` | base | `doctor config` | headless builds/tests need writes without escalation |
+| `sandbox_workspace_write.network_access` | `true` | base | `doctor config` | loopback LLM gateway, MCP servers, package installs |
+| `mcp_servers."gptqueue-shared".default_tools_approval_mode` | `approve` | base | `doctor config` | peer lookup + messaging usable under any approval policy |
+| `projects.<path>.trust_level` | `trusted` | base | manual | no per-project trust prompts for known trees |
+| `$CODEX_HOME/sandbox-auto.config.toml` | exists | sandbox | `doctor config --tier sandbox-auto` | automation tier |
+| `$CODEX_HOME/sandbox-max.config.toml` | exists | sandbox | `doctor config --tier sandbox-max` | VM-contained maximum liberty tier |
 
 `sandbox-max` is legal only where execution is already VM-contained; a
 bare host must not carry it.
