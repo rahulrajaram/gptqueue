@@ -20,6 +20,7 @@ export interface OccupancySignal {
 export const OCCUPANCY_SIGNALS: ReadonlyArray<OccupancySignal> = [
   {
     name: "runtime_binding",
+    // Lua cannot call TS: this literal must stay in sync with SESSION_KEYS.runtimeBinding (src/core/keys.ts).
     lua: "if redis.call('EXISTS','gptq:runtime-binding:'..agent) == 1 then return true end",
   },
   {

@@ -40,7 +40,7 @@ const now = () => new Date().toISOString();
  * `published` basis); `published` is now computed from the UNSLICED tool
  * list in both paths — the 100-cap is display-only (capabilities.tool_names).
  */
-export const deriveReadiness = (
+const deriveReadiness = (
   online: boolean,
   binding: Readonly<{ client: string; runtime_id: string; epoch: string; working_directory: string }> | null,
   metadata: Readonly<Record<string, unknown>>
@@ -115,7 +115,7 @@ export class AgentDiagnostics {
     const online = await this.isOnline(agent);
     const discovery = discoveryRecord({ name: agent, role: typeof reg.role === "string" ? reg.role : "unknown", description: typeof reg.description === "string" ? reg.description : undefined, online, registered_at: reg.registered_at, pid: reg.pid, metadata: reg.metadata });
     const metadata = record(reg.metadata);
-    const binding = safeBinding(json(await this.redis.get(`gptq:runtime-binding:${agent}`)));
+    const binding = safeBinding(json(await this.redis.get(SESSION_KEYS.runtimeBinding(agent))));
     const operation = record(json(await this.redis.get(`gptq:activation:${agent}`)));
     const activation = { state: typeof operation.state === "string" ? operation.state : null, attempt: Number.isSafeInteger(operation.attempt) ? operation.attempt as number : null };
     const profile = await safeProfile(this.redis, agent);
@@ -160,7 +160,7 @@ export class AgentDiagnostics {
         ? record(json(await this.redis.get(`gptq:agent-profile:${name}`)))
         : {};
       const binding = needBinding
-        ? safeBinding(json(await this.redis.get(`gptq:runtime-binding:${name}`)))
+        ? safeBinding(json(await this.redis.get(SESSION_KEYS.runtimeBinding(name))))
         : null;
       const online = needOnline ? await this.isOnline(name) : false;
 

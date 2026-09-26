@@ -12,7 +12,7 @@ import { z } from "zod";
 export const GPTQUEUE_TOOLS = ["send_message", "receive_message", "list_agents", "get_queue_status"] as const;
 export const RUNTIME_TOOL_NAMES = ["claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] as const;
 const REQUIRED_RUNTIME_TOOLS = RUNTIME_TOOL_NAMES.slice(0, 5);
-export const STARTUP_TIMEOUT_MS = 10_000;
+const STARTUP_TIMEOUT_MS = 10_000;
 type CatalogTool = { name?: string; description?: string; inputSchema?: unknown };
 type BoundTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
 type ToolDefinition = {

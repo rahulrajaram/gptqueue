@@ -17,7 +17,7 @@ export const runtimeMailboxKey = (binding: RuntimeBinding): string =>
   `gptq:runtime-mailbox:${createHash("sha256").update(JSON.stringify([binding.client, binding.runtime_id])).digest("hex")}`;
 const fingerprint = (raw: string | null): string => createHash("sha256").update(raw ?? "<missing>").digest("hex");
 const namespace = (redis: Redis): string => fingerprint(JSON.stringify([redis.options.host, redis.options.port, redis.options.path, redis.options.db]));
-export const continuityPlanSchema = z.object({
+const continuityPlanSchema = z.object({
   binding: runtimeBindingSchema, source: z.string().min(1).nullable(), target: z.string().min(1).max(500),
   mappingKey: z.string().min(1), expectedMapping: z.string().nullable(), namespace: z.string(),
   sourceFingerprint: z.string(), targetFingerprint: z.string(), legacy_adoption: z.boolean(),

@@ -28,7 +28,7 @@ const client = (value: unknown): "codex" | "pi" | null =>
 const directory = (value: unknown): string | null =>
   typeof value === "string" && value.startsWith("/") ? value : null;
 
-export const discoveryMetadata = (
+const discoveryMetadata = (
   name: string,
   metadata?: unknown
 ): AgentDiscoveryMetadata => {

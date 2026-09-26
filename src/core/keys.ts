@@ -29,6 +29,9 @@ export const SESSION_KEYS = {
   /** TTL-backed legacy liveness heartbeat per agent (string with EX). */
   heartbeat: (name: string) => `gptq:heartbeat:${name}`,
 
+  /** Live runtime binding record for an agent (string with EX). */
+  runtimeBinding: (agent: string) => `gptq:runtime-binding:${agent}`,
+
   /** Retry-deduplication namespace; individual keys expire after 24 hours. */
   idempotency: (sender: string) => `gptq:idempotency:${sender}`,
 } as const;

@@ -10,8 +10,7 @@ import { AgentDiagnostics } from "../core/agent-diagnostics.js";
 const READ_ONLY = { readOnlyHint: true } as const;
 const WRITABLE = { readOnlyHint: false } as const;
 
-export const DIAGNOSTIC_TOOL_NAMES = ["find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] as const;
-export const agentProfileSchema = z.object({
+const agentProfileSchema = z.object({
   label: z.string().trim().min(1).max(120),
   purpose: z.string().trim().min(1).max(500),
   kind: z.enum(["controller", "worker", "interactive", "unknown"]),

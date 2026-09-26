@@ -100,7 +100,7 @@ export type LaunchPolicyDecision =
  * choose an arbitrary program, so they are rejected unconditionally (whether
  * or not the operator allowlisted them).
  */
-export const DANGEROUS_SHELL_BASENAMES: ReadonlySet<string> = new Set([
+const DANGEROUS_SHELL_BASENAMES: ReadonlySet<string> = new Set([
   "sh",
   "bash",
   "zsh",
@@ -120,7 +120,7 @@ export const DANGEROUS_SHELL_BASENAMES: ReadonlySet<string> = new Set([
  * channel. Operators who need scripted behavior point the interpreter at a
  * fixed script FILE instead.
  */
-export const DANGEROUS_INTERPRETER_BASENAMES: ReadonlySet<string> = new Set([
+const DANGEROUS_INTERPRETER_BASENAMES: ReadonlySet<string> = new Set([
   "node",
   "nodejs",
   "deno",
@@ -140,14 +140,14 @@ export const DANGEROUS_INTERPRETER_BASENAMES: ReadonlySet<string> = new Set([
  * element — every invocation executes an argv-supplied string, so no flag
  * predicate can make it safe. Rejected unconditionally, like shells (D1).
  */
-export const DANGEROUS_AWK_BASENAMES: ReadonlySet<string> = new Set([
+const DANGEROUS_AWK_BASENAMES: ReadonlySet<string> = new Set([
   "awk",
   "gawk",
   "mawk",
 ]);
 
 /** Detached inline-code flags that make an interpreter execute an argv string. */
-export const DANGEROUS_INTERPRETER_ARGS: ReadonlySet<string> = new Set([
+const DANGEROUS_INTERPRETER_ARGS: ReadonlySet<string> = new Set([
   "-e",
   "--eval",
   "-c",
@@ -165,13 +165,13 @@ export const DANGEROUS_INTERPRETER_ARGS: ReadonlySet<string> = new Set([
  * previously matched only exact detached tokens, so `--eval=x` and `-cfoo`
  * bypassed the documented unconditional rejection.
  */
-export const isInlineCodeArg = (arg: string): boolean =>
+const isInlineCodeArg = (arg: string): boolean =>
   DANGEROUS_INTERPRETER_ARGS.has(arg) ||
   /^--(eval|print|command)=/.test(arg) ||
   /^-[ecEpr].+/.test(arg);
 
 /** Path of the operator allowlist file, overridable for tests. */
-export const allowlistFilePath = (): string =>
+const allowlistFilePath = (): string =>
   process.env.GPTQUEUE_LAUNCH_ALLOWLIST?.trim() ||
   ".gptqueue/launch-allowlist.json";
 
@@ -181,7 +181,7 @@ export const allowlistFilePath = (): string =>
  * matching is conservative — it over-rejects aliases, never under-rejects.
  * Admission (`commandMatches`) never aliases by basename.
  */
-export const normalizeCommand = (command: string): string =>
+const normalizeCommand = (command: string): string =>
   basename(command);
 
 /**
@@ -237,7 +237,7 @@ export const launchMatchesConfig = (
  * deliberately no args clause (D9: the previous second disjunct re-tested
  * the same set membership and could never fire).
  */
-export const isDangerousDelegator = (command: string): boolean =>
+const isDangerousDelegator = (command: string): boolean =>
   DANGEROUS_SHELL_BASENAMES.has(normalizeCommand(command).toLowerCase());
 
 /**
@@ -248,7 +248,7 @@ export const isDangerousDelegator = (command: string): boolean =>
  * an arbitrary-code channel even under an exact-template grant, because the
  * executed string is only as trustworthy as whoever authored the registration.
  */
-export const isDangerousInterpreter = (
+const isDangerousInterpreter = (
   command: string,
   args: readonly string[]
 ): boolean => {
@@ -298,7 +298,7 @@ export const launchCwdIsConfined = async (
  * Load and parse the operator allowlist file (fail-closed: absent or
  * unparseable yields a non-loaded result).
  */
-export const loadLaunchAllowlist = async (): Promise<AllowlistLoad> => {
+const loadLaunchAllowlist = async (): Promise<AllowlistLoad> => {
   const path = allowlistFilePath();
   let raw: string;
   try {

@@ -66,6 +66,19 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | `dlq_status` | List the calling agent's dead-letter queue (DLQ) entries, newest first. A message is dead-lettered after it has been recovered (re-queued) more than `RECOVER_CAP` times without an acknowledge, so a perpetually failing message cannot loop through lazy recovery forever. Supports an optional `limit` (default 50, range 1–1000) |
 | `dlq_requeue` | Move one dead-lettered message (by `message_id` from `dlq_status`) from the calling agent's DLQ back to the tail of its own inbox, restoring a fresh recovery budget. Not found is a structured `dlq_entry_not_found` error |
 
+### Registered shell (additional tools)
+
+The registered shell (`bin/gptqueue-session`) registers four additive tools on top of the table above:
+
+| Tool | Description |
+|---|---|
+| `find_agents` | Find exact agent candidates by declared purpose and identity. Ambiguous matches are never routed automatically; online does not imply activation readiness |
+| `get_agent_details` | Inspect an exact mailbox, runtime binding, published capabilities, declared role and activation readiness. Omit `agent` for the current connection. No message content or credentials |
+| `get_delivery_status` | Inspect one message's queue, claim, acknowledgement or dead-letter evidence without consuming it. Missing retained evidence means unknown, not delivered |
+| `set_agent_profile` | Declare this connection's readable label, purpose and kind. A declaration is a discovery hint, never proof of controller authority or permission to take over another mailbox |
+
+`package.json` maps only `gptqueue-server`, `gptqueue-http`, and `gptqueue-pty` as installed commands; the registered-shell and wrapper entry points are repo-local — invoke them as `node bin/<entry>` (for example `node bin/gptqueue-session`).
+
 ### Dead-letter queue (provisional policy)
 
 Lazy recovery (in `claims-recover.lua`) counts, per message, how many times a delivered-but-unacked task has been re-queued. Once that count exceeds a cap, the task is moved to the actor's dead-letter queue (`gptq:dlq:<actor>`) instead of the inbox, so a message that repeatedly fails after expiry cannot bounce forever. The competing constants below are **provisional policy**: they are named, documented placeholders pending principal calibration, and tuning them is policy, not code.
@@ -303,7 +316,7 @@ Optionally add the hook script to `~/.claude/settings.json` for automatic startu
 The PTY wrapper lets you run any CLI (e.g. `claude`, `codex`) inside a PTY that monitors Redis for incoming messages and injects prompts when the process goes idle:
 
 ```bash
-gptqueue-pty --agent alice --cmd claude
+node bin/gptqueue-pty --agent alice --cmd claude
 ```
 
 When a woken agent has pending messages, the injected prompt instructs it to
