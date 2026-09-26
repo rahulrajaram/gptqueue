@@ -1,0 +1,11 @@
+# Automation tier — layer with `codex -p sandbox-auto` (CONFIG_PROFILE_V2).
+#
+# Headless-safe: no approval request can ever block or deadlock the run.
+# Combined with the base config (workspace-write sandbox, network on,
+# per-server approve for gptqueue-shared), automated agents can build,
+# test, and coordinate without any human-in-the-loop gating.
+#
+# Anything that would need escalation beyond the sandbox fails fast with
+# the approval error instead of hanging — which is exactly what automated
+# pipelines want: deterministic failure, never a stuck wait.
+approval_policy = "never"
