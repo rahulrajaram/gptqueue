@@ -1,0 +1,11 @@
+# Maximum-liberty tier — layer with `codex -p sandbox-max` (CONFIG_PROFILE_V2).
+#
+# Explicit opt-in for sandbox tasks that need host-like access inside the
+# sandbox VM boundary (system-wide installs, docker, ports, /workspace-wide
+# writes outside the current project). The sandbox VM itself is the safety
+# boundary; do not replicate this tier on a bare host.
+#
+# Per the operator principle (host <= sandbox liberty), this tier may only
+# exist where execution is already VM-contained.
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
