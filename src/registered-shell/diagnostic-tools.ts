@@ -6,6 +6,10 @@ import { CodexSocketClient } from "./codex-socket.js";
 import type { RuntimeTools } from "./runtime-tools.js";
 import { AgentDiagnostics } from "../core/agent-diagnostics.js";
 
+/** Machine-readable MCP annotations mirroring the prose [safety: ...] prefixes. */
+const READ_ONLY = { readOnlyHint: true } as const;
+const WRITABLE = { readOnlyHint: false } as const;
+
 export const DIAGNOSTIC_TOOL_NAMES = ["find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] as const;
 export const agentProfileSchema = z.object({
   label: z.string().trim().min(1).max(120),
@@ -27,9 +31,9 @@ export const registerDiagnosticTools = (server: McpServer, client: RedisClient, 
     catch (error) { return stableToolError(error); }
   };
   server.tool("find_agents", "[safety: readonly] Find exact agent candidates by declared purpose and identity. Ambiguous matches are never routed automatically; online does not imply activation readiness.",
-    findAgentsSchema.shape, params => safe(() => diagnostics.find(findAgentsSchema.parse(params))));
+    findAgentsSchema.shape, READ_ONLY, params => safe(() => diagnostics.find(findAgentsSchema.parse(params))));
   server.tool("get_agent_details", "[safety: readonly] Inspect an exact mailbox, runtime binding, published capabilities, declared role and activation readiness. Omit agent for this connection. No message content or credentials.",
-    agentDetailsSchema.shape, params => safe(async () => {
+    agentDetailsSchema.shape, READ_ONLY, params => safe(async () => {
       const agent = params.agent ?? client.requireRegistered();
       const observed = await diagnostics.details(agent);
       if (agent === client.requireRegistered()) {
@@ -52,9 +56,9 @@ export const registerDiagnosticTools = (server: McpServer, client: RedisClient, 
       finally { await rpc.close(); }
     }));
   server.tool("get_delivery_status", "[safety: readonly] Inspect one message's queue, claim, acknowledgement or dead-letter evidence without consuming it. Missing retained evidence means unknown, not delivered.",
-    deliveryStatusSchema.shape, params => safe(() => diagnostics.delivery(params.agent ?? client.requireRegistered(), params.message_id)));
+    deliveryStatusSchema.shape, READ_ONLY, params => safe(() => diagnostics.delivery(params.agent ?? client.requireRegistered(), params.message_id)));
   server.tool("set_agent_profile", "[safety: writable] Declare this connection's readable label, purpose and kind. A declaration is a discovery hint, never proof of controller authority or permission to take over another mailbox.",
-    agentProfileSchema.shape, params => safe(async () => {
+    agentProfileSchema.shape, WRITABLE, params => safe(async () => {
       const profile = Object.freeze({ ...agentProfileSchema.parse(params), declaration_source: "self", updated_at: new Date().toISOString() });
       await client.adapterConnection.set(`gptq:agent-profile:${client.requireRegistered()}`, JSON.stringify(profile));
       return { status: "ok", agent: client.requireRegistered(), profile };

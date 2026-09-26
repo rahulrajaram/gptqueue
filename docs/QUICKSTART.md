@@ -130,3 +130,39 @@ and the tool descriptions for the full state machine.
 | `concurrency_limit_reached` | the actor's `max_concurrency` claims are outstanding |
 | `identity_mismatch` / `not_claim_owner` | the calling session does not own that claim |
 | `launch_not_allowlisted` | wake launch not in the operator allowlist |
+| `MCP tool call requires approval, but approval policy is never` | the Codex client rejected a gptqueue tool call before it reached the server — see "Approval-restricted Codex sessions" below |
+
+## 8. Approval-restricted Codex sessions
+
+Codex evaluates every MCP tool call against the session's approval policy.
+Under `approval_policy = "never"` (common in fully autonomous launches), Codex
+rejects gptqueue calls client-side with:
+
+```
+MCP tool call requires approval, but approval policy is never
+```
+
+The gptqueue server is healthy when this appears — the call never reaches it.
+A shell can even be auto-registered (registration happens out-of-band, not via
+the MCP connection), so the agent shows up in `list_agents` while its own tool
+calls keep failing. Peer lookup and messaging are both blocked.
+
+Fix: opt the gptqueue server into tool approval in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers."gptqueue-shared"]
+# ...existing entries...
+default_tools_approval_mode = "approve"
+```
+
+Verified on codex 0.157.0: this one scoped line restores both lookups and
+sends under a global `never` policy. `"auto"` does not unblock them, and the
+server's `readOnlyHint` annotations do not either — `"approve"` is the
+necessary setting for `never`-policy sessions. Valid values are `auto`,
+`prompt`, `writes`, and `approve`.
+
+This is an explicit operator choice: gptqueue installers and hooks never
+write this line for you (they never bypass the native approval boundary).
+Approval configuration is read at codex launch, so restart any currently
+blocked sessions after changing it — a running session cannot be unblocked
+from the server side.
