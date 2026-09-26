@@ -15,17 +15,22 @@ if (!allowed.includes(command)) {
   console.log('Usage: node scripts/gptqueue-doctor.mjs <agent|find|delivery|connection|config|continuity-plan|continuity-apply> --redis-url redis://host/db [--agent NAME] [--message-id ID] [--query TEXT] [--thread-id ID] [--client codex|pi --runtime-id ID --cwd PATH --legacy yes --out PLAN] [--plan PLAN --apply yes] [--tier base|sandbox-auto|sandbox-max]');
   process.exit(command === '--help' ? 0 : 1);
 }
-const options = {};
-for (let i = 0; i < args.length; i += 2) {
-  if (!args[i]?.startsWith('--') || args[i + 1] === undefined || args[i] in options) throw new Error('Expected unique option/value pairs');
-  options[args[i]] = args[i + 1];
-}
-const required = name => { if (!options[name]) throw new Error(`Required ${name}`); return options[name]; };
-// `config` lints the local Codex capability baseline only; no Redis involved.
-const configOnly = command === 'config';
-const redis = configOnly ? null : new Redis(required('--redis-url'));
-const diagnostics = configOnly ? null : new AgentDiagnostics(redis);
+let redis = null;
 try {
+  const options = {};
+  for (let i = 0; i < args.length; i += 2) {
+    if (!args[i]?.startsWith('--') || args[i + 1] === undefined || args[i] in options) throw new Error('Expected unique option/value pairs');
+    options[args[i]] = args[i + 1];
+  }
+  const required = name => { if (!options[name]) throw new Error(`Required ${name}`); return options[name]; };
+  // `config` lints the local Codex capability baseline only; no Redis involved.
+  const configOnly = command === 'config';
+  if (configOnly) {
+    const unknown = Object.keys(options).filter(key => key !== '--tier');
+    if (unknown.length) throw new Error(`Unknown option(s) for config subcommand: ${unknown.join(', ')}; only --tier is accepted`);
+  }
+  if (!configOnly) redis = new Redis(required('--redis-url'));
+  const diagnostics = configOnly ? null : new AgentDiagnostics(redis);
   let result;
   switch (command) {
     case 'agent': result = await diagnostics.details(required('--agent')); break;
@@ -65,18 +70,44 @@ try {
     case 'config': {
       // Static lint of the agent-execution baseline (docs/AGENT_EXECUTION_BASELINE.md).
       // Behavioral proof lives in the acceptance matrix (GPTQUEUE_CODEX_APPROVAL=1).
+      // Each key check is scoped to the documented canonical table header; a key
+      // line under any other section does not satisfy its check, and sandbox_mode
+      // must sit at top level (before the first table header).
       const home = process.env.CODEX_HOME || join(homedir(), '.codex');
       const tier = options['--tier'] ?? 'base';
-      const text = await readFile(join(home, 'config.toml'), 'utf8');
+      if (!['base', 'sandbox-auto', 'sandbox-max'].includes(tier)) {
+        throw new Error(`Unknown tier '${tier}'; expected base, sandbox-auto, or sandbox-max`);
+      }
+      let text;
+      try {
+        text = await readFile(join(home, 'config.toml'), 'utf8');
+      } catch (error) {
+        if (error?.code === 'ENOENT') throw new Error(`No Codex config at ${join(home, 'config.toml')}; set CODEX_HOME or create the file`);
+        throw error;
+      }
+      const sections = { '': [] };
+      let current = '';
+      for (const line of text.split('\n')) {
+        const header = line.match(/^\s*\[([^\]]+)\]\s*$/);
+        if (header) { current = `[${header[1].trim()}]`; (sections[current] ??= []).push(line); }
+        else if (current in sections) sections[current].push(line);
+      }
+      const inSection = (section, pattern) => Boolean((sections[section] ?? []).join('\n').match(pattern));
       const checks = [
-        { key: 'sandbox_mode="workspace-write"', ok: /^sandbox_mode\s*=\s*"workspace-write"/mu.test(text) },
+        { key: 'sandbox_mode="workspace-write"', ok: inSection('', /^sandbox_mode\s*=\s*"workspace-write"/mu) },
         { key: '[sandbox_workspace_write] network_access=true',
-          ok: /^\[sandbox_workspace_write\]/mu.test(text) && /^network_access\s*=\s*true/mu.test(text) },
+          ok: inSection('[sandbox_workspace_write]', /^network_access\s*=\s*true/mu) },
         { key: 'mcp_servers."gptqueue-shared".default_tools_approval_mode="approve"',
-          ok: /^\[mcp_servers\."gptqueue-shared"\]/mu.test(text) && /^default_tools_approval_mode\s*=\s*"approve"/mu.test(text) },
+          ok: inSection('[mcp_servers."gptqueue-shared"]', /^default_tools_approval_mode\s*=\s*"approve"/mu) },
       ];
       if (tier !== 'base') {
-        const profile = await readFile(join(home, `${tier}.config.toml`), 'utf8');
+        let profile;
+        try {
+          profile = await readFile(join(home, `${tier}.config.toml`), 'utf8');
+        } catch (error) {
+          if (error?.code === 'ENOENT') throw new Error(`Tier profile not found: ${join(home, `${tier}.config.toml`)}`);
+          throw error;
+        }
         checks.push({ key: `${tier}: approval_policy="never"`, ok: /^approval_policy\s*=\s*"never"/mu.test(profile) });
         if (tier === 'sandbox-max') checks.push({ key: `${tier}: sandbox_mode="danger-full-access"`, ok: /^sandbox_mode\s*=\s*"danger-full-access"/mu.test(profile) });
       }
@@ -99,4 +130,7 @@ try {
       break;
   }
   console.log(JSON.stringify(result, null, 2));
+} catch (error) {
+  console.error(`error: ${error?.message ?? String(error)}`);
+  process.exit(2);
 } finally { if (redis) await redis.quit(); }
