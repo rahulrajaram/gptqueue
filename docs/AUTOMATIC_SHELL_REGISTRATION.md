@@ -201,6 +201,11 @@ Then open `/hooks` in Codex and review/trust the two GPTQueue command hooks.
 Installation does not grant trust: Codex skips untrusted hooks even when enabled.
 The installer never bypasses this native approval boundary. See the
 [Codex hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
+Sessions that must run under `approval_policy = "never"` additionally need the
+operator-scoped `default_tools_approval_mode = "approve"` opt-in on the gptqueue
+MCP server entry, or Codex rejects every gptqueue tool call client-side — see
+"Approval-restricted Codex sessions" in `docs/QUICKSTART.md`. The installer
+never writes that line either.
 Use `--rollback` to restore the saved original bytes. The separate backup lives
 under `~/.local/state/gptqueue/inbox-activation`. Installation does not bind
 already-open sessions retroactively; resume or submit a prompt so the hook runs.

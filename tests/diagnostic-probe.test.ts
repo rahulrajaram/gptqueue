@@ -45,8 +45,11 @@ interface CapturedServer {
 const captureTools = (client: RedisClient): CapturedServer => {
   const handlers = new Map<string, Handler>();
   const fake = {
-    tool: (name: string, _desc: string, _shape: unknown, handler: Handler) => {
-      handlers.set(name, handler);
+    // Mirrors the SDK's tool() overloads: the callback is the trailing
+    // function argument, with an optional annotations object before it.
+    tool: (name: string, ...rest: unknown[]) => {
+      const handler = rest.find((candidate) => typeof candidate === "function");
+      handlers.set(name, handler as Handler);
     },
   };
   registerDiagnosticTools(
