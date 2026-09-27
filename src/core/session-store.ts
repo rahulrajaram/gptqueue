@@ -182,14 +182,6 @@ export class SessionStore {
     };
   }
 
-  /** Resolve agent name from a session ID (Redis lookup). */
-  async resolveAgent(sessionId: string): Promise<string | null> {
-    return this.redis.hget(
-      SESSION_KEYS.session(sessionId),
-      "agent_name"
-    );
-  }
-
   /**
    * Whether a name currently has a REGISTERED agent (any session) in the
    * canonical registry hash. This is a name->existence lookup independent of
@@ -253,20 +245,6 @@ export class SessionStore {
         active_sessions: activeSessions,
       };
     });
-  }
-
-  /** List all sessions for an agent. */
-  async listSessions(agentName: string): Promise<SessionRecord[]> {
-    const sessionIds = await this.redis.smembers(
-      SESSION_KEYS.agentSessions(agentName)
-    );
-
-    const sessions: SessionRecord[] = [];
-    for (const sid of sessionIds) {
-      const session = await this.getSession(sid);
-      if (session) sessions.push(session);
-    }
-    return sessions;
   }
 }
 

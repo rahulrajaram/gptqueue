@@ -176,23 +176,4 @@ describe("SessionStore", () => {
     expect(await redis.exists(SESSION_KEYS.session(expired.session_id))).toBe(0);
     expect(await store.refreshLease(expired.session_id)).toBe(false);
   });
-
-  it("resolves agent name from session ID", async () => {
-    const session = await store.createSession("lookup-agent", "publisher");
-
-    const resolved = await store.resolveAgent(session.session_id);
-    expect(resolved).toBe("lookup-agent");
-
-    // Non-existent session returns null
-    const missing = await store.resolveAgent("no-such-session");
-    expect(missing).toBeNull();
-  });
-
-  it("lists all sessions for an agent", async () => {
-    await store.createSession("list-agent", "both", "first");
-    await store.createSession("list-agent", "both", "second");
-
-    const sessions = await store.listSessions("list-agent");
-    expect(sessions).toHaveLength(2);
-  });
 });

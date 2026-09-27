@@ -207,21 +207,27 @@ export class MailboxStore {
       ? [agentName]
       : Object.keys(await this.redis.hgetall(SESSION_KEYS.registry));
 
-    const statuses = [];
+    if (targets.length === 0) return [];
+    // One pipelined round trip for every agent's depth and bound.
+    const pipe = this.redis.pipeline();
     for (const name of targets) {
-      const d = await this.redis.llen(SESSION_KEYS.queue(name));
-      const meta = await this.redis.hgetall(SESSION_KEYS.mailboxMeta(name));
-      statuses.push({
+      pipe.llen(SESSION_KEYS.queue(name)).hget(SESSION_KEYS.mailboxMeta(name), "max_size");
+    }
+    const results = (await pipe.exec()) ?? [];
+    return targets.map((name, i) => {
+      const [depthError, depth] = results[i * 2] ?? [null, 0];
+      const [boundError, bound] = results[i * 2 + 1] ?? [null, null];
+      if (depthError) throw depthError;
+      if (boundError) throw boundError;
+      return {
         agent: name,
-        depth: d,
+        depth: Number(depth),
         max_size: parseInt(
-          meta["max_size"] ||
-            String(SESSION_DEFAULTS.DEFAULT_QUEUE_BOUND),
+          (bound as string | null) || String(SESSION_DEFAULTS.DEFAULT_QUEUE_BOUND),
           10
         ),
-      });
-    }
-    return statuses;
+      };
+    });
   }
 
   /** Initialize mailbox metadata for an agent. */

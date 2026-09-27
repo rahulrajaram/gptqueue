@@ -11,14 +11,5 @@ export interface QueueMessage {
   };
 }
 
-export interface AgentRegistration {
-  name: string;
-  role: "publisher" | "consumer" | "both";
-  description?: string;
-  registered_at: string;
-  pid: number;
-}
-
 export const HEARTBEAT_TTL = 30;
 export const HEARTBEAT_INTERVAL = 10;
-// test

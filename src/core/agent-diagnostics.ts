@@ -212,7 +212,9 @@ export class AgentDiagnostics {
   async delivery(agent: string, messageId: string): Promise<DeliveryDiagnostics> {
     const at = now(); let status: DeliveryStatus = "unknown_history"; let claim_id: string | null = null;
     const queued = await this.redis.lrange(SESSION_KEYS.queue(agent), 0, 1023); if (queued.some((x) => record(json(x)).id === messageId)) status = "queued";
-    for (const id of await this.redis.zrange(CLAIM_KEYS.index(agent), 0, -1)) { const c = record(json(await this.redis.hget(CLAIM_KEYS.claims, id))); if (Array.isArray(c.tasks) && c.tasks.some((x) => record(json(typeof x === "string" ? x : null)).id === messageId)) { status = Date.parse(String(c.expires_at)) < Date.now() ? "claim_expired" : "claimed"; claim_id = id; } }
+    const claimIds = await this.redis.zrange(CLAIM_KEYS.index(agent), 0, -1);
+    const claimRaws = claimIds.length ? await this.redis.hmget(CLAIM_KEYS.claims, ...claimIds) : [];
+    for (const [i, id] of claimIds.entries()) { const c = record(json(claimRaws[i] ?? null)); if (Array.isArray(c.tasks) && c.tasks.some((x) => record(json(typeof x === "string" ? x : null)).id === messageId)) { status = Date.parse(String(c.expires_at)) < Date.now() ? "claim_expired" : "claimed"; claim_id = id; } }
     const dlq = await this.redis.lrange(DLQ_KEYS.list(agent), 0, 1023); if (dlq.some((x) => record(json(x)).id === messageId)) status = "dead_lettered";
     const traces = (await this.redis.xrevrange(SESSION_KEYS.inboxTrace(agent), "+", "-", "COUNT", 1024))
       .map(([, fields]) => Object.fromEntries(Array.from({ length: Math.floor(fields.length / 2) }, (_, i) => [fields[i * 2], fields[i * 2 + 1]])));

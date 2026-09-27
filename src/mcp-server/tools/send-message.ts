@@ -71,21 +71,11 @@ export type SendWakeResult =
   | Readonly<{ status: "wake_error"; error_message: string }>;
 
 /**
- * Reject anything that is not a durable `wake_if_offline` actor record.
- * Presence-gated eligibility: plain agents and store_only actors resolve to
- * no wake. Returns `{ record }` when the recipient is wake-eligible, else
- * undefined. Pure policy gate — performs no presence assembly or lease work.
+ * Wake policy gate: only a durable `wake_if_offline` actor record is
+ * wake-eligible; plain agents and store_only actors get no wake. Pure: it
+ * performs no presence assembly or lease work.
  */
-export async function gateWakeEligibility(
-  client: Pick<RedisClient, "actorDirectory">,
-  to: string
-): Promise<{ readonly record: ActorDirectoryRecord } | undefined> {
-  const dir = await client.actorDirectory.get(to);
-  return dir.ok ? wakeEligible(dir.record) : undefined;
-}
-
-/** The same policy gate applied to an already-read directory record. */
-function wakeEligible(
+export function wakeEligible(
   record: ActorDirectoryRecord | null
 ): { readonly record: ActorDirectoryRecord } | undefined {
   if (record === null || record.profile.activation_policy.mode !== "wake_if_offline") {
