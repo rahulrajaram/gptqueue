@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "tsc && cp -r src/mcp-server/lua dist/mcp-server/",
-    "prepare": "bash -c 'COMMITHOOKS=${COMMITHOOKS_DIR:-$HOME/Documents/commithooks}; GIT_DIR=$(git rev-parse --git-dir 2>/dev/null); [ -d \"$COMMITHOOKS/lib\" ] && [ -n \"$GIT_DIR\" ] && for h in pre-commit commit-msg pre-push post-checkout post-merge; do [ -f \"$COMMITHOOKS/$h\" ] && cp \"$COMMITHOOKS/$h\" \"$GIT_DIR/hooks/$h\" && chmod +x \"$GIT_DIR/hooks/$h\"; done && rm -rf \"${GIT_DIR}/lib\" && cp -r \"$COMMITHOOKS/lib\" \"$GIT_DIR/lib\" || true'",
+    "prepare": "scripts/install-commithooks",
     "postinstall": "npm run build",
     "dev": "tsc --watch",
     "test": "vitest run",
