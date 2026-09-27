@@ -9,10 +9,12 @@ import type { ActivationRequest, ActivationOutcome, RuntimeBinding } from "./run
 import { runtimeBindingSchema } from "./runtime.js";
 import { z } from "zod";
 import { VERSION } from "../version.js";
+import { RUNTIME_TOOL_NAMES, SHELL_TOOL_NAMES } from "./tool-names.js";
 
 export const GPTQUEUE_TOOLS = ["send_message", "receive_message", "list_agents", "get_queue_status"] as const;
-export const RUNTIME_TOOL_NAMES = ["claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] as const;
-const REQUIRED_RUNTIME_TOOLS = RUNTIME_TOOL_NAMES.slice(0, 5);
+/** Every registered-shell tool; the runtime subset is required. */
+export const SHELL_TOOLS = SHELL_TOOL_NAMES;
+const REQUIRED_RUNTIME_TOOLS = RUNTIME_TOOL_NAMES;
 const STARTUP_TIMEOUT_MS = 10_000;
 type CatalogTool = { name?: string; description?: string; inputSchema?: unknown };
 type BoundTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
@@ -59,7 +61,7 @@ const withTimeout = async <T>(work: (signal: AbortSignal) => Promise<T>, timeout
 
 export const validateCatalog = (catalog: { tools?: CatalogTool[] }, runtimeEnabled = false): readonly BoundTool[] => {
   const expected: readonly string[] = runtimeEnabled ? [...GPTQUEUE_TOOLS, ...REQUIRED_RUNTIME_TOOLS] : GPTQUEUE_TOOLS;
-  const allowed: readonly string[] = runtimeEnabled ? [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES] : GPTQUEUE_TOOLS;
+  const allowed: readonly string[] = runtimeEnabled ? [...GPTQUEUE_TOOLS, ...SHELL_TOOLS] : GPTQUEUE_TOOLS;
   const tools = catalog.tools ?? [];
   const names = tools.map((tool) => tool.name);
   if (new Set(names).size !== names.length || names.some(name => !name || !allowed.includes(name)) || expected.some((name) => !names.includes(name))) {

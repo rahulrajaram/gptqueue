@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPiExtension, validateCatalog, GPTQUEUE_TOOLS, RUNTIME_TOOL_NAMES, type PiAPI, type SessionClient } from "../src/registered-shell/pi-extension.js";
+import { RUNTIME_TOOL_NAMES } from "../src/registered-shell/tool-names.js";
+import { createPiExtension, validateCatalog, GPTQUEUE_TOOLS, type PiAPI, type SessionClient } from "../src/registered-shell/pi-extension.js";
 
 const catalog = { tools: GPTQUEUE_TOOLS.map((name) => ({ name, inputSchema: { type: "object" } })) };
 const makeClient = () => ({
@@ -90,7 +91,7 @@ describe("registered Pi extension", () => {
 
 
 it("accepts previous runtime catalogs and optional diagnostics without accepting foreign tools", () => {
-  const tools = [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES.slice(0, 5)].map(name => ({ name, inputSchema: { type: "object" } }));
+  const tools = [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES].map(name => ({ name, inputSchema: { type: "object" } }));
   expect(validateCatalog({ tools }, true)).toHaveLength(9);
   expect(validateCatalog({ tools: [...tools, { name: "find_agents", inputSchema: { type: "object" } }] }, true)).toHaveLength(10);
   expect(() => validateCatalog({ tools: [...tools, { name: "foreign_tool", inputSchema: { type: "object" } }] }, true)).toThrow(/mismatch/);
