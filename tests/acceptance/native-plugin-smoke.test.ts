@@ -60,7 +60,11 @@ describe("native OpenCode plugin loader smoke", () => {
     await owned?.close();
   });
 
-  it("loads default-only plugin, exposes tools, and auto-registers a native session", async () => {
+  it("loads default-only plugin, exposes tools, and auto-registers a native session", async (ctx) => {
+    ctx.skip(
+      !existsSync(pluginPath) || !existsSync(modelsPath) || !existsSync(opencodeBin),
+      "OpenCode plugin/model/binary prerequisites unavailable"
+    );
     const stderr: string[] = [];
     const stdout: string[] = [];
     let phase = "prerequisites";

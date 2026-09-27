@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { childReadinessEvidence } from "./opencode-qualification-oracles.js";
+import { requireRetained } from "./retained-evidence.js";
 
 type JsonObject = Record<string, unknown>;
 const cd3aPath = ".gptqueue/repair-qualification/20260912/opencode-repair/opencode-conformance-2026-09-12T21-06-52-202Z-cd3a3a5a-14b4-427b-bb33-d762670c9f3c/receipt.json";
@@ -27,12 +28,14 @@ const syntheticHistory = (assistantText: string, runtimeID: string, agent = `gpt
 ];
 
 describe("OpenCode child readiness oracle formats", () => {
-  it("accepts the actual labeled-bound-agent format from the retained cd3a diagnostic", () => {
+  it("accepts the actual labeled-bound-agent format from the retained cd3a diagnostic", (ctx) => {
+    requireRetained(ctx, cd3aPath);
     const evidence = childReadinessEvidence(childHistory(readJson(cd3aPath)), cd3aAgent, cd3aRuntimeID);
     expect(evidence).toMatchObject({ reportedAgent: cd3aAgent, runtimeID: cd3aRuntimeID });
   });
 
-  it("accepts the actual inline format from the older retained receipt", () => {
+  it("accepts the actual inline format from the older retained receipt", (ctx) => {
+    requireRetained(ctx, historicalPath);
     const evidence = childReadinessEvidence(childHistory(readJson(historicalPath)), historicalAgent, historicalRuntimeID);
     expect(evidence).toMatchObject({ reportedAgent: historicalAgent, runtimeID: historicalRuntimeID });
   });
