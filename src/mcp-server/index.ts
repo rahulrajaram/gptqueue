@@ -23,14 +23,22 @@ if (initialName) {
   await redisClient.register("both", initialName);
 }
 
-// Graceful shutdown
+// Graceful shutdown. Besides signals, exit when the client goes away (stdin
+// ends or the MCP connection closes): an orphaned server would otherwise keep
+// refreshing its lease and pin the agent online forever.
+let shuttingDown = false;
 async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   await redisClient.shutdown();
   process.exit(0);
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+process.stdin.on("end", shutdown);
+process.stdin.on("close", shutdown);
 
 // Start
 const transport = new StdioServerTransport();
 await server.connect(transport);
+server.server.onclose = () => void shutdown();

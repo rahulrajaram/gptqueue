@@ -403,12 +403,25 @@ export class RedisClient {
     return this.mailbox.depth(name);
   }
 
-  async shutdown(): Promise<void> {
+  /**
+   * Close both connections gracefully, but never wait past `timeoutMs`: a
+   * wedged QUIT (unreachable server, blocked subscriber) falls back to an
+   * immediate disconnect so process exit is never held hostage.
+   */
+  async shutdown(timeoutMs = 2_000): Promise<void> {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.sessionStore.stopLeaseRefresh();
     if (this.connectionsForcedClosed) return;
-    await this.redis.quit();
-    await this.subscriber.quit();
+    // allSettled: one connection's QUIT failure must not skip the other's.
+    const quit = Promise.allSettled([this.redis.quit(), this.subscriber.quit()]).then(() => false);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), timeoutMs);
+      timer.unref();
+    });
+    const timedOut = await Promise.race([quit, deadline]);
+    clearTimeout(timer);
+    if (timedOut) this.forceDisconnect();
   }
 
   /** Immediately break both connections when a bounded caller must stop. */
