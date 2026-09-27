@@ -43,6 +43,8 @@ export interface SessionClient {
     options?: { signal?: AbortSignal }): Promise<CallToolResult>;
   getInstructions?(): string | undefined;
   close(): Promise<void>;
+  /** Forcefully end the connection when a graceful close() hangs. */
+  destroy?(): void;
   setActivationHandler?(handler: (binding: RuntimeBinding, request: ActivationRequest, signal: AbortSignal) => Promise<ActivationOutcome>): void;
 }
 
@@ -94,7 +96,14 @@ export const createPiExtension = (
   const close = async () => {
     runtime?.invalidate(); runtime = undefined; binding = undefined;
     const old = client; client = undefined;
-    if (old) await withTimeout(() => old.close(), 2_500);
+    if (!old) return;
+    try {
+      await withTimeout(() => old.close(), 2_500);
+    } catch (error) {
+      // A wedged close must not leave the sidecar process running.
+      old.destroy?.();
+      throw error;
+    }
   };
   const fatal = async (error: unknown): Promise<never> => {
     console.error(`[gptqueue] Pi registration readiness failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -228,6 +237,10 @@ export const createRegisteredPiExtension = (options: {
       getInstructions: () => client.getInstructions(),
       setActivationHandler: (handler) => { activationHandler = handler; },
       close: () => client.close(),
+      destroy: () => {
+        const pid = transport.pid;
+        if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+      },
     };
   } catch (error) {
     await transport.close();

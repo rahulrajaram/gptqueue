@@ -43,6 +43,21 @@ describe("registered Pi extension", () => {
     await handlers.get("session_shutdown")!();
     expect(client.close).toHaveBeenCalledOnce();
   });
+  it("destroys a sidecar whose close() hangs past the bound", async () => {
+    vi.useFakeTimers();
+    try {
+      const destroy = vi.fn();
+      const client = { ...makeClient(), close: vi.fn(() => new Promise<void>(() => undefined)), destroy };
+      const { pi, handlers } = fakePi();
+      await createPiExtension(async () => client)(pi);
+      const shutdown = handlers.get("session_shutdown")!().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(await shutdown).toBeInstanceOf(Error);
+      expect(destroy).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("closes and exits for an invalid catalog", async () => {
     const exit = interceptExit(); const client = makeClient();
     client.listTools.mockResolvedValue({ tools: [] });
