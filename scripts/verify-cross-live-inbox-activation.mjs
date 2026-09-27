@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { CodexSocketClient } from '../dist/registered-shell/codex-socket.js';
 import { CodexThreadReader } from '../dist/registered-shell/codex-history.js';
-const installed = process.env.PI_NODE_MODULES ?? '/home/rahul/nodeenv2251-311/lib/node_modules';
+const installed = process.env.PI_NODE_MODULES ?? join(dirname(dirname(process.execPath)), 'lib', 'node_modules');
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
   await import(pathToFileURL(join(installed, '@earendil-works/pi-coding-agent/dist/index.js')).href);
 const root = resolve(import.meta.dirname, '..');

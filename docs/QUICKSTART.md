@@ -13,7 +13,7 @@ first acknowledged task.
 ## 1. Install
 
 ```bash
-cd /home/rahul/Documents/gptqueue
+cd /path/to/gptqueue
 scripts/install.sh              # builds, restarts the server on 127.0.0.1:8101, health-checks
 curl http://127.0.0.1:8101/health
 ```

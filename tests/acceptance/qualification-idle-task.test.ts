@@ -13,6 +13,7 @@ import { collectIdleClaimExchange } from "./qualification-idle-claim.js";
 import type { GenericParticipant, ParticipantIdentity, RawEvidenceRef } from "./qualification-types.js";
 import { assertIdleObservation, assertSetupTurnCompleted } from "./qualification-idle-task.js";
 import { sanitizeEvidence } from "./public-evidence.js";
+import { CODEX_BIN, nodePrefixPath } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_QUALIFICATION_IDLE_TASK === "1";
 const repo = resolve(import.meta.dirname, "../..");
@@ -27,7 +28,7 @@ const hashes = async (): Promise<Json> => {
   const labels = [...new Set([...sourceFiles, ...trees.flat(), "package.json", "package-lock.json"])].sort();
   const files: Record<string, string> = Object.fromEntries(labels.map(file => [file, join(repo, file)]));
   files.node_executable = process.execPath;
-  files.codex_executable = process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex";
+  files.codex_executable = process.env.CODEX_BIN ?? CODEX_BIN;
   return Object.fromEntries(await Promise.all(Object.entries(files).map(async ([label, path]) => [label, await digest(path)])));
 };
 const ref = (path: string, sha256: string, sources: Json = {}): RawEvidenceRef => ({ path, sha256, sourceRevision: createHash("sha256").update(JSON.stringify(sources)).digest("hex"), oracleRevision: String(sources["tests/acceptance/oracle.ts"] ?? "unit-fixture") });
@@ -88,18 +89,18 @@ describe("idle-task qualification fixture", () => {
   it.skipIf(!enabled)("proves an automatically handled native idle task", async () => {
     const runId = randomUUID(), artifactDir = join(artifactRoot, runId), phasesDir = join(artifactDir, "phases");
     await mkdir(phasesDir, { recursive: true, mode: 0o700 });
-    const receipt: Json = { schema_version: 1, run_id: runId, runner_pid: process.pid, passed: false, execution: { status: "running" }, lifecycle: { status: "running" }, started_at: new Date().toISOString(), command: ["/home/rahul/nodeenv2251-311/bin/node", "./node_modules/vitest/vitest.mjs", "run", "tests/acceptance/qualification-idle-task.test.ts"], phases: [], cleanup: [], source_hashes_before: {}, source_hashes_after: {} };
+    const receipt: Json = { schema_version: 1, run_id: runId, runner_pid: process.pid, passed: false, execution: { status: "running" }, lifecycle: { status: "running" }, started_at: new Date().toISOString(), command: [nodePrefixPath("bin/node"), "./node_modules/vitest/vitest.mjs", "run", "tests/acceptance/qualification-idle-task.test.ts"], phases: [], cleanup: [], source_hashes_before: {}, source_hashes_after: {} };
     const persist = async (label: string, value: unknown): Promise<void> => { const phase = { label, at: new Date().toISOString(), value: redact(value) }; (receipt.phases as Json[]).push(phase); await writeFile(join(phasesDir, `${String((receipt.phases as Json[]).length).padStart(4, "0")}-${label}.json`), `${JSON.stringify(phase, null, 2)}\n`, { mode: 0o600 }); await writeFile(join(artifactDir, "receipt.json"), `${JSON.stringify(redact(receipt), null, 2)}\n`, { mode: 0o600 }); };
     let redis: OwnedRedis | undefined, workspace: string | undefined, codex: ReturnType<typeof createCodexAdapters> | undefined, generic: ReturnType<typeof createGenericAdapters> | undefined, model: CodexParticipant | undefined, peer: GenericParticipant | undefined, failure: unknown;
     try {
-      receipt.source_executables = { node_executable: process.execPath, codex_executable: process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex" };
+      receipt.source_executables = { node_executable: process.execPath, codex_executable: process.env.CODEX_BIN ?? CODEX_BIN };
       receipt.gate = "GPTQUEUE_QUALIFICATION_IDLE_TASK=1";
       await persist("receipt-initial", { runner_pid: process.pid }); receipt.source_hashes_before = await hashes(); await persist("source-hashes-before", receipt.source_hashes_before);
       redis = await startOwnedRedis(); workspace = await mkdtemp(join(tmpdir(), "gptqueue-idle-task-"));
       receipt.row_id = "codex-appserver:automatic:idle-task";
       receipt.constraints = "Owned private-MCP-only adapter; automatic handling, not initiative or installation-wide activation";
       receipt.redis = { port: Number(new URL(redis.url).port), database: 15, owned_process: true };
-      codex = createCodexAdapters({ workspaceRoot: workspace, codexBin: process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex", model: "gpt-5.6-luna" }); generic = createGenericAdapters({ repo });
+      codex = createCodexAdapters({ workspaceRoot: workspace, codexBin: process.env.CODEX_BIN ?? CODEX_BIN, model: "gpt-5.6-luna" }); generic = createGenericAdapters({ repo });
       const modelAdapter = codex.adapters.find(({ spec }) => spec.id === "codex-appserver"), peerAdapter = generic.adapters.find(({ spec }) => spec.id === "generic-stdio");
       if (!modelAdapter || !peerAdapter) throw new Error("required adapters unavailable");
       const signal = AbortSignal.timeout(420_000);

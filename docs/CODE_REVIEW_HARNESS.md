@@ -2,7 +2,7 @@
 
 This repository's standing multi-perspective code review, adapted from the
 review-pipeline package at
-`/home/rahul/Documents/codereview/review-pipeline/` (whose perspective prompts
+`~/Documents/codereview/review-pipeline/` (whose perspective prompts
 are used verbatim and whose parallel-arms-plus-barrier module semantics this
 harness executes).
 
@@ -75,7 +75,7 @@ harness executes).
 
 - `2026-08-29` — first convening: target = working tree after the
   reliability arc (24 commits). Run root:
-  `/home/rahul/Documents/codereview/review-pipeline/runs/gptqueue-20260829/`.
+  `~/Documents/codereview/review-pipeline/runs/gptqueue-20260829/`.
 
 ## Enforcement
 
@@ -110,7 +110,7 @@ re-convene by convention.
 
 - `2026-08-29` — first convening: target = working tree after the
   reliability arc (24 commits). Run root:
-  `/home/rahul/Documents/codereview/review-pipeline/runs/gptqueue-20260829/`.
+  `~/Documents/codereview/review-pipeline/runs/gptqueue-20260829/`.
 
 ## Enforcement
 
@@ -122,7 +122,7 @@ rule and its escape hatches are summarized below.
 ### Freshness rule
 
 1. Locate the **newest** `distilled-review.md` under
-   `/home/rahul/Documents/codereview/review-pipeline/runs/*/` (by mtime).
+   `~/Documents/codereview/review-pipeline/runs/*/` (by mtime).
 2. Read its recorded **scope HEAD** (written as `` `Scope verified: HEAD
    `ff2ac66`, ...` ``), resolve the short sha to a full sha via
    `git rev-parse`.

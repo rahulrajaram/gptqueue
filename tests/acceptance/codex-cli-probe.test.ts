@@ -8,11 +8,12 @@ import { join } from "node:path";
 import { Redis } from "ioredis";
 import { SESSION_KEYS } from "../../src/core/keys.js";
 import { appConfig, redisUrl, repo, type Json } from "./codex-support.js";
+import { CODEX_BIN } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_ACCEPTANCE_CODEX_CLI === "1";
 const artifactRoot = join(repo, ".gptqueue/acceptance/20260912-evaluation/codex-cli");
 const timeoutMs = 420_000;
-const codexBin = process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex";
+const codexBin = process.env.CODEX_BIN ?? CODEX_BIN;
 vi.setConfig({ testTimeout: timeoutMs + 30_000, hookTimeout: 30_000 });
 
 type ToolCall = { name: string; arguments?: unknown; result?: unknown; threadId?: string | null };

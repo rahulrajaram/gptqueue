@@ -7,6 +7,7 @@ import { extractGenericTraces, extractNativeTraces } from "./qualification-evide
 import { collectIdleClaimExchange } from "./qualification-idle-claim.js";
 import { checkExchangeEvidence, evaluateTotalVerdict, type AcceptanceRow } from "./oracle.js";
 import type { GenericCallRecord, ParticipantIdentity, RawEvidenceRef } from "./qualification-types.js";
+import { CODEX_BIN } from "./local-tools.js";
 
 type Json = Record<string, unknown>;
 export type IdleAdmissionInput = Readonly<{
@@ -130,7 +131,7 @@ export const admitIdleTaskCheckpoint = async (basePath: string, receiptPath: str
   const trustedBase = await trustedPath(basePath, repoRoot, "base checkpoint");
   const evidenceRoot = resolve(trust.evidenceRoot ?? dirname(resolve(receiptPath)));
   const trustedReceipt = await trustedPath(receiptPath, evidenceRoot, "idle receipt");
-  const approved = { node: trust.approvedExecutables?.node ?? process.execPath, codex: trust.approvedExecutables?.codex ?? "/home/rahul/.local/bin/codex" };
+  const approved = { node: trust.approvedExecutables?.node ?? process.execPath, codex: trust.approvedExecutables?.codex ?? CODEX_BIN };
   const baseText = await readFile(trustedBase, "utf8"), base = object(JSON.parse(baseText)); if (!base) throw new Error("base checkpoint is malformed");
   if (hash(baseText) !== hash(await readFile(trustedBase))) throw new Error("base checkpoint changed while reading");
   if (base.kind !== "offline-discovery-qualified-checkpoint" || object(base.contract)?.routeCount !== 25 || object(base.contract)?.pairCount !== 625 || object(base.contract)?.dimensionObligationCount !== 250 || object(base.contract)?.requiredDimensionObligations !== 220) throw new Error("base checkpoint is not the frozen 25/625/250/220 checkpoint");

@@ -14,7 +14,7 @@ npm run build
 The local plugin entrypoint is:
 
 ```text
-/home/rahul/Documents/gptqueue/dist/registered-shell/opencode-plugin.js
+/path/to/gptqueue/dist/registered-shell/opencode-plugin.js
 ```
 
 The default export requires an explicit Redis URL from the plugin option
@@ -54,14 +54,14 @@ entry in the same profile, and does not alter any installed configuration:
 ```sh
 set -eu
 
-REPO=/home/rahul/Documents/gptqueue
+REPO=/path/to/gptqueue
 PROFILE=$(mktemp -d)
 mkdir -p "$PROFILE/home" "$PROFILE/config/opencode" "$PROFILE/data" "$PROFILE/cache" \
   "$PROFILE/state" "$PROFILE/work"
 
 cat >"$PROFILE/config/opencode/opencode.json" <<JSON
 {
-  "plugin": ["file:///home/rahul/Documents/gptqueue/dist/registered-shell/opencode-plugin.js"],
+  "plugin": ["file:///path/to/gptqueue/dist/registered-shell/opencode-plugin.js"],
   "mcp": {
     "gptqueue-shared": {
       "type": "local",

@@ -11,12 +11,13 @@ import { runModelPair, type TypedEvidenceWriter } from "./qualification-driver.j
 import { extractNativeTraces } from "./qualification-evidence.js";
 import { checkExchangeEvidence } from "./oracle.js";
 import { sanitizeEvidence } from "./public-evidence.js";
+import { CODEX_BIN } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_QUALIFICATION_CROSS_MODEL === "1";
 const repo = resolve(import.meta.dirname, "../..");
 const artifactRoot = join(repo, ".gptqueue/repair-qualification/20260912/qualification-cross-model");
 const sourceFiles = [
-  "tests/acceptance/codex-appserver-history.ts", "/home/rahul/.local/bin/codex", "tests/acceptance/qualification-cross-model.test.ts", "tests/acceptance/qualification-driver.ts", "tests/acceptance/qualification-evidence.ts", "tests/acceptance/qualification-types.ts", "tests/acceptance/qualification-scheduler.ts", "tests/acceptance/qualification-codex.ts", "tests/acceptance/qualification-pi.ts", "tests/acceptance/oracle.ts", "tests/acceptance/qualification-codex-appserver.test.ts", "tests/acceptance/qualification-pi-rpc.test.ts", "tests/acceptance/codex-support.ts", "src/experimental-wrapper/bridge.ts", "src/registered-shell/runtime.ts", "src/registered-shell/codex-socket.ts", "src/registered-shell/codex-history.ts", "src/registered-shell/pi-extension.ts", "dist/registered-shell/pi-extension.js",
+  "tests/acceptance/codex-appserver-history.ts", CODEX_BIN, "tests/acceptance/qualification-cross-model.test.ts", "tests/acceptance/qualification-driver.ts", "tests/acceptance/qualification-evidence.ts", "tests/acceptance/qualification-types.ts", "tests/acceptance/qualification-scheduler.ts", "tests/acceptance/qualification-codex.ts", "tests/acceptance/qualification-pi.ts", "tests/acceptance/oracle.ts", "tests/acceptance/qualification-codex-appserver.test.ts", "tests/acceptance/qualification-pi-rpc.test.ts", "tests/acceptance/codex-support.ts", "src/experimental-wrapper/bridge.ts", "src/registered-shell/runtime.ts", "src/registered-shell/codex-socket.ts", "src/registered-shell/codex-history.ts", "src/registered-shell/pi-extension.ts", "dist/registered-shell/pi-extension.js",
 ] as const;
 const digest = async (path: string): Promise<string> => createHash("sha256").update(await readFile(path)).digest("hex");
 const sourceHashes = async (): Promise<Readonly<Record<string, string>>> => Object.fromEntries(await Promise.all(sourceFiles.map(async (file) => [file, await digest(resolve(repo, file))] as const)));

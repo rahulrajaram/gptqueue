@@ -7,6 +7,7 @@ import { createPiNativeChildAdapter, enterPiNativeChildProfileScope, getPiNative
 import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
 import type { Participant } from "./qualification-types.js";
 import { sanitizeEvidence } from "./public-evidence.js";
+import { nodePrefixPath } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_QUALIFICATION_PI_NATIVE_CHILD === "1";
 const repo = resolve(import.meta.dirname, "../..");
@@ -108,7 +109,7 @@ describe.skipIf(!enabled)("Pi native-child qualification", () => {
       workspace = join(artifactDir, "workspace");
       const profile = join(artifactDir, "profile");
       await mkdir(profile, { recursive: true, mode: 0o700 });
-      const sdk = await import(pathToFileURL(join("/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist", "index.js")).href) as any;
+      const sdk = await import(pathToFileURL(join(nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist"), "index.js")).href) as any;
       const modelRuntime = await sdk.ModelRuntime.create({ allowModelNetwork: false });
       const modelValue = modelRuntime.getModel(provider, model);
       expect(modelValue).toBeTruthy();

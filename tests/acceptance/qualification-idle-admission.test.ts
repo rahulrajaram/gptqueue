@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { adjudicateIdleEvidence, admitIdleTaskCheckpoint, trustedPath, trustedSourceLabel } from "./qualification-idle-admission.js";
 import type { RawEvidenceRef } from "./qualification-types.js";
 import { frozenDimensionObligations, frozenPairMatrix, frozenRoutes } from "./qualification-routes.js";
+import { CODEX_BIN } from "./local-tools.js";
 
 type Json = Record<string, unknown>;
 const object = (value: unknown): Json => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Json : {};
@@ -21,7 +22,7 @@ const ref = (value: unknown): RawEvidenceRef => {
   return row as RawEvidenceRef;
 };
 const sha256 = (value: Uint8Array): string => createHash("sha256").update(value).digest("hex");
-const trustFor = (receiptPath: string) => ({ repoRoot: resolve("."), evidenceRoot: dirname(resolve(receiptPath)), approvedExecutables: { node: process.execPath, codex: process.env.GPTQUEUE_IDLE_TASK_CODEX_EXECUTABLE ?? "/home/rahul/.local/bin/codex" } });
+const trustFor = (receiptPath: string) => ({ repoRoot: resolve("."), evidenceRoot: dirname(resolve(receiptPath)), approvedExecutables: { node: process.execPath, codex: process.env.GPTQUEUE_IDLE_TASK_CODEX_EXECUTABLE ?? CODEX_BIN } });
 const fixture = async () => {
   const receiptPath = configured("GPTQUEUE_IDLE_TASK_RECEIPT");
   const receipt = JSON.parse(await readFile(receiptPath, "utf8")) as Json;
@@ -144,7 +145,7 @@ describe.skipIf(!enabled)("offline native idle-task admission (retained evidence
     expect(admission.receiptSha256).toBe(sha256(receiptBefore));
     expect(object(admission.provenance).receiptRunId).toBe(receiptRunId);
     expect(attempt.attemptId).toBe(`native-idle-task-${receiptRunId}`);
-    expect(object(admission.trust)).toMatchObject({ repoRoot: await realpath(resolve(".")), evidenceRoot: await realpath(dirname(receiptPath)), approvedExecutables: { node: await realpath(process.execPath), codex: await realpath(process.env.GPTQUEUE_IDLE_TASK_CODEX_EXECUTABLE ?? "/home/rahul/.local/bin/codex") } });
+    expect(object(admission.trust)).toMatchObject({ repoRoot: await realpath(resolve(".")), evidenceRoot: await realpath(dirname(receiptPath)), approvedExecutables: { node: await realpath(process.execPath), codex: await realpath(process.env.GPTQUEUE_IDLE_TASK_CODEX_EXECUTABLE ?? CODEX_BIN) } });
 
     const base = JSON.parse(baseBefore.toString("utf8")) as Json;
     const baseReport = object(base.report), emittedReport = object(emitted.report);

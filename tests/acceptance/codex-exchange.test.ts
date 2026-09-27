@@ -9,6 +9,7 @@ import { SESSION_KEYS } from '../../src/core/keys.js';
 import { appConfig, redisUrl, repo } from './codex-support.js';
 import { publicEvidence, until } from './pi-support.js';
 import { checkExchangeEvidence } from './oracle.js';
+import { CODEX_BIN } from "./local-tools.js";
 
 type Json = Record<string, any>;
 const structured = (value: Json | undefined): Json | undefined => value?.structured_content ?? value?.structuredContent;
@@ -29,7 +30,7 @@ it.skipIf(process.env.GPTQUEUE_CODEX_EXCHANGE !== '1')('a native Codex child con
     const config = Object.fromEntries(Object.entries(await appConfig()).filter(([name]) =>
       name === 'model_reasoning_effort' || name.startsWith('mcp_servers.gptqueue-shared.')));
     const overrides = Object.entries(config).flatMap(([name, value]) => ['-c', `${name}=${JSON.stringify(value)}`]);
-    child = spawn('/home/rahul/.local/bin/codex', ['exec', '--ignore-user-config', '--json', '--ephemeral', '--skip-git-repo-check',
+    child = spawn(CODEX_BIN, ['exec', '--ignore-user-config', '--json', '--ephemeral', '--skip-git-repo-check',
       '--approve-for-me', '--model', 'gpt-5.6-luna', '-C', dir, ...overrides, prompt],
     { cwd: dir, env: { ...process.env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout?.on('data', chunk => { stdout = (stdout + String(chunk)).slice(-2_000_000); });

@@ -8,12 +8,13 @@ import { describe, expect, it } from "vitest";
 import { SESSION_KEYS } from "../../src/core/keys.js";
 import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
 import { sanitizeEvidence } from "./public-evidence.js";
+import { nodePrefixPath } from "./local-tools.js";
 
 type Json = Record<string, unknown>;
 type Category = "UNSUPPORTED_CLIENT" | "OTHER_ERROR" | "SUCCESSFUL_MECHANICAL_REGISTRATION";
 const enabled = process.env.GPTQUEUE_GEMINI_PREFLIGHT === "1";
 const repo = resolve(import.meta.dirname, "../..");
-const gemini = "/home/rahul/nodeenv2251-311/bin/gemini";
+const gemini = nodePrefixPath("bin/gemini");
 const artifactRoot = join(repo, ".gptqueue/repair-qualification/20260912/gemini-preflight");
 const object = (value: unknown): Json | undefined => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
 const digest = async (path: string): Promise<string> => createHash("sha256").update(await readFile(path)).digest("hex");

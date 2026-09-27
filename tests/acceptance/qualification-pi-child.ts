@@ -8,11 +8,12 @@ import { SESSION_KEYS } from "../../src/core/keys.js";
 import { createRegisteredPiExtension } from "../../src/registered-shell/pi-extension.js";
 import type { Availability, ModelParticipant, Participant, RouteAdapter, RouteSpec, RuntimeStatus } from "./qualification-types.js";
 import { validatePiRedisUrl } from "./qualification-pi.js";
+import { homePath, nodePrefixPath } from "./local-tools.js";
 
 export const piNativeChildQualificationRoute = "pi-native-child" as const;
-const installed = "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist";
+const installed = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist");
 const repo = resolve(import.meta.dirname, "../..");
-const subagentsSource = "/home/rahul/.pi/agent/git/github.com/rahulrajaram/pi-subagents/src/index.ts";
+const subagentsSource = homePath(".pi/agent/git/github.com/rahulrajaram/pi-subagents/src/index.ts");
 const subagentsRoot = resolve(dirname(subagentsSource), "..");
 type Json = Record<string, any>;
 type LaunchInput = Readonly<{ role: "sender" | "receiver"; pairId: string; nonce: string; redisUrl: string }>;
@@ -70,7 +71,7 @@ const loadSubagents = async (): Promise<unknown> => {
   const createJiti = module.createJiti as (url: string, options: Json) => { import: (path: string) => Promise<unknown> };
   const loader = createJiti(import.meta.url, { interopDefault: true, alias: {
     "@earendil-works/pi-coding-agent": join(installed, "index.js"),
-    "@earendil-works/pi-tui": "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-tui/dist/index.js",
+    "@earendil-works/pi-tui": nodePrefixPath("lib/node_modules/@earendil-works/pi-tui/dist/index.js"),
     "@sinclair/typebox": join(subagentsRoot, "node_modules/@sinclair/typebox/build/cjs/index.js"),
   } });
   const loaded = await loader.import(subagentsSource) as any;

@@ -98,7 +98,7 @@ import {
   chmodSync,
   statSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Redis } from "ioredis";
 import {
@@ -107,6 +107,7 @@ import {
 } from "../helpers/integration-server.js";
 import { connectAgent, type Agent } from "../helpers/mcp-agent.js";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS } from "../../src/core/keys.js";
+import { CODEX_BIN, homePath, nodePrefixPath } from "../acceptance/local-tools.js";
 
 // ---------------------------------------------------------------------------
 // Gate
@@ -117,10 +118,10 @@ const RUNTIME_ENABLED = process.env.GPTQUEUE_RUNTIME_TESTS === "1";
 // Constants
 // ---------------------------------------------------------------------------
 const PI_REAL_BIN =
-  process.env.NUDGE_PI_BIN || "/home/rahul/nodeenv2251-311/bin/pi";
+  process.env.NUDGE_PI_BIN || nodePrefixPath("bin/pi");
 const CODEX_BIN = "codex";
-const REAL_PI_AGENT_DIR = "/home/rahul/.pi/agent";
-const REAL_CODEX_HOME = join(process.env.HOME ?? "/home/rahul", ".codex");
+const REAL_PI_AGENT_DIR = homePath(".pi/agent");
+const REAL_CODEX_HOME = join(process.env.HOME ?? homedir(), ".codex");
 const CODEX_MODEL = "gpt-5.6-sol";
 const MCP_SERVER_NAME = "gptqueue-shared"; // tool prefix: gptqueue_shared_*
 

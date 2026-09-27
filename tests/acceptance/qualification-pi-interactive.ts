@@ -9,9 +9,10 @@ import * as pty from "node-pty";
 import { SESSION_KEYS } from "../../src/core/keys.js";
 import type { Availability, ModelParticipant, Participant, RouteAdapter, RouteSpec, RuntimeStatus } from "./qualification-types.js";
 import { validatePiRedisUrl } from "./qualification-pi.js";
+import { nodePrefixPath } from "./local-tools.js";
 
 export const piInteractiveQualificationRoute = "pi-interactive" as const;
-const installed = "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist";
+const installed = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist");
 const repo = resolve(import.meta.dirname, "../..");
 type Json = Record<string, unknown>;
 type LaunchInput = Readonly<{ role: "sender" | "receiver"; pairId: string; nonce: string; redisUrl: string }>;

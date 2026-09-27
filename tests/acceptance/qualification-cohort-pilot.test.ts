@@ -18,6 +18,7 @@ import { checkExchangeEvidence } from "./oracle.js";
 import { sanitizeEvidence } from "./public-evidence.js";
 import { collectPeerDiscovery } from "./qualification-discovery.js";
 import type { Availability, ModelParticipant, Participant, PairSpec, RawEvidenceRef, RouteAdapter, RuntimeStatus } from "./qualification-types.js";
+import { CODEX_BIN, nodePrefixPath } from "./local-tools.js";
 
 const stdioEnabled = process.env.GPTQUEUE_QUALIFICATION_COHORT_PILOT === "1";
 const transportEnabled = process.env.GPTQUEUE_QUALIFICATION_TRANSPORT_PILOT === "1";
@@ -29,7 +30,7 @@ const repo = resolve(import.meta.dirname, "../..");
 const artifactRoot = join(repo, ".gptqueue/repair-qualification/20260912/qualification-cohort-pilot");
 const sourceFiles = [
   "tests/acceptance/codex-appserver-history.ts", "tests/acceptance/codex-support.ts", "tests/acceptance/owned-redis.ts",
-  "tests/acceptance/qualification-discovery.ts", "tests/acceptance/qualification-cohort-pilot.test.ts", "tests/acceptance/qualification-driver.ts", "tests/acceptance/qualification-evidence.ts", "tests/acceptance/qualification-types.ts", "tests/acceptance/qualification-scheduler.ts", "tests/acceptance/qualification-codex.ts", "tests/acceptance/qualification-pi.ts", "tests/acceptance/qualification-pi-sdk.ts", "tests/acceptance/qualification-generic.ts", "tests/acceptance/oracle.ts", "src/experimental-wrapper/bridge.ts", "src/registered-shell/runtime.ts", "src/registered-shell/codex-socket.ts", "src/registered-shell/codex-history.ts", "src/registered-shell/pi-extension.ts", "dist/registered-shell/pi-extension.js", "dist/mcp-server/index.js", "/home/rahul/.local/bin/codex", "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js", "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-client.js",
+  "tests/acceptance/qualification-discovery.ts", "tests/acceptance/qualification-cohort-pilot.test.ts", "tests/acceptance/qualification-driver.ts", "tests/acceptance/qualification-evidence.ts", "tests/acceptance/qualification-types.ts", "tests/acceptance/qualification-scheduler.ts", "tests/acceptance/qualification-codex.ts", "tests/acceptance/qualification-pi.ts", "tests/acceptance/qualification-pi-sdk.ts", "tests/acceptance/qualification-generic.ts", "tests/acceptance/oracle.ts", "src/experimental-wrapper/bridge.ts", "src/registered-shell/runtime.ts", "src/registered-shell/codex-socket.ts", "src/registered-shell/codex-history.ts", "src/registered-shell/pi-extension.ts", "dist/registered-shell/pi-extension.js", "dist/mcp-server/index.js", CODEX_BIN, nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js"), nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-client.js"),
 ] as const;
 type Json = Record<string, unknown>;
 type CleanupResult = Readonly<{ name: string; status: "fulfilled" | "rejected"; error?: string }>;
@@ -575,7 +576,7 @@ describe.skipIf(!enabled)("bounded qualification cohort pilot", () => {
       let childProfile: string | undefined;
       let childModelRuntime: any;
       if (plan.variant === "pi-child" || childBridgeVariant(plan.variant)) {
-        const sdk = await import(pathToFileURL("/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js").href) as any;
+        const sdk = await import(pathToFileURL(nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href) as any;
         childModelRuntime = await sdk.ModelRuntime.create({ allowModelNetwork: false });
         const modelValue = childModelRuntime.getModel("openrouter", "z-ai/glm-5.3-flash");
         if (!modelValue || !childModelRuntime.hasConfiguredAuth("openrouter")) throw new Error("Pi child cohort model/auth is unavailable");

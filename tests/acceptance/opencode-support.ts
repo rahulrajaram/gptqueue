@@ -5,14 +5,15 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { homePath } from "./local-tools.js";
 
 export const repo = process.cwd();
-export const opencodeBin = process.env.OPENCODE_BIN ?? "/home/rahul/.opencode/bin/opencode";
+export const opencodeBin = process.env.OPENCODE_BIN ?? homePath(".opencode/bin/opencode");
 export const model = "zai-coding-plan/glm-5.3";
 export const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 export const mcpEntry = join(repo, "dist/mcp-server/index.js");
 export const timeoutMs = Math.min(300_000, Math.max(60_000, Number(process.env.GPTQUEUE_OPENCODE_TIMEOUT_MS ?? 240_000)));
-export const modelsPath = "/home/rahul/.cache/opencode/models.json";
+export const modelsPath = homePath(".cache/opencode/models.json");
 
 export type Json = Record<string, unknown>;
 
