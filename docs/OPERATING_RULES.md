@@ -68,7 +68,8 @@ correlation ids in payloads.
   launch never loses accepted work.
 - One wake lease per actor: concurrent sends coalesce onto a single launch.
 - Launch contracts are governed by the operator allowlist
-  (`.gptqueue/launch-allowlist.json`, v2 exact argv templates); dispatch
+  (`~/.config/gptqueue/launch-allowlist.json` or `GPTQUEUE_LAUNCH_ALLOWLIST`,
+  v2 exact argv templates); dispatch
   re-checks it fail-closed. Shells and interpreter inline-code flags are
   rejected regardless of the allowlist.
 - A launched runtime proves itself by registering under the actor's name —

@@ -190,9 +190,14 @@ which let a caller register an arbitrary program (or a shell like
 that hole, GPTQueue now gates every runtime launch behind an **operator
 allowlist**.
 
-The allowlist is an operator-authored file at `./.gptqueue/launch-allowlist.json`
-relative to the server's working directory (override the path with the
-`GPTQUEUE_LAUNCH_ALLOWLIST` env var). Format (version 2):
+The allowlist is an operator-authored file at
+`$XDG_CONFIG_HOME/gptqueue/launch-allowlist.json` (default
+`~/.config/gptqueue/launch-allowlist.json`), deliberately outside any agent
+workspace: an allowlist that agents can edit is one they can authorize
+themselves with. Override the path with `GPTQUEUE_LAUNCH_ALLOWLIST`, and keep it
+somewhere agents cannot write. Symlinks and group- or world-writable files are
+refused. A legacy `./.gptqueue/launch-allowlist.json` in the working directory
+is no longer read; the refusal message names the new location. Format (version 2):
 
 ```json
 {
@@ -315,7 +320,7 @@ Optionally add the hook script to `~/.claude/settings.json` for automatic startu
 |---|---|---|
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
 | `GPTQUEUE_HOST` | `127.0.0.1` | HTTP server bind host; non-loopback requires `GPTQUEUE_HTTP_TOKEN` |
-| `GPTQUEUE_LAUNCH_ALLOWLIST` | `./.gptqueue/launch-allowlist.json` | Path of the operator wake-launch allowlist (see the security section) |
+| `GPTQUEUE_LAUNCH_ALLOWLIST` | `~/.config/gptqueue/launch-allowlist.json` | Path of the operator wake-launch allowlist; keep it outside agent workspaces (see the security section) |
 | `GPTQUEUE_HTTP_TOKEN` | _(none)_ | Bearer token required on every `/mcp` request when set |
 | `GPTQUEUE_HTTP_IDLE_TIMEOUT_MS` | `0` (off) | Close an HTTP MCP session after this long with no open request (an open SSE stream counts as open); the client gets `404` and re-initializes |
 | `GPTQ_AGENT_NAME` | _(none)_ | Pre-register with this agent name on startup (stdio only) |

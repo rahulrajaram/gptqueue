@@ -10,7 +10,8 @@
  * basename (`/attacker/work/node`) and have it spawned under the server's OS
  * identity. The ratified model is exact argv identity:
  *
- *   1. `.gptqueue/launch-allowlist.json` at the server's working directory
+ *   1. The operator allowlist (default `~/.config/gptqueue/launch-allowlist.json`,
+ *      outside any agent workspace; see `allowlistFilePath`)
  *      governs new `wake_if_offline` registrations (fail-closed: an absent or
  *      unparseable file refuses admission).
  *   2. Command identity is exact: a bare-name entry matches only the identical
@@ -37,8 +38,9 @@
  * spawns and touches no Redis.
  */
 
-import { readFile, stat } from "fs/promises";
-import { basename, isAbsolute, resolve, sep } from "path";
+import { lstat, readFile, stat } from "fs/promises";
+import { homedir } from "os";
+import { basename, isAbsolute, join, resolve, sep } from "path";
 
 /** One command the operator has permitted to be launched. */
 export interface LaunchAllowlistEntry {
@@ -54,7 +56,7 @@ export interface LaunchAllowlistEntry {
   readonly comment?: string;
 }
 
-/** Document format for `.gptqueue/launch-allowlist.json`. */
+/** Document format for the operator launch allowlist. */
 export interface LaunchAllowlistConfig {
   readonly version: number;
   readonly commands: readonly LaunchAllowlistEntry[];
@@ -170,10 +172,22 @@ const isInlineCodeArg = (arg: string): boolean =>
   /^--(eval|print|command)=/.test(arg) ||
   /^-[ecEpr].+/.test(arg);
 
-/** Path of the operator allowlist file, overridable for tests. */
+/**
+ * Path of the operator allowlist file. It defaults to the user config
+ * directory, outside any workspace: agents running as the same user can write
+ * their workspace, and an allowlist they can edit is one they can
+ * self-authorize with. GPTQUEUE_LAUNCH_ALLOWLIST overrides it.
+ */
 const allowlistFilePath = (): string =>
   process.env.GPTQUEUE_LAUNCH_ALLOWLIST?.trim() ||
-  ".gptqueue/launch-allowlist.json";
+  join(
+    process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config"),
+    "gptqueue",
+    "launch-allowlist.json"
+  );
+
+/** Pre-0.1.0 default, inside the server's working directory; no longer read. */
+const LEGACY_ALLOWLIST_PATH = ".gptqueue/launch-allowlist.json";
 
 /**
  * Reduce a command to its basename. Used ONLY by the rejection predicates
@@ -302,10 +316,26 @@ const loadLaunchAllowlist = async (): Promise<AllowlistLoad> => {
   const path = allowlistFilePath();
   let raw: string;
   try {
+    // lstat, not stat: a symlink could point the allowlist at a writable file.
+    const info = await lstat(path);
+    if (!info.isFile()) {
+      return { kind: "unparseable", reason: `${path} is not a regular file (symlinks are refused)` };
+    }
+    if ((info.mode & 0o022) !== 0) {
+      return { kind: "unparseable", reason: `${path} is group- or world-writable; restrict it (chmod go-w)` };
+    }
     raw = await readFile(path, "utf-8");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { kind: "absent" };
+    if (code === "ENOENT") {
+      if (!process.env.GPTQUEUE_LAUNCH_ALLOWLIST?.trim() && (await lstat(LEGACY_ALLOWLIST_PATH).then(() => true, () => false))) {
+        return {
+          kind: "unparseable",
+          reason: `found ${LEGACY_ALLOWLIST_PATH} in the working directory, which is no longer read because agents can write it; move it to ${path} or set GPTQUEUE_LAUNCH_ALLOWLIST`,
+        };
+      }
+      return { kind: "absent" };
+    }
     return {
       kind: "unparseable",
       reason: `cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`,

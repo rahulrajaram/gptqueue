@@ -74,7 +74,7 @@ the tasks return to the inbox — process tasks idempotently (see
 Agents that are not running can be launched when work arrives:
 
 1. The **operator** allowlists launchable commands in
-   `.gptqueue/launch-allowlist.json` (fail-closed; exact argv templates only;
+   `~/.config/gptqueue/launch-allowlist.json` (fail-closed; exact argv templates only;
    shells and interpreter inline-code flags like `node -e` are always
    rejected — point interpreters at a fixed script file instead):
 
