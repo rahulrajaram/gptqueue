@@ -9,15 +9,17 @@
 -- D3: a same-key call (from == to) would LRANGE, RPUSH (doubling), then DEL
 -- the only copy — silent total mailbox loss. Refuse it as a no-op.
 --
--- Optional KEYS[3] is the source actor's claims index. When it is non-empty
--- the transfer is refused (returns -1): claimed batches are owned by the
--- source identity and would be stranded under a name nothing recovers.
+-- Optional KEYS[3] is the source actor's claims index (scores are expiry
+-- times in epoch ms) with ARGV[1] = now in epoch ms. When it holds an
+-- unexpired claim the transfer is refused (returns -1): claimed batches are
+-- owned by the source identity and would be stranded under a name nothing
+-- recovers. Already-expired entries do not block; recovery re-queues them.
 local src = KEYS[1]
 local dst = KEYS[2]
 if src == dst then
   return 0
 end
-if KEYS[3] and redis.call('ZCARD', KEYS[3]) > 0 then
+if KEYS[3] and redis.call('ZCOUNT', KEYS[3], ARGV[1], '+inf') > 0 then
   return -1
 end
 local msgs = redis.call('LRANGE', src, 0, -1)

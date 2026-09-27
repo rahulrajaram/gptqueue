@@ -50,7 +50,15 @@ export async function receiveMessage(
 
   // Gate: a durable actor owns a directory record and must claim at-least-once.
   const dir = await client.actorDirectory.get(name);
-  if (dir.ok && dir.record !== null) {
+  if (!dir.ok) {
+    // Fail closed: an unreadable record may belong to a durable actor, and a
+    // destructive pop would break its at-least-once delivery.
+    return toolResult(
+      { status: "error", error: { code: dir.error.code, message: dir.error.message } },
+      true
+    );
+  }
+  if (dir.record !== null) {
     return durableActorClaimRequired(name);
   }
 

@@ -16,7 +16,7 @@ import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { MailboxStore } from "../src/core/mailbox-store.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { SessionStore } from "../src/core/session-store.js";
-import { SESSION_KEYS } from "../src/core/keys.js";
+import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
@@ -215,7 +215,7 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
     if (!claimed.ok || claimed.claim === null) throw new Error("expected a claim");
     await seedOldMailbox(1);
 
-    await expect(client.register("both", "new-name", "second")).rejects.toThrow(/outstanding claimed tasks/);
+    await expect(client.register("both", "new-name", "second")).rejects.toThrow(/unexpired claimed tasks/);
 
     expect(client.agentName).toBe("old-name");
     expect(client.sessionId).toBe(first.session_id);
@@ -224,6 +224,16 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
     // The claim still belongs to the old identity and can be acknowledged.
     const ack = await client.taskClaim.acknowledge({ claim_id: claimed.claim.claim_id, actor_id: "old-name", session_id: first.session_id });
     expect(ack.ok).toBe(true);
+  });
+
+  it("allows a rename when the old name's only claims have already expired", async () => {
+    await client.register("both", "old-name", "first");
+    await redis.zadd(CLAIM_KEYS.index("old-name"), Date.now() - 60_000, "long-expired-claim");
+    await seedOldMailbox(1);
+
+    const second = await client.register("both", "new-name", "second");
+    expect(second.name).toBe("new-name");
+    expect(await contents(redis, "new-name")).toEqual([msg(1)]);
   });
 
   it("createSession failure changes nothing: old session, mailbox, and registry intact", async () => {

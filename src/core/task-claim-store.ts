@@ -190,7 +190,11 @@ export class TaskClaimStore {
       SESSION_KEYS.inboxTrace(actorId)
     )) as number;
     // Counters carry a TTL, but delete them now; escape glob metacharacters so
-    // a name like "a*" cannot match other actors' counters.
+    // a name like "a*" cannot match other actors' counters. This SCAN is not
+    // atomic with the script above (a full-keyspace SCAN inside Lua would
+    // block Redis): if the same name re-registers and recovers claims in the
+    // meantime, its fresh counters can be reset, granting a poison message a
+    // few extra recovery attempts before quarantine. Accepted as bounded.
     const pattern = CLAIM_KEYS.recoverCount(actorId.replace(/[*?[\]\\]/g, "\\$&"), "*");
     for await (const keys of this.redis.scanStream({ match: pattern, count: 500 })) {
       if ((keys as string[]).length > 0) await this.redis.del(...(keys as string[]));

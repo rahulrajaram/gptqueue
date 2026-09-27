@@ -263,11 +263,11 @@ export class MailboxStore {
   ): Promise<number> {
     const keys = [SESSION_KEYS.queue(fromAgent), SESSION_KEYS.queue(toAgent)];
     if (sourceClaimsIndex) keys.push(sourceClaimsIndex);
-    const raw = await this.redis.eval(this.migrateMessagesScript, keys.length, ...keys);
+    const raw = await this.redis.eval(this.migrateMessagesScript, keys.length, ...keys, Date.now());
     const count = typeof raw === "number" ? raw : parseInt(String(raw), 10);
     if (count === -1) {
       throw new Error(
-        `cannot move '${fromAgent}' to '${toAgent}' while it has outstanding claimed tasks; acknowledge them or let them expire first`
+        `cannot move '${fromAgent}' to '${toAgent}' while it has unexpired claimed tasks; acknowledge them, or wait for their claims to expire, first`
       );
     }
     return count;
