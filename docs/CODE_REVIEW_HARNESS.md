@@ -76,6 +76,12 @@ harness executes).
 - `2026-08-29` — first convening: target = working tree after the
   reliability arc (24 commits). Run root:
   `~/Documents/codereview/review-pipeline/runs/gptqueue-20260829/`.
+- `2026-09-27` — 16 perspectives (13 package defaults plus performance,
+  resource-lifecycle, boundary-contracts) on tree `4632f20` (0.1.0 release
+  candidate). Arms on `zai/glm-5.3-flash`, orchestration and distillation on
+  `zai/glm-5.3` via `pi`, as a recorded operator extension. Run root:
+  `/workspace/codereview/review-pipeline/runs/gptqueue-20260927-glm53/` in the
+  development guest.
 
 ## Enforcement
 
@@ -106,59 +112,11 @@ a docs-file change that alters agent behavior (e.g. AGENTS.md) passes
 without review, so behavior-bearing prose changes should still trigger a
 re-convene by convention.
 
-## Run history
+Runs directory: the gate reads the newest `$CODE_REVIEW_RUNS_DIR/*/distilled-review.md`
+(default `~/Documents/codereview/review-pipeline/runs`); set
+`CODE_REVIEW_RUNS_DIR` when the review package lives elsewhere.
 
-- `2026-08-29` — first convening: target = working tree after the
-  reliability arc (24 commits). Run root:
-  `~/Documents/codereview/review-pipeline/runs/gptqueue-20260829/`.
-
-## Enforcement
-
-The pre-push hook enforces that a push carries only reviewed work. The
-implementation lives in `.githooks/lib/review-gate.sh`, wired into
-`.githooks/pre-push` (which the installed `pre-push` dispatcher execs). The
-rule and its escape hatches are summarized below.
-
-### Freshness rule
-
-1. Locate the **newest** `distilled-review.md` under
-   `~/Documents/codereview/review-pipeline/runs/*/` (by mtime).
-2. Read its recorded **scope HEAD** (written as `` `Scope verified: HEAD
-   `ff2ac66`, ...` ``), resolve the short sha to a full sha via
-   `git rev-parse`.
-3. For each pushed branch tip (stdin lines `<local-ref> <local-sha>
-   <remote-ref> <remote-sha>`; branch deletions are skipped), refuse the push
-   if `git rev-list --count <scope-HEAD>..<local-sha>` is greater than zero —
-   i.e. the tip contains commits created after the review. A blocked push
-   prints the unreviewed commits (`git log --oneline`) and the escape-hatch
-   instructions, then exits 1.
-
-### Decision table
-
-| Condition | Behavior |
-| --- | --- |
-| `.gptqueue/review-override` exists | **Allow** — loud `WAIVER` notice, gate skipped (principal's deliberate escape hatch; the file is never auto-deleted) |
-| No code-review runs dir / no `distilled-review.md` | **Allow** — loud warning that the gate is disabled (documented limitation: environment without review state must not brick pushes) |
-| Scope HEAD recorded but not resolvable in this repo | **Allow** — loud warning, fail-open |
-| Scope HEAD resolved; every pushed tip has `rev-list --count scope..tip == 0` | **Allow** — green confirmation |
-| Scope HEAD resolved; any pushed tip has `rev-list --count scope..tip > 0` | **Block** — exit 1: lists unreviewed commits and the override path |
-
-### Waiver
-
-To push reviewed-but-uniterated work deliberately, create the override marker:
-
-```sh
-touch .gptqueue/review-override
-```
-
-The next push allows with a WAIVER notice. The marker is never removed by a
-hook; remove it manually when review work is complete.
-
-### Limitations
-
-- The gate is fail-open when the code-review package directory is absent, so
-  clone environments without `~/Documents/codereview` can push normally (a
-  loud warning is emitted).
-- The rule is commit-age based, not diff-size based: it blocks any push whose
-  tips postdate the latest distilled review, regardless of whether the new
-  commits are large or trivial.
+Waiver: to push reviewed-but-unreiterated work deliberately, create the
+override marker (`touch .gptqueue/review-override`). The next push allows with
+a WAIVER notice. No hook removes the marker; delete it when review work is
+complete.

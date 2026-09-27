@@ -90,18 +90,27 @@ watcher.on("message", (count: number) => {
   }
 });
 
+// Stopping the watcher talks to Redis, which may be down; never let that
+// block or skip process exit.
+const stopWatcher = (): Promise<void> =>
+  Promise.race([
+    watcher.stop().catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, 2_000).unref()),
+  ]);
+
 // Handle PTY exit
 ptyProcess.onExit(async ({ exitCode }) => {
   idleDetector.destroy();
-  await watcher.stop();
+  await stopWatcher();
   process.exit(exitCode);
 });
 
-// Graceful shutdown
+// Graceful shutdown: kill the wrapped child first, so a Redis failure while
+// stopping the watcher can never leave it running.
 async function shutdown() {
   idleDetector.destroy();
-  await watcher.stop();
   ptyProcess.kill();
+  await stopWatcher();
   process.exit(0);
 }
 process.on("SIGINT", shutdown);

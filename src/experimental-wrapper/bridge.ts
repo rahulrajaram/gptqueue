@@ -24,6 +24,10 @@ const LOOPBACK_HOST = "127.0.0.1";
 const MAX_TRANSPORT_SESSIONS = 4;
 const BRIDGE_CLOSE_GRACE_MS = 1_000;
 
+
+/** MCP annotations mirroring the main server (transports/setup-tools.ts). */
+const READ_ONLY = { readOnlyHint: true } as const;
+const WRITABLE = { readOnlyHint: false } as const;
 export const WRAPPER_VISIBLE_TOOLS = Object.freeze([
   "send_message",
   "receive_message",
@@ -110,6 +114,7 @@ const registerBoundTools = (
     "send_message",
     "[safety: writable] Send a message as the identity already bound to this wrapper.",
     boundSendMessageSchema.shape,
+    WRITABLE,
     async (params) =>
       safeToolCall(async () => {
         // A provisional mailbox with outbound correlations cannot be silently renamed on bind.
@@ -129,6 +134,7 @@ const registerBoundTools = (
     "receive_message",
     "[safety: writable] Receive and consume the next message for the identity already bound to this wrapper.",
     boundReceiveMessageSchema.shape,
+    WRITABLE,
     async (params, extra) =>
       safeToolCall(() =>
         receiveBoundMessage(
@@ -143,12 +149,14 @@ const registerBoundTools = (
     "list_agents",
     "[safety: readonly] List agents with readable labels, exact messaging names, public UUIDs, working directories, clients, registration times, process IDs, and presence. Send messages to the full name; labels are for display.",
     {},
+    READ_ONLY,
     async () => safeToolCall(() => listAgents(redisClient))
   );
   server.tool(
     "get_queue_status",
     "[safety: readonly] Get queue depth and metadata for an agent or all agents.",
     queueStatusSchema.shape,
+    READ_ONLY,
     async (params) =>
       safeToolCall(() =>
         getQueueStatus(redisClient, queueStatusSchema.parse(params))

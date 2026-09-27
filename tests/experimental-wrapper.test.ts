@@ -288,6 +288,10 @@ describe("experimental authenticated bound bridge", () => {
           "session_id"
         );
       }
+      // Same read/write hints as the main server's tools of the same name.
+      expect(Object.fromEntries(catalog.tools.map((tool) => [tool.name, tool.annotations?.readOnlyHint]))).toEqual({
+        send_message: false, receive_message: false, list_agents: true, get_queue_status: true,
+      });
       const forbidden = await client.callTool({
         name: "register_agent",
         arguments: {
