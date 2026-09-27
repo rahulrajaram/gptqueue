@@ -1,5 +1,5 @@
 import { Redis } from "ioredis";
-import type { QueueMessage } from "../mcp-server/types.js";
+import type { QueueMessage } from "./types.js";
 import { SESSION_KEYS } from "./keys.js";
 
 export type InboxEventType = QueueMessage["type"];

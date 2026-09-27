@@ -9,7 +9,7 @@ import { Redis } from "ioredis";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL } from "./keys.js";
-import type { QueueMessage } from "../mcp-server/types.js";
+import type { QueueMessage } from "./types.js";
 import { LUA_DIR } from "./stored-read.js";
 
 const eventKey = SESSION_KEYS.inboxEvents;

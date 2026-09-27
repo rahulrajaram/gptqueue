@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { z } from "zod";
 import type { Redis } from "ioredis";
-import { runtimeBindingSchema, type RuntimeBinding } from "../registered-shell/runtime.js";
+import { runtimeBindingSchema, type RuntimeBinding } from "./runtime-binding.js";
 import { occupancyGuardLua } from "./occupancy-guard.js";
 import { SESSION_KEYS } from "./keys.js";
 

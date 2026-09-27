@@ -4,7 +4,7 @@ import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS } from "./keys.js";
 import { SessionStore } from "./session-store.js";
 import { discoveryRecord, type AgentDiscoveryRecord } from "./agent-discovery.js";
 import { z } from "zod";
-import { runtimeBindingSchema } from "../registered-shell/runtime.js";
+import { runtimeBindingSchema } from "./runtime-binding.js";
 
 export type AgentKind = "controller" | "worker" | "interactive" | "unknown";
 export type ActivationReadiness = "unknown_legacy" | "offline" | "unbound" | "bound_unverified" | "ready";
