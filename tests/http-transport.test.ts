@@ -566,6 +566,34 @@ describe("HTTP transport security (loopback bind + Bearer token)", () => {
   });
 });
 
+describe("HTTP session cap (GPTQUEUE_HTTP_MAX_SESSIONS)", () => {
+  let s: Spawned;
+
+  beforeAll(async () => {
+    s = await spawnHttpServer({ GPTQUEUE_HTTP_MAX_SESSIONS: "2" });
+    await waitHealthy(s);
+  });
+
+  afterAll(async () => {
+    await killChild(s);
+  });
+
+  it("refuses initialize with 503 once the cap is reached, and admits again after a close", async () => {
+    const init = () => fetch(`${s.url}/mcp`, { method: "POST", headers: JSON_HEADERS, body: INIT_BODY });
+    const first = await init(); await first.text();
+    const second = await init(); await second.text();
+    expect([first.status, second.status]).toEqual([200, 200]);
+    const third = await init();
+    expect(third.status).toBe(503);
+    expect(((await third.json()) as { error: string }).error).toContain("GPTQUEUE_HTTP_MAX_SESSIONS");
+
+    const closed = await fetch(`${s.url}/mcp`, { method: "DELETE", headers: { "mcp-session-id": first.headers.get("mcp-session-id")! } });
+    await closed.text();
+    const again = await init(); await again.text();
+    expect(again.status).toBe(200);
+  });
+});
+
 describe("HTTP idle-session sweep (GPTQUEUE_HTTP_IDLE_TIMEOUT_MS)", () => {
   let s: Spawned;
 

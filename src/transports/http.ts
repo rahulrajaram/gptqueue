@@ -121,19 +121,23 @@ if (tokenActive) {
 const transports = new Map<string, StreamableHTTPServerTransport>();
 
 // ---------------------------------------------------------------------------
-// Idle-session sweep (opt-in)
+// Session limits
 //
 // Each session owns a RedisClient (two connections plus lease-refresh and
 // heartbeat timers). A client that vanishes without DELETE would hold them,
-// and keep its agent leased online, until the process exits. With
-// GPTQUEUE_HTTP_IDLE_TIMEOUT_MS > 0, a session with no open request (an SSE
-// GET stream counts as open) for that long is closed; the client's next call
-// gets the spec'd 404 and re-initializes. Unset or 0 keeps sessions forever.
+// and keep its agent leased online, until the process exits. A session with
+// no open request (an SSE GET stream counts as open) for
+// GPTQUEUE_HTTP_IDLE_TIMEOUT_MS (default 1 hour; 0 disables) is closed; the
+// client's next call gets the spec'd 404 and re-initializes. At most
+// GPTQUEUE_HTTP_MAX_SESSIONS (default 256) sessions exist at once; further
+// initialize requests get 503.
 // ---------------------------------------------------------------------------
-const idleTimeoutMs = Math.max(
-  parseInt(process.env.GPTQUEUE_HTTP_IDLE_TIMEOUT_MS || "0", 10) || 0,
-  0
-);
+const envInt = (name: string, fallback: number): number => {
+  const parsed = parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};
+const idleTimeoutMs = envInt("GPTQUEUE_HTTP_IDLE_TIMEOUT_MS", 60 * 60 * 1000);
+const maxSessions = envInt("GPTQUEUE_HTTP_MAX_SESSIONS", 256);
 const activity = new Map<string, { lastSeen: number; open: number }>();
 
 /** Mark a request on a session open until its response closes. */
@@ -188,6 +192,12 @@ app.post("/mcp", async (req, res) => {
   }
 
   if (isInitializeRequest(req.body)) {
+    if (transports.size >= maxSessions) {
+      res.status(503).json({
+        error: `session limit reached (${maxSessions}); close idle sessions or raise GPTQUEUE_HTTP_MAX_SESSIONS`,
+      });
+      return;
+    }
     // New (or re-)session: an initialize with a stale/unknown session id
     // (e.g. after a server restart) starts a fresh session; the client
     // adopts the new id from the response header. This makes server
