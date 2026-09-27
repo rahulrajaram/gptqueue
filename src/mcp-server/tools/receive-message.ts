@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession } from "./session-binding.js";
 import { toolResult } from "../tool-result.js";
 
 export const receiveMessageSchema = z.object({
@@ -45,7 +45,7 @@ export async function receiveMessage(
   params: z.infer<typeof receiveMessageSchema>,
   signal?: AbortSignal
 ) {
-  await ensureSessionBinding(client, params.session_id);
+  await bindSession(client, params.session_id);
   const name = client.requireRegistered();
 
   // Gate: a durable actor owns a directory record and must claim at-least-once.

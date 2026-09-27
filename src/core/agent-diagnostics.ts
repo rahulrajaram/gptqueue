@@ -3,6 +3,7 @@ import { resolve } from "path";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS } from "./keys.js";
 import { SessionStore } from "./session-store.js";
 import { discoveryRecord, type AgentDiscoveryRecord } from "./agent-discovery.js";
+import { z } from "zod";
 import { runtimeBindingSchema } from "../registered-shell/runtime.js";
 
 export type AgentKind = "controller" | "worker" | "interactive" | "unknown";
@@ -12,7 +13,7 @@ export type DeliveryStatus = "queued" | "claimed" | "claim_expired" | "dead_lett
 export type DiagnosticsDetails = Readonly<{
   name: string; discovery: AgentDiscoveryRecord | null; profile: Readonly<Record<string, unknown>> | null;
   capabilities: Readonly<{ protocol_version: string | null; tool_names: readonly string[]; published: boolean }>;
-  online: boolean; runtime_binding: Readonly<{ client: "codex" | "pi"; runtime_id: string; epoch: string; working_directory: string }> | null;
+  online: boolean; runtime_binding: Readonly<{ client: "codex" | "pi" | "opencode"; runtime_id: string; epoch: string; working_directory: string }> | null;
   activation: Readonly<{ state: string | null; attempt: number | null }>;
   readiness: ActivationReadiness; activation_ready: boolean | null;
   queue: Readonly<{ queued: number; claimed: number; dead_lettered: number }>;
@@ -30,7 +31,10 @@ const safeProfile = async (redis: Redis, agent: string): Promise<Readonly<Record
   return null;
 };
 const kind = (v: unknown): AgentKind => v === "controller" || v === "worker" || v === "interactive" ? v : "unknown";
-const safeBinding = (v: unknown) => { const p = runtimeBindingSchema.safeParse(Object.fromEntries(Object.entries(record(v)).filter(([key]) => ["client", "runtime_id", "epoch", "working_directory"].includes(key)))); return p.success ? Object.freeze({ client: p.data.client, runtime_id: p.data.runtime_id, epoch: p.data.epoch, working_directory: p.data.working_directory }) : null; };
+// Stored bindings may come from any host, including OpenCode, whose bindings
+// the codex/pi bind_runtime input schema does not admit.
+const storedBindingSchema = runtimeBindingSchema.extend({ client: z.enum(["codex", "pi", "opencode"]) });
+const safeBinding = (v: unknown) => { const p = storedBindingSchema.safeParse(Object.fromEntries(Object.entries(record(v)).filter(([key]) => ["client", "runtime_id", "epoch", "working_directory"].includes(key)))); return p.success ? Object.freeze({ client: p.data.client, runtime_id: p.data.runtime_id, epoch: p.data.epoch, working_directory: p.data.working_directory }) : null; };
 const now = () => new Date().toISOString();
 
 /**
@@ -126,7 +130,7 @@ export class AgentDiagnostics {
     return Object.freeze({ name: agent, discovery, profile, capabilities: Object.freeze({ protocol_version: typeof metadata.protocol_version === "string" || typeof metadata.protocol_version === "number" ? String(metadata.protocol_version) : null, tool_names: Object.freeze(tools), published: derived.published }), online, runtime_binding: binding, activation: Object.freeze(activation), readiness: derived.readiness, activation_ready: derived.activation_ready, queue: Object.freeze({ queued, claimed, dead_lettered }), evidence_at: at, snapshot: "bounded_non_atomic", next_action: derived.readiness === "bound_unverified" ? "probe_exact_runtime_before_relying_on_activation" : derived.readiness });
   }
 
-  async find(filters: Readonly<{ query?: string; client?: "codex" | "pi"; cwd?: string; working_directory?: string; kind?: AgentKind; activation_ready?: boolean; online?: boolean; limit?: number }> = {}) {
+  async find(filters: Readonly<{ query?: string; client?: "codex" | "pi" | "opencode"; cwd?: string; working_directory?: string; kind?: AgentKind; activation_ready?: boolean; online?: boolean; limit?: number }> = {}) {
     const limit = Math.min(100, Math.max(1, Math.floor(filters.limit ?? 50)));
     const directory = filters.working_directory ?? filters.cwd;
     const query = filters.query?.toLowerCase();

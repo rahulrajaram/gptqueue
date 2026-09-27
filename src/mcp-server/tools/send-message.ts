@@ -2,7 +2,7 @@ import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import type { RedisClient } from "../redis-client.js";
 import type { QueueMessage } from "../types.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession } from "./session-binding.js";
 import { toolResult, type ToolPayload } from "../tool-result.js";
 import {
   classifyPresence,
@@ -374,7 +374,7 @@ export async function sendMessage(
   client: RedisClient,
   params: z.infer<typeof sendMessageSchema>
 ) {
-  await ensureSessionBinding(client, params.session_id);
+  const { agent: sender } = await bindSession(client, params.session_id);
 
   const resolved = await resolveRecipient(client, params.to);
   if (!resolved.ok) {
@@ -393,7 +393,7 @@ export async function sendMessage(
 
   const message: QueueMessage = {
     id: uuidv4(),
-    from: client.requireRegistered(),
+    from: sender,
     to: params.to,
     timestamp: new Date().toISOString(),
     type: params.type,

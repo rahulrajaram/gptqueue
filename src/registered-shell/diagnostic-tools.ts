@@ -16,7 +16,7 @@ const agentProfileSchema = z.object({
   purpose: z.string().trim().min(1).max(500),
   kind: z.enum(["controller", "worker", "interactive", "unknown"]),
 }).strict();
-export const findAgentsSchema = z.object({ query: z.string().max(200).optional(), client: z.enum(["codex", "pi"]).optional(),
+export const findAgentsSchema = z.object({ query: z.string().max(200).optional(), client: z.enum(["codex", "pi", "opencode"]).optional(),
   working_directory: z.string().max(4096).optional(), kind: agentProfileSchema.shape.kind.optional(),
   online: z.boolean().optional(), activation_ready: z.boolean().optional(), limit: z.number().int().min(1).max(100).default(50),
 }).strict();

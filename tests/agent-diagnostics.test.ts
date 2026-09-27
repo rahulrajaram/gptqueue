@@ -20,6 +20,17 @@ describe("AgentDiagnostics", () => {
   it("rejects malformed binding conservatively", async () => { await redis.hset(SESSION_KEYS.registry, "worker", registry("worker", { protocol_version: "1", tool_names: ["claim_tasks", "get_runtime_status", "bind_runtime"] })); await redis.set(SESSION_KEYS.heartbeat("worker"), "alive", "EX", 30); await redis.set("gptq:runtime-binding:worker", "{bad"); const d = await diagnostics.details("worker"); expect(d.runtime_binding).toBeNull(); expect(d.readiness).toBe("unbound"); });
   it("ignores forged profile authority fields and sanitizes profile", async () => { await redis.hset(SESSION_KEYS.registry, "worker", registry("worker")); await redis.set("gptq:agent-profile:worker", JSON.stringify({ label: "Friendly", purpose: "work", kind: "controller", token: "secret", authority: "admin" })); const d = await diagnostics.details("worker"); expect(d.profile).toEqual({ label: "Friendly", purpose: "work", kind: "controller", declaration_source: "self", authoritative: false }); expect(JSON.stringify(d)).not.toContain("secret"); });
   it("supports exact identity filters and reports ambiguity", async () => { await redis.hset(SESSION_KEYS.registry, "a", registry("a"), "b", registry("b")); const result = await diagnostics.find({ query: "nope" }); expect(result.resolution).toBe("none"); const exact = await diagnostics.find({ query: "a" }); expect(exact.resolution).toBe("unique"); });
+  it("keeps OpenCode clients and bindings visible instead of coercing them away", async () => {
+    await redis.hset(SESSION_KEYS.registry, "oc", registry("oc", { client: "opencode", protocol_version: "1", tool_names: ["claim_tasks", "get_runtime_status", "bind_runtime"] }));
+    await redis.set(SESSION_KEYS.heartbeat("oc"), "alive", "EX", 30);
+    await redis.set(SESSION_KEYS.runtimeBinding("oc"), JSON.stringify({ client: "opencode", runtime_id: "ses_1", epoch: "e1", working_directory: "/work" }), "EX", 30);
+    const d = await diagnostics.details("oc");
+    expect(d.discovery?.client).toBe("opencode");
+    expect(d.runtime_binding).toMatchObject({ client: "opencode", runtime_id: "ses_1" });
+    const found = await diagnostics.find({ client: "opencode" });
+    expect(found.resolution).toBe("unique");
+    expect(found.matches.map((m) => m.name)).toEqual(["oc"]);
+  });
   it("filters by cwd and never routes by cwd alone", async () => { await redis.hset(SESSION_KEYS.registry, "a", registry("a", { working_directory: "/same" }), "b", registry("b", { working_directory: "/same" })); const result = await diagnostics.find({ cwd: "/same" }); expect(result.matches).toHaveLength(2); expect(result.resolution).toBe("ambiguous"); });
   it("reports queue counts and queued delivery", async () => { await redis.hset(SESSION_KEYS.registry, "worker", registry("worker")); await redis.rpush(SESSION_KEYS.queue("worker"), task("m1")); const d = await diagnostics.details("worker"); expect(d.queue.queued).toBe(1); expect((await diagnostics.delivery("worker", "m1")).status).toBe("queued"); });
   it("reports active and expired claim locations", async () => { await redis.hset(SESSION_KEYS.registry, "worker", registry("worker")); await redis.hset(CLAIM_KEYS.claims, "c1", JSON.stringify({ claim_id: "c1", actor_id: "worker", session_id: "s", claimed_at: new Date().toISOString(), expires_at: new Date(Date.now() + 60000).toISOString(), tasks: [task("m2")] })); await redis.zadd(CLAIM_KEYS.index("worker"), Date.now() + 60000, "c1"); expect((await diagnostics.delivery("worker", "m2")).status).toBe("claimed"); });

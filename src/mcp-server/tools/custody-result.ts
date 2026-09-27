@@ -1,4 +1,4 @@
-import { toolResult, type ToolPayload } from "../tool-result.js";
+import { toolResult } from "../tool-result.js";
 import type { CustodyOpResult } from "../../core/custody-store.js";
 
 /**
@@ -6,10 +6,7 @@ import type { CustodyOpResult } from "../../core/custody-store.js";
  * surface as structured `status: "error"` error results, matching how queue
  * tools report domain errors (e.g. QUEUE_FULL).
  */
-export function custodyOpResult(
-  result: CustodyOpResult,
-  okPayload: ToolPayload = {}
-) {
+export function custodyOpResult(result: CustodyOpResult) {
   if (!result.ok) {
     return toolResult(
       {
@@ -19,5 +16,7 @@ export function custodyOpResult(
       true
     );
   }
-  return toolResult({ ...okPayload, status: "ok", record: result.record });
+  // The wire contract is status "ok" plus the record; record.state says
+  // whether the worktree is now held, released, and so on.
+  return toolResult({ status: "ok", record: result.record });
 }
