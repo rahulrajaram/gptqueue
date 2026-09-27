@@ -29,6 +29,47 @@ export class InboxEvents {
     return Object.freeze(candidates.filter((m) => m.type === "task" || ownerOf.get(m) === m.from));
   }
 
+  /**
+   * A waiter reuses one blocking connection across waits instead of opening
+   * one per call (a dispatcher waits roughly once a second). Aborting a wait
+   * disconnects it, which is how a blocked XREAD is interrupted; a broken or
+   * aborted connection is replaced on the next wait. Call close() when done.
+   */
+  createWaiter(): Readonly<{
+    wait(agent: string, afterId: string, signal: AbortSignal, blockMs?: number): Promise<string | null>;
+    close(): void;
+  }> {
+    let connection: Redis | null = null;
+    const fresh = async (): Promise<Redis> => {
+      if (connection && connection.status === "ready") return connection;
+      connection?.disconnect();
+      const next = this.redis.duplicate({ lazyConnect: true, retryStrategy: () => null, maxRetriesPerRequest: 0, enableOfflineQueue: false, autoResendUnfulfilledCommands: false });
+      next.on("error", () => undefined); // The awaited command reports failures to the caller.
+      connection = next;
+      await next.connect();
+      return next;
+    };
+    return Object.freeze({
+      wait: async (agent: string, afterId: string, signal: AbortSignal, blockMs = 1000): Promise<string | null> => {
+        signal.throwIfAborted();
+        const current = await fresh();
+        const cancel = () => current.disconnect();
+        signal.addEventListener("abort", cancel, { once: true });
+        try {
+          signal.throwIfAborted();
+          const result = await current.xread("BLOCK", blockMs, "STREAMS", stream(agent), afterId) as [string, [string, string[]][]][] | null;
+          return result?.[0]?.[1]?.at(-1)?.[0] ?? null;
+        } catch (error) {
+          current.disconnect();
+          throw error;
+        } finally {
+          signal.removeEventListener("abort", cancel);
+        }
+      },
+      close: () => { connection?.disconnect(); connection = null; },
+    });
+  }
+
   async wait(agent: string, afterId: string, signal: AbortSignal, blockMs = 1000): Promise<string | null> {
     signal.throwIfAborted();
     const connection = this.redis.duplicate({ lazyConnect: true, retryStrategy: () => null, maxRetriesPerRequest: 0, enableOfflineQueue: false, autoResendUnfulfilledCommands: false });

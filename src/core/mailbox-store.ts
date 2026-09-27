@@ -183,11 +183,12 @@ export class MailboxStore {
       return null;
     }
 
-    const len = await this.redis.llen(SESSION_KEYS.queue(agentName));
-    await this.redis.hset(
-      SESSION_KEYS.mailboxMeta(agentName),
-      "current_size",
-      len
+    // One round trip: record the post-pop depth for get_queue_status.
+    await this.redis.eval(
+      "return redis.call('HSET', KEYS[2], 'current_size', redis.call('LLEN', KEYS[1]))",
+      2,
+      SESSION_KEYS.queue(agentName),
+      SESSION_KEYS.mailboxMeta(agentName)
     );
 
     return message;

@@ -103,11 +103,12 @@ export const startInboxDispatcher = async (
 
   const closed = (async () => {
     let cursor = "0-0";
+    const waiter = events.createWaiter();
     try {
       while (!stop.signal.aborted) {
         try {
           await reconcile();
-          if (!stop.signal.aborted) cursor = await events.wait(agent, cursor, stop.signal, interval) ?? cursor;
+          if (!stop.signal.aborted) cursor = await waiter.wait(agent, cursor, stop.signal, interval) ?? cursor;
         } catch {
           if (stop.signal.aborted) break;
           await trace("activation_failed", undefined, "dispatcher_reconcile_failed").catch(() => undefined);
@@ -115,6 +116,7 @@ export const startInboxDispatcher = async (
         }
       }
     } finally {
+      waiter.close();
       await state.detach().catch(() => undefined);
       await adapter.close().catch(() => undefined);
       await trace("runtime_unbound").catch(() => undefined);

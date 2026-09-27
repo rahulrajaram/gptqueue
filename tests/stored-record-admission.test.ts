@@ -44,6 +44,14 @@ describe("stored record admission", () => {
     await expect(mailbox.receive(agent, 0)).resolves.toMatchObject({ id: "m1" });
   });
 
+  it("receive records the post-pop queue depth in mailbox metadata", async () => {
+    const agent = `depth-${randomUUID()}`;
+    keys.push(SESSION_KEYS.queue(agent), SESSION_KEYS.mailboxMeta(agent));
+    await redis.rpush(SESSION_KEYS.queue(agent), JSON.stringify({ id: "a" }), JSON.stringify({ id: "b" }));
+    await new MailboxStore(redis, redis).receive(agent, 1);
+    expect(await redis.hget(SESSION_KEYS.mailboxMeta(agent), "current_size")).toBe("1");
+  });
+
   it("recovers tasks from an expired claim record that lacks actor_id", async () => {
     const agent = `recover-${randomUUID()}`;
     const claimId = `claim-${randomUUID()}`;

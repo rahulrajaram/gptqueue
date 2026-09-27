@@ -89,6 +89,27 @@ describe("InboxEvents", () => {
     await expect(waiting).resolves.toBeTruthy();
   });
 
+  it("a waiter reuses one blocking connection and replaces it after an abort", async () => {
+    const duplicate = vi.spyOn(redis, "duplicate");
+    const waiter = events.createWaiter();
+    try {
+      const signal = new AbortController().signal;
+      for (let i = 0; i < 3; i += 1) await waiter.wait("idle-agent", "$", signal, 10);
+      expect(duplicate).toHaveBeenCalledTimes(1);
+
+      const controller = new AbortController();
+      const blocked = waiter.wait("idle-agent", "$", controller.signal, 30_000);
+      await new Promise((r) => setTimeout(r, 100));
+      controller.abort();
+      await expect(blocked).rejects.toThrow();
+      await waiter.wait("idle-agent", "$", new AbortController().signal, 10);
+      expect(duplicate).toHaveBeenCalledTimes(2);
+    } finally {
+      waiter.close();
+      duplicate.mockRestore();
+    }
+  });
+
   it("cancels a blocked wait promptly without touching the shared connection", async () => {
     const controller = new AbortController();
     const started = Date.now();
