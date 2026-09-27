@@ -440,6 +440,39 @@ describe("experimental authenticated bound bridge", () => {
     }
   });
 
+  it("forwards SIGINT to a running child, exits 130, and still cleans up", async () => {
+    const name = `gptqueue-experiment-sigint-${Date.now()}`;
+    const workspace = join(REPOSITORY_ROOT, ".gptqueue");
+    const probePath = join(workspace, `sigint-probe-${Date.now()}.mjs`);
+    const previousBinary = process.env.GPTQ_EXPERIMENT_CODEX_BIN;
+    // Only the wrapper's own handlers may see the simulated interrupt.
+    const foreign = process.listeners("SIGINT");
+    for (const listener of foreign) process.off("SIGINT", listener);
+    await writeFile(probePath, "#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 30000);\n", { encoding: "utf8", mode: 0o700 });
+    process.env.GPTQ_EXPERIMENT_CODEX_BIN = probePath;
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const run = runExperimentalWrapper([
+        "codex", "--agent", name, "--workspace", workspace,
+        "--redis-url", TEST_REDIS_URL, "--cleanup", "unregister", "--", "wait",
+      ]);
+      for (let i = 0; i < 200 && !stderr.mock.calls.some(([line]) => String(line).includes("launching codex")); i += 1) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await new Promise((r) => setTimeout(r, 200)); // let the child start
+      process.emit("SIGINT");
+      await expect(run).resolves.toBe(exitCodeFor({ code: null, signal: "SIGINT" }));
+      expect(await cleanupRedis.hexists(SESSION_KEYS.registry, name)).toBe(0);
+      expect(await cleanupRedis.exists(SESSION_KEYS.wrapperClaim(name))).toBe(0);
+    } finally {
+      for (const listener of foreign) process.on("SIGINT", listener);
+      stderr.mockRestore();
+      await rm(probePath, { force: true });
+      if (previousBinary === undefined) delete process.env.GPTQ_EXPERIMENT_CODEX_BIN;
+      else process.env.GPTQ_EXPERIMENT_CODEX_BIN = previousBinary;
+    }
+  });
+
   it.each(["missing", "replaced"] as const)(
     "closes its claim connection after a %s claim prevents cleanup",
     async (failure) => {
