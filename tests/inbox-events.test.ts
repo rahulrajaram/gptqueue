@@ -83,9 +83,20 @@ describe("InboxEvents", () => {
     write.mockRestore();
   });
 
-  it("waits for an event and cancellation owns only its connection", async () => {
+  it("waits for an event", async () => {
     await redis.hset("gptq:meta:b", "max_size", 10); const controller = new AbortController();
     const waiting = events.wait("b", "0-0", controller.signal, 2000); await store.send(message());
-    await expect(waiting).resolves.toBeTruthy(); controller.abort();
+    await expect(waiting).resolves.toBeTruthy();
+  });
+
+  it("cancels a blocked wait promptly without touching the shared connection", async () => {
+    const controller = new AbortController();
+    const started = Date.now();
+    const waiting = events.wait("nobody-sends-here", "$", controller.signal, 30_000);
+    await new Promise((r) => setTimeout(r, 100)); // the duplicate connection is now blocked in XREAD
+    controller.abort();
+    await expect(waiting).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(5_000); // not the 30 s block timeout
+    expect(await redis.ping()).toBe("PONG"); // the shared client still works
   });
 });

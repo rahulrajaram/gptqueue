@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { SessionStore } from "../src/core/session-store.js";
-import { SESSION_KEYS } from "../src/core/keys.js";
+import { SESSION_KEYS, SESSION_DEFAULTS } from "../src/core/keys.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
@@ -45,15 +45,17 @@ describe("SessionStore", () => {
   it("refreshes lease and extends TTL", async () => {
     const session = await store.createSession("agent-b", "consumer");
 
+    // Age the lease to a known-short TTL so the refresh has to restore it.
+    await redis.set(SESSION_KEYS.lease(session.session_id), "alive", "EX", 2);
     const lease1 = await store.getLeaseState(session.session_id);
     expect(lease1.alive).toBe(true);
-    expect(lease1.ttl_seconds).toBeGreaterThan(0);
+    expect(lease1.ttl_seconds).toBeLessThanOrEqual(2);
 
     await store.refreshLease(session.session_id);
 
     const lease2 = await store.getLeaseState(session.session_id);
     expect(lease2.alive).toBe(true);
-    expect(lease2.ttl_seconds).toBeGreaterThan(0);
+    expect(lease2.ttl_seconds).toBeGreaterThan(SESSION_DEFAULTS.LEASE_TTL_SECONDS - 5);
   });
 
   it("closes a session without deleting the mailbox", async () => {
