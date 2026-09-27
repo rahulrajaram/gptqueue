@@ -195,7 +195,7 @@ describe("TaskClaimStore", () => {
     if (!again.ok) expect(again.error.code).toBe("unknown_claim");
   });
 
-  it("a foreign session acknowledge is not_claim_owner naming the owning session", async () => {
+  it("a foreign session acknowledge is not_claim_owner without revealing the owning session", async () => {
     await pushTasks(redis, actorId, ["x1"]);
     const claimed = expectOk(await store.claim(claimReq()));
     const claimId = claimed.claim!.claim_id;
@@ -204,7 +204,7 @@ describe("TaskClaimStore", () => {
     expect(foreign.ok).toBe(false);
     if (!foreign.ok) {
       expect(foreign.error.code).toBe("not_claim_owner");
-      expect(foreign.error.message).toContain("session-runtime");
+      expect(foreign.error.message).not.toContain("session-runtime");
     }
     // The claim is untouched by a failed foreign ack.
     expect(await redis.hget(CLAIM_KEYS.claims, claimId)).not.toBeNull();
@@ -348,7 +348,7 @@ describe("TaskClaimStore", () => {
       expect(stored.expires_at).toBe(ok.expires_at);
     });
 
-    it("a foreign session renewal is not_claim_owner naming the owning session", async () => {
+    it("a foreign session renewal is not_claim_owner without revealing the owning session", async () => {
       await pushTasks(redis, actorId, ["x1"]);
       const claimed = expectOk(await store.claim(claimReq()));
       const claimId = claimed.claim!.claim_id;
@@ -359,7 +359,7 @@ describe("TaskClaimStore", () => {
       expect(foreign.ok).toBe(false);
       if (!foreign.ok) {
         expect(foreign.error.code).toBe("not_claim_owner");
-        expect(foreign.error.message).toContain("session-runtime");
+        expect(foreign.error.message).not.toContain("session-runtime");
       }
       // A failed foreign renewal leaves the claim untouched.
       const stored = JSON.parse(

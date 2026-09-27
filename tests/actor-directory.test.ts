@@ -158,7 +158,8 @@ describe("ActorDirectory", () => {
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected actor_owned_elsewhere");
     expect(res.error.code).toBe("actor_owned_elsewhere");
-    expect(res.error.message).toContain("session-a");
+    // A session id is a bearer credential: the owner must never be echoed.
+    expect(res.error.message).not.toContain("session-a");
   });
 
   it("allows the owning session to update its own profile", async () => {

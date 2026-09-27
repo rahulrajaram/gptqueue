@@ -193,7 +193,7 @@ export class ActorDirectory {
       if (existing !== null && existing.registered_by !== input.registered_by) {
         return fail(
           "actor_owned_elsewhere",
-          `actor '${profile.actor_id}' is owned by session '${existing.registered_by}'`
+          `actor '${profile.actor_id}' is owned by another session`
         );
       }
 
@@ -213,7 +213,7 @@ export class ActorDirectory {
     if (current !== null && current.registered_by !== input.registered_by) {
       return fail(
         "actor_owned_elsewhere",
-        `actor '${profile.actor_id}' is owned by session '${current.registered_by}'`
+        `actor '${profile.actor_id}' is owned by another session`
       );
     }
     return fail(

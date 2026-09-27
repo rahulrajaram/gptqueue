@@ -347,7 +347,8 @@ export class TaskClaimStore {
    * Acknowledge an outstanding claim, confirming same-runtime batch delivery.
    * Removes the claim from the hash and index only for its owning session.
    * Returns how many tasks were acknowledged. A second ack is `unknown_claim`;
-   * a foreign session is `not_claim_owner` naming the owning session.
+   * a foreign session is `not_claim_owner`. The owning session id is never
+   * echoed: a session id is a bearer credential for its agent.
    */
   async acknowledge(input: AcknowledgeInput): Promise<AcknowledgeResult> {
     const result = (await this.redis.eval(
@@ -372,7 +373,7 @@ export class TaskClaimStore {
     }
     return fail(
       "not_claim_owner",
-      `claim '${input.claim_id}' is owned by session '${detail}'`
+      `claim '${input.claim_id}' is owned by another session`
     );
   }
 
@@ -437,7 +438,7 @@ export class TaskClaimStore {
     }
     return fail(
       "not_claim_owner",
-      `claim '${input.claim_id}' is owned by session '${detail}'`
+      `claim '${input.claim_id}' is owned by another session`
     );
   }
 

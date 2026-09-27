@@ -116,7 +116,9 @@ if (tokenActive) {
 }
 
 // Store transports by session ID
-const transports: Record<string, StreamableHTTPServerTransport> = {};
+// A Map, not an object literal: session ids come from a client header, and a
+// lookup like `constructor` must not resolve to an inherited property.
+const transports = new Map<string, StreamableHTTPServerTransport>();
 
 // ---------------------------------------------------------------------------
 // Idle-session sweep (opt-in)
@@ -150,7 +152,7 @@ if (idleTimeoutMs > 0) {
   setInterval(() => {
     const cutoff = Date.now() - idleTimeoutMs;
     for (const [sid, entry] of activity) {
-      const transport = transports[sid];
+      const transport = transports.get(sid);
       if (!transport) {
         activity.delete(sid);
       } else if (entry.open === 0 && entry.lastSeen < cutoff) {
@@ -177,10 +179,11 @@ function createSessionServer(): { server: McpServer; redisClient: RedisClient } 
 app.post("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
-  if (sessionId && transports[sessionId]) {
+  const existing = sessionId ? transports.get(sessionId) : undefined;
+  if (sessionId && existing) {
     // Existing session
     trackRequest(sessionId, res);
-    await transports[sessionId].handleRequest(req, res, req.body);
+    await existing.handleRequest(req, res, req.body);
     return;
   }
 
@@ -194,16 +197,14 @@ app.post("/mcp", async (req, res) => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sid) => {
-        transports[sid] = transport;
+        transports.set(sid, transport);
         activity.set(sid, { lastSeen: Date.now(), open: 0 });
       },
     });
 
     transport.onclose = () => {
       const sid = transport.sessionId;
-      if (sid && transports[sid]) {
-        delete transports[sid];
-      }
+      if (sid) transports.delete(sid);
       if (sid) activity.delete(sid);
       redisClient.shutdown().catch(() => {});
     };
@@ -231,22 +232,23 @@ app.post("/mcp", async (req, res) => {
 // GET /mcp -- SSE stream for server-initiated messages
 app.get("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  if (!sessionId || !transports[sessionId]) {
+  const transport = sessionId ? transports.get(sessionId) : undefined;
+  if (!sessionId || !transport) {
     res.status(404).json({ error: "Session not found" });
     return;
   }
   trackRequest(sessionId, res);
-  await transports[sessionId].handleRequest(req, res);
+  await transport.handleRequest(req, res);
 });
 
 // DELETE /mcp -- close session
 app.delete("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  if (!sessionId || !transports[sessionId]) {
+  const transport = sessionId ? transports.get(sessionId) : undefined;
+  if (!sessionId || !transport) {
     res.status(404).json({ error: "Session not found" });
     return;
   }
-  const transport = transports[sessionId];
   await transport.handleRequest(req, res);
 });
 
@@ -254,7 +256,7 @@ app.delete("/mcp", async (req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
-    sessions: Object.keys(transports).length,
+    sessions: transports.size,
   });
 });
 
@@ -283,9 +285,9 @@ if (udsSocketPath) {
 
 // Graceful shutdown
 async function shutdown() {
-  for (const [sid, transport] of Object.entries(transports)) {
+  for (const [sid, transport] of transports) {
     await transport.close();
-    delete transports[sid];
+    transports.delete(sid);
   }
   process.exit(0);
 }

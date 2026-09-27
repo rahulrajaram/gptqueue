@@ -613,6 +613,27 @@ describe("HTTP idle-session sweep (GPTQUEUE_HTTP_IDLE_TIMEOUT_MS)", () => {
     expect(r.status).toBe(404);
   });
 
+  it("treats inherited property names as unknown sessions and survives the sweep", async () => {
+    for (const bogus of ["constructor", "__proto__", "toString"]) {
+      const post = await fetch(`${s.url}/mcp`, {
+        method: "POST",
+        headers: { ...JSON_HEADERS, "mcp-session-id": bogus },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "list_agents", arguments: {} } }),
+      });
+      await post.text();
+      expect(post.status).toBe(404);
+      for (const method of ["GET", "DELETE"]) {
+        const r = await fetch(`${s.url}/mcp`, { method, headers: { "mcp-session-id": bogus } });
+        await r.text();
+        expect(r.status).toBe(404);
+      }
+    }
+    // Several sweep intervals (600 ms timeout) later, the server is still up.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(s.child.exitCode).toBeNull();
+    expect((await fetch(`${s.url}/health`)).ok).toBe(true);
+  });
+
   it("keeps a session whose SSE stream is open, then sweeps it after the stream closes", async () => {
     const sid = await initialize();
     const stream = new AbortController();
