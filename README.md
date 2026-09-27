@@ -97,15 +97,27 @@ Acknowledging a claim clears the counters of its tasks, and `dlq_requeue` restor
 
 ## Prerequisites
 
-- **Node.js** >= 18
+- **Node.js** >= 20
 - **Redis** running locally (default `redis://127.0.0.1:6379`)
 
 ## Install
 
+From npm (ships prebuilt; provides `gptqueue-server`, `gptqueue-http` and `gptqueue-pty`):
+
+```bash
+npm install -g gptqueue
+```
+
+`gptqueue-pty` needs the native `node-pty` module. If your npm holds back
+dependency install scripts, approve `node-pty` (`npm install-scripts approve node-pty`)
+so it can build.
+
+From source:
+
 ```bash
 git clone https://github.com/rahulrajaram/gptqueue.git
 cd gptqueue
-npm install   # builds automatically via postinstall
+npm install   # builds automatically via prepare
 ```
 
 ## Transports

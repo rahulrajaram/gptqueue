@@ -17,6 +17,7 @@ import { sendMessage, sendMessageSchema } from "../mcp-server/tools/send-message
 import { stableToolError } from "../mcp-server/tool-result.js";
 import { registerRuntimeTools, type RuntimeTools } from "../registered-shell/runtime-tools.js";
 import { InboxEvents } from "../core/inbox-events.js";
+import { VERSION } from "../version.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const MAX_TRANSPORT_SESSIONS = 4;
@@ -183,7 +184,7 @@ export const createBoundMcpServer = (
     throw new Error("Bridge identity does not match the registered session.");
   }
   const server = new McpServer(
-    { name: "gptqueue-registered-wrapper", version: "1.0.0-experimental" },
+    { name: "gptqueue-registered-wrapper", version: `${VERSION}-experimental` },
     {
       instructions:
         (options.runtime

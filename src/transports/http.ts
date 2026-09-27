@@ -18,6 +18,7 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { RedisClient } from "../mcp-server/redis-client.js";
 import { GPTQUEUE_INSTRUCTIONS, registerTools } from "./setup-tools.js";
+import { VERSION } from "../version.js";
 
 const DEFAULT_PORT = 3001;
 
@@ -166,7 +167,7 @@ function createSessionServer(): { server: McpServer; redisClient: RedisClient } 
   const redisClient = new RedisClient(null);
   const server = new McpServer({
     name: "gptqueue",
-    version: "1.0.0",
+    version: VERSION,
   }, { instructions: GPTQUEUE_INSTRUCTIONS });
   registerTools(server, redisClient);
   return { server, redisClient };

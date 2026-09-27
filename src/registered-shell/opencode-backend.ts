@@ -17,6 +17,7 @@ import {
 } from "./opencode-sessions.js";
 import type { RuntimeTools } from "./runtime-tools.js";
 import type { RuntimeAdapter } from "./runtime.js";
+import { VERSION } from "../version.js";
 
 const MAX_SESSION_ID_LENGTH = 200;
 
@@ -126,7 +127,7 @@ export const createOpenCodeBackend = async (
     server = createBoundMcpServer({ agentName, redisClient: redis, runtime: runtimeTools }, shutdown.signal);
     const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
-    client = new Client({ name: "gptqueue-opencode-host", version: "1.0.0" });
+    client = new Client({ name: "gptqueue-opencode-host", version: VERSION });
     await client.connect(clientTransport);
     dispatcher = await startInboxDispatcher(
       redis.adapterConnection,

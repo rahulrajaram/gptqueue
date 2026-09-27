@@ -1,6 +1,6 @@
 {
   "name": "gptqueue",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Inter-agent communication via MCP + Redis",
   "type": "module",
   "main": "dist/mcp-server/index.js",
@@ -11,30 +11,44 @@
   },
   "scripts": {
     "build": "tsc && cp -r src/mcp-server/lua dist/mcp-server/",
-    "prepare": "scripts/install-commithooks",
-    "postinstall": "npm run build",
+    "prepare": "npm run build && scripts/install-commithooks",
     "dev": "tsc --watch",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm test"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "@types/node": "^25.2.3",
-    "@types/uuid": "^10.0.0",
     "express": "^5.2.1",
     "ioredis": "^5.9.3",
     "node-pty": "^1.1.0",
-    "typescript": "^5.9.3",
     "uuid": "^13.0.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
+    "@types/node": "^25.2.3",
+    "@types/uuid": "^10.0.0",
     "oxlint": "^1.51.0",
+    "typescript": "^5.9.3",
     "vitest": "^4.1.4"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rahulrajaram/gptqueue.git"
+  },
+  "homepage": "https://github.com/rahulrajaram/gptqueue#readme",
+  "bugs": {
+    "url": "https://github.com/rahulrajaram/gptqueue/issues"
+  },
+  "files": [
+    "dist/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ]
 }

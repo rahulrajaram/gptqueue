@@ -8,6 +8,7 @@ import { createPiRuntime, type PiRuntimeHost } from "./pi-runtime.js";
 import type { ActivationRequest, ActivationOutcome, RuntimeBinding } from "./runtime.js";
 import { runtimeBindingSchema } from "./runtime.js";
 import { z } from "zod";
+import { VERSION } from "../version.js";
 
 export const GPTQUEUE_TOOLS = ["send_message", "receive_message", "list_agents", "get_queue_status"] as const;
 export const RUNTIME_TOOL_NAMES = ["claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] as const;
@@ -205,7 +206,7 @@ export const createRegisteredPiExtension = (options: {
     args: [options.sidecarPath ?? fileURLToPath(new URL("../../bin/gptqueue-session", import.meta.url)),
       "--client", "pi", "--redis-url", options.redisUrl],
   });
-  const client = new Client({ name: "gptqueue-pi", version: "1.0.0" });
+  const client = new Client({ name: "gptqueue-pi", version: VERSION });
   let activationHandler: ((binding: RuntimeBinding, request: ActivationRequest, signal: AbortSignal) => Promise<ActivationOutcome>) | undefined;
   client.setRequestHandler(z.object({
     method: z.literal("gptqueue/activate"),
