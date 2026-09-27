@@ -7,18 +7,16 @@
 
 import { Redis } from "ioredis";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL } from "./keys.js";
 import type { QueueMessage } from "../mcp-server/types.js";
+import { LUA_DIR } from "./stored-read.js";
 
 const eventKey = SESSION_KEYS.inboxEvents;
 const outstandingKey = SESSION_KEYS.outstanding;
 const eligible = (message: QueueMessage): boolean =>
   message.type === "task" || (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
 
 /** Own the blocking socket so cancelling one receive cannot affect another. */
 const cancellablePop = async (

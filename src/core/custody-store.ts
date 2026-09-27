@@ -15,8 +15,7 @@
 import { Redis } from "ioredis";
 import { z } from "zod";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { CUSTODY_KEYS } from "./keys.js";
 import {
   admitHandoffRecord,
@@ -28,9 +27,8 @@ import {
   type CustodyRecord,
   type WorktreeIdentity,
 } from "./custody-model.js";
+import { LUA_DIR, excerptOf, type StoredRead as StoredReadOf } from "./stored-read.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
 
 /** Sentinel passed to the Lua script for a field that is expected to be absent. */
 const ABSENT = "ABSENT";
@@ -95,13 +93,7 @@ const isValidInventory = (inventory: unknown): boolean =>
     (entry) => typeof entry === "string" && entry.length > 0
   );
 
-/** Save a short, bounded excerpt of a raw stored value for diagnostics. */
-const excerptOf = (raw: string): string =>
-  raw.length <= 80 ? raw : `${raw.slice(0, 80)}...`;
-
-type StoredRead =
-  | { readonly kind: "record"; readonly record: CustodyRecord | null }
-  | { readonly kind: "corrupt"; readonly excerpt: string };
+type StoredRead = StoredReadOf<CustodyRecord>;
 
 /**
  * Read admission for a stored custody record: every field the domain code

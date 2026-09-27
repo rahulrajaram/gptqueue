@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { isAbsolute } from "node:path";
+import { validateIdentity as validateSessionIdentity } from "./opencode-sessions.js";
 import { RedisClient } from "../mcp-server/redis-client.js";
 import { createBoundMcpServer } from "../experimental-wrapper/bridge.js";
 import { startInboxDispatcher, type InboxDispatcher } from "./inbox-dispatcher.js";
@@ -18,8 +18,6 @@ import {
 import type { RuntimeTools } from "./runtime-tools.js";
 import type { RuntimeAdapter } from "./runtime.js";
 import { VERSION } from "../version.js";
-
-const MAX_SESSION_ID_LENGTH = 200;
 
 export type OpenCodeBackendOptions = Readonly<{
   redisUrl: string;
@@ -43,12 +41,9 @@ export const opencodeAgentName = (sessionID: string): string =>
   `gptqueue-opencode-${sessionID}`;
 
 const validateIdentity = (identity: OpenCodeSessionIdentity): void => {
-  if (
-    identity.sessionID.trim().length === 0 ||
-    identity.sessionID.length > MAX_SESSION_ID_LENGTH ||
-    identity.directory.trim().length === 0 ||
-    !isAbsolute(identity.directory)
-  ) {
+  try {
+    validateSessionIdentity(identity);
+  } catch {
     throw new Error("OpenCode backend requires a bounded sessionID and absolute directory");
   }
 };

@@ -19,17 +19,15 @@
 import { Redis } from "ioredis";
 import { randomUUID } from "crypto";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import {
   CLAIM_KEYS,
   DLQ_KEYS,
   DLQ_PROVISIONAL,
   SESSION_KEYS,
 } from "./keys.js";
+import { LUA_DIR, excerptOf } from "./stored-read.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
 
 /** One outstanding durable task claim. Tasks are raw inbox payloads, pop order. */
 export interface TaskClaim {
@@ -149,9 +147,6 @@ export interface ActiveClaimInput {
   readonly now: string;
 }
 
-const EXCERPT = 80;
-const excerptOf = (raw: string): string =>
-  raw.length <= EXCERPT ? raw : `${raw.slice(0, EXCERPT)}...`;
 
 export class TaskClaimStore {
   private readonly redis: Redis;

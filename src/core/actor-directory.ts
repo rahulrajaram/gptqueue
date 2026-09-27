@@ -15,8 +15,7 @@
 
 import { Redis } from "ioredis";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { ACTOR_KEYS } from "./keys.js";
 import {
   admitActorProfile,
@@ -24,9 +23,8 @@ import {
   type LaunchContractReadiness,
 } from "./actor-presence.js";
 import { evaluateLaunchPolicy } from "./launch-policy.js";
+import { LUA_DIR, excerptOf, type StoredRead as StoredReadOf } from "./stored-read.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
 
 /**
  * How a runtime is launched for this actor. The command is spawned WITHOUT a
@@ -116,13 +114,7 @@ const freezeLaunch = (
         ...(launch.cwd === undefined ? {} : { cwd: launch.cwd }),
       });
 
-/** Save a short, bounded excerpt of a raw stored value for diagnostics. */
-const excerptOf = (raw: string): string =>
-  raw.length <= 80 ? raw : `${raw.slice(0, 80)}...`;
-
-type StoredRead =
-  | { readonly kind: "record"; readonly record: ActorDirectoryRecord | null }
-  | { readonly kind: "corrupt"; readonly excerpt: string };
+type StoredRead = StoredReadOf<ActorDirectoryRecord>;
 
 export class ActorDirectory {
   private readonly redis: Redis;
