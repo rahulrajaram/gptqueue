@@ -208,6 +208,24 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
     expect(await redis.exists(SESSION_KEYS.heartbeat("old-name"))).toBe(0);
   });
 
+  it("refuses to rename while the old name holds claimed tasks, leaving everything intact", async () => {
+    const first = await client.register("both", "old-name", "first");
+    await redis.rpush(SESSION_KEYS.queue("old-name"), JSON.stringify({ id: "t-1", from: "x", to: "old-name", type: "task", timestamp: new Date().toISOString(), payload: { content: "do" } }));
+    const claimed = await client.taskClaim.claim({ actor_id: "old-name", session_id: first.session_id, max_batch: 1, ttl_seconds: 300, now: new Date().toISOString() });
+    if (!claimed.ok || claimed.claim === null) throw new Error("expected a claim");
+    await seedOldMailbox(1);
+
+    await expect(client.register("both", "new-name", "second")).rejects.toThrow(/outstanding claimed tasks/);
+
+    expect(client.agentName).toBe("old-name");
+    expect(client.sessionId).toBe(first.session_id);
+    expect(await contents(redis, "old-name")).toEqual([msg(1)]);
+    expect(await redis.hexists(SESSION_KEYS.registry, "new-name")).toBe(0);
+    // The claim still belongs to the old identity and can be acknowledged.
+    const ack = await client.taskClaim.acknowledge({ claim_id: claimed.claim.claim_id, actor_id: "old-name", session_id: first.session_id });
+    expect(ack.ok).toBe(true);
+  });
+
   it("createSession failure changes nothing: old session, mailbox, and registry intact", async () => {
     const first = await client.register("both", "old-name", "first");
     await seedOldMailbox(2);

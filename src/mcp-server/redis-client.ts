@@ -217,7 +217,8 @@ export class RedisClient {
 
     if (renaming) {
       try {
-        await this.mailbox.migrateMessages(oldName!, name);
+        // Refused atomically while the old name holds claims (they would be stranded).
+        await this.mailbox.migrateMessages(oldName!, name, CLAIM_KEYS.index(oldName!));
       } catch (error) {
         // The transfer is all-or-nothing: every message is still under the
         // old name. Roll the new session back so the visible state is

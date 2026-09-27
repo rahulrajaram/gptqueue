@@ -238,14 +238,18 @@ export class MailboxStore {
    */
   async migrateMessages(
     fromAgent: string,
-    toAgent: string
+    toAgent: string,
+    sourceClaimsIndex?: string
   ): Promise<number> {
-    const count = await this.redis.eval(
-      this.migrateMessagesScript,
-      2,
-      SESSION_KEYS.queue(fromAgent),
-      SESSION_KEYS.queue(toAgent)
-    );
-    return typeof count === "number" ? count : parseInt(String(count), 10);
+    const keys = [SESSION_KEYS.queue(fromAgent), SESSION_KEYS.queue(toAgent)];
+    if (sourceClaimsIndex) keys.push(sourceClaimsIndex);
+    const raw = await this.redis.eval(this.migrateMessagesScript, keys.length, ...keys);
+    const count = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+    if (count === -1) {
+      throw new Error(
+        `cannot move '${fromAgent}' to '${toAgent}' while it has outstanding claimed tasks; acknowledge them or let them expire first`
+      );
+    }
+    return count;
   }
 }
