@@ -13,6 +13,15 @@ export type ActivationRecord = Readonly<{
 
 const operationKey = SESSION_KEYS.activation;
 
+const ACTIVATION_STATES: ReadonlySet<unknown> = new Set(["pending", "submitting", "accepted", "ambiguous", "exhausted"]);
+const isActivationRecord = (value: unknown): value is ActivationRecord => {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.operation_id === "string" && typeof record.created_at === "string" &&
+    typeof record.attempt === "number" && ACTIVATION_STATES.has(record.state) &&
+    Array.isArray(record.message_ids) && record.message_ids.every((id) => typeof id === "string");
+};
+
 /** Fences every state write against the current runtime owner. */
 export class ActivationStore {
   readonly token = randomUUID();
@@ -38,7 +47,15 @@ export class ActivationStore {
 
   async current(): Promise<ActivationRecord | null> {
     const raw = await this.redis.get(operationKey(this.agent));
-    return raw ? JSON.parse(raw) as ActivationRecord : null;
+    if (!raw) return null;
+    // A corrupt record reads as absent so the dispatcher starts a fresh one
+    // instead of failing every tick until the record's TTL lapses.
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return isActivationRecord(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
   }
 
   async save(record: ActivationRecord | null): Promise<boolean> {

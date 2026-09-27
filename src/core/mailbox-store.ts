@@ -9,7 +9,7 @@ import { Redis } from "ioredis";
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { SESSION_KEYS, SESSION_DEFAULTS } from "./keys.js";
+import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL } from "./keys.js";
 import type { QueueMessage } from "../mcp-server/types.js";
 
 const eventKey = SESSION_KEYS.inboxEvents;
@@ -166,7 +166,19 @@ export class MailboxStore {
       : await this.subscriber.blpop(key, timeout);
     if (!result) return null;
 
-    const message: QueueMessage = JSON.parse(result[1]);
+    let message: QueueMessage;
+    try {
+      message = JSON.parse(result[1]) as QueueMessage;
+    } catch {
+      // BLPOP already removed it: park the unparseable payload in the DLQ so
+      // it stays inspectable instead of vanishing inside a thrown error.
+      await this.redis
+        .multi()
+        .lpush(DLQ_KEYS.list(agentName), result[1])
+        .ltrim(DLQ_KEYS.list(agentName), 0, DLQ_PROVISIONAL.DLQ_MAX_LENGTH - 1)
+        .exec();
+      return null;
+    }
 
     const len = await this.redis.llen(SESSION_KEYS.queue(agentName));
     await this.redis.hset(

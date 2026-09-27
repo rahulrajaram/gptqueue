@@ -202,7 +202,9 @@ export class WakeLeaseStore {
       if (
         typeof parsed === "object" &&
         parsed !== null &&
-        typeof (parsed as { lease_id?: unknown }).lease_id === "string"
+        ["lease_id", "actor_id", "issued_by_session", "issued_at", "expires_at"].every(
+          (field) => typeof (parsed as Record<string, unknown>)[field] === "string"
+        )
       ) {
         return Object.freeze(parsed as WakeLease);
       }

@@ -344,6 +344,19 @@ describe("CustodyStore", () => {
     expect(res.error.message).toContain(PATH);
   });
 
+  it("returns store_corrupt for valid JSON that is missing required fields", async () => {
+    for (const bad of [
+      { state: "held", lease_expires_at: "2020-01-01T00:00:00Z" }, // no worktree
+      { state: "bogus", worktree: { worktree_path: PATH, repo_head: "h", tree_fingerprint: "f" } },
+      { state: "held", worktree: { worktree_path: PATH, repo_head: "h", tree_fingerprint: "f" } }, // held without custodian/lease
+    ]) {
+      await redis.hset(CUSTODY_KEYS.records, PATH, JSON.stringify(bad));
+      const res = await store.claim(claim());
+      if (res.ok) throw new Error(`expected store_corrupt for ${JSON.stringify(bad)}`);
+      expect(res.error.code).toBe("store_corrupt");
+    }
+  });
+
   it("enforces the conditional-write precondition in the Lua script", async () => {
     const held = {
       state: "held",

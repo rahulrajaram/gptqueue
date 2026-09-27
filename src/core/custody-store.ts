@@ -13,6 +13,7 @@
  */
 
 import { Redis } from "ioredis";
+import { z } from "zod";
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -101,6 +102,25 @@ const excerptOf = (raw: string): string =>
 type StoredRead =
   | { readonly kind: "record"; readonly record: CustodyRecord | null }
   | { readonly kind: "corrupt"; readonly excerpt: string };
+
+/**
+ * Read admission for a stored custody record: every field the domain code
+ * dereferences must be present, so a schema-incomplete value is reported as
+ * store_corrupt instead of throwing later. Extra fields are tolerated.
+ */
+const storedCustodySchema = z
+  .object({
+    state: z.enum(["unowned", "held", "released", "forfeited"]),
+    worktree: z.object({
+      worktree_path: z.string().min(1),
+      repo_head: z.string(),
+      tree_fingerprint: z.string(),
+    }).passthrough(),
+    custodian: z.object({ actor_name: z.string(), session_id: z.string() }).passthrough().optional(),
+    lease_expires_at: z.string().optional(),
+  })
+  .passthrough()
+  .refine((record) => record.state !== "held" || (record.custodian !== undefined && record.lease_expires_at !== undefined));
 
 export class CustodyStore {
   private readonly redis: Redis;
@@ -364,11 +384,7 @@ export class CustodyStore {
   private parseStored(raw: string, path: string): StoredRead {
     try {
       const parsed: unknown = JSON.parse(raw);
-      if (
-        typeof parsed === "object" &&
-        parsed !== null &&
-        typeof (parsed as { state?: unknown }).state === "string"
-      ) {
+      if (storedCustodySchema.safeParse(parsed).success) {
         return { kind: "record", record: parsed as CustodyRecord };
       }
     } catch {

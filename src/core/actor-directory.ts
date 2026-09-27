@@ -269,7 +269,10 @@ export class ActorDirectory {
         parsed !== null &&
         typeof (parsed as { profile?: unknown }).profile === "object" &&
         (parsed as { profile: unknown }).profile !== null &&
-        typeof (parsed as { registered_by?: unknown }).registered_by === "string"
+        typeof (parsed as { registered_by?: unknown }).registered_by === "string" &&
+        // The stored profile must pass the same admission as a new one;
+        // a malformed shape may throw inside it, which is caught below.
+        admitActorProfile((parsed as { profile: DurableActorProfile }).profile).ok
       ) {
         return { kind: "record", record: parsed as ActorDirectoryRecord };
       }

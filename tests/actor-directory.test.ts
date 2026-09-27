@@ -213,6 +213,13 @@ describe("ActorDirectory", () => {
     expect(res.error.message).toContain("actor-a");
   });
 
+  it("returns store_corrupt for a stored profile missing required fields", async () => {
+    await redis.hset(ACTOR_KEYS.profiles, "actor-a", JSON.stringify({ profile: { actor_id: "actor-a" }, registered_by: "session-a" }));
+    const res = await store.get("actor-a");
+    if (res.ok) throw new Error("expected store_corrupt");
+    expect(res.error.code).toBe("store_corrupt");
+  });
+
   it("reports contractReadiness both ways", async () => {
     const runnable = await store.register(register());
     const ok = expectOk(runnable);
