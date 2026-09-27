@@ -458,16 +458,17 @@ export class TaskClaimStore {
 
   /**
    * Return the first non-expired outstanding claim for an actor owned by the
-   * given session, or null. HGETALL-free: scans the actor's zset members and
-   * HGETs each. Corrupt stored JSON is skipped (returns nothing) so workload
-   * derivation on a hot path can never fail; this is intentionally separate
-   * from `get`'s typed store_corrupt path.
+   * given session, or null. HGETALL-free: reads the actor's zset members and
+   * fetches them with one HMGET. Corrupt stored JSON is skipped (returns
+   * nothing) so workload derivation on a hot path can never fail; this is
+   * intentionally separate from `get`'s typed store_corrupt path.
    */
   async activeClaimFor(input: ActiveClaimInput): Promise<TaskClaim | null> {
     const members = await this.redis.zrange(CLAIM_KEYS.index(input.actor_id), 0, -1);
+    if (members.length === 0) return null;
+    const raws = await this.redis.hmget(CLAIM_KEYS.claims, ...members);
     const nowMs = Date.now();
-    for (const claimId of members) {
-      const raw = await this.redis.hget(CLAIM_KEYS.claims, claimId);
+    for (const raw of raws) {
       if (raw === null) continue;
       const claim = this.parseTaskClaim(raw);
       if (claim === null) continue; // skip corrupt silently on the hot path

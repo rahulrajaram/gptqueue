@@ -361,16 +361,24 @@ export class RedisClient {
 
   async listAgents(): Promise<AgentDiscoveryRecord[]> {
     const registry = await this.redis.hgetall(SESSION_KEYS.registry);
-    const agents = [];
-    for (const [name, json] of Object.entries(registry)) {
+    const entries = Object.entries(registry).flatMap(([name, json]) => {
       let parsed: unknown;
-      try { parsed = JSON.parse(json); } catch { continue; }
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-      const reg = parsed as Record<string, unknown>;
-      // Prefer session-based presence; fall back to legacy heartbeat
-      const presence = await this.sessionStore.getPresence(name);
-      const legacyHeartbeat = await this.redis.get(SESSION_KEYS.heartbeat(name));
-      agents.push(discoveryRecord({
+      try { parsed = JSON.parse(json); } catch { return []; }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+      return [{ name, reg: parsed as Record<string, unknown> }];
+    });
+    if (entries.length === 0) return [];
+    // Prefer session-based presence; fall back to legacy heartbeat. Both are
+    // batched across the whole registry rather than read per agent.
+    const names = entries.map(({ name }) => name);
+    const [presences, heartbeats] = await Promise.all([
+      this.sessionStore.getPresenceMany(names),
+      this.redis.mget(names.map((name) => SESSION_KEYS.heartbeat(name))),
+    ]);
+    return entries.map(({ name, reg }, i) => {
+      const presence = presences[i]!;
+      const legacyHeartbeat = heartbeats[i] ?? null;
+      return discoveryRecord({
         name,
         role: typeof reg.role === "string" ? reg.role : "",
         description: typeof reg.description === "string" ? reg.description : undefined,
@@ -378,9 +386,8 @@ export class RedisClient {
         registered_at: reg.registered_at,
         pid: reg.pid,
         metadata: reg.metadata,
-      }));
-    }
-    return agents;
+      });
+    });
   }
 
   async getQueueStatus(

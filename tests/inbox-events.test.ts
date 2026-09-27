@@ -32,6 +32,19 @@ describe("InboxEvents", () => {
     expect(await redis.xlen("gptq:inbox-events:a")).toBe(1);
   });
 
+  it("pending keeps queue order and only correlated replies from the expected peer", async () => {
+    await redis.hset("gptq:meta:b", "max_size", 10); await redis.hset("gptq:meta:a", "max_size", 10);
+    await store.send(message({ id: "task-1" })); await store.send(message({ id: "task-2" }));
+    await store.send(message({ id: "t-a", from: "b", to: "a" }));
+    await store.send(message({ id: "reply-2", from: "b", to: "a", type: "error", payload: { content: "no", in_reply_to: "task-2" } }));
+    await store.send(message({ id: "wrong", from: "c", to: "a", type: "result", payload: { content: "x", in_reply_to: "task-1" } }));
+    await store.send(message({ id: "status", from: "b", to: "a", type: "status", payload: { content: "x" } }));
+    await store.send(message({ id: "reply-1", from: "b", to: "a", type: "result", payload: { content: "ok", in_reply_to: "task-1" } }));
+    await store.send(message({ id: "orphan", from: "b", to: "a", type: "result", payload: { content: "?" } }));
+    expect((await events.pending("a")).map((m) => m.id)).toEqual(["t-a", "reply-2", "reply-1"]);
+    expect(await events.pending("nobody")).toEqual([]);
+  });
+
   it("preflights a bad stream key before enqueue", async () => {
     await redis.hset("gptq:meta:b", "max_size", 10); await redis.set("gptq:inbox-events:b", "bad");
     await expect(store.send(message())).rejects.toThrow(); expect(await redis.llen("gptq:q:b")).toBe(0);

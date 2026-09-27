@@ -110,6 +110,71 @@ describe("SessionStore", () => {
     expect(afterBoth.online).toBe(false);
   });
 
+  it("computes presence for several agents in one call without pruning on read", async () => {
+    const live = await store.createSession("pm-live", "both");
+    const stale = await store.createSession("pm-mixed", "both");
+    const fresh = await store.createSession("pm-mixed", "both");
+    const gone = await store.createSession("pm-gone", "both");
+    await redis.del(SESSION_KEYS.lease(stale.session_id), SESSION_KEYS.lease(gone.session_id));
+
+    const presences = await store.getPresenceMany(["pm-gone", "pm-live", "pm-mixed", "pm-none"]);
+    expect(presences).toEqual([
+      { agent_name: "pm-gone", online: false, active_sessions: [] },
+      { agent_name: "pm-live", online: true, active_sessions: [live.session_id] },
+      { agent_name: "pm-mixed", online: true, active_sessions: [fresh.session_id] },
+      { agent_name: "pm-none", online: false, active_sessions: [] },
+    ]);
+    expect(await redis.scard(SESSION_KEYS.agentSessions("pm-mixed"))).toBe(2);
+    expect(await redis.exists(SESSION_KEYS.session(stale.session_id), SESSION_KEYS.session(gone.session_id))).toBe(2);
+    expect(await store.getPresenceMany([])).toEqual([]);
+  });
+
+  it("brings a stalled session back online when its lease is refreshed after a presence read", async () => {
+    const stalled = await store.createSession("stall-agent", "both");
+    await redis.del(SESSION_KEYS.lease(stalled.session_id));
+    expect((await store.getPresence("stall-agent")).online).toBe(false);
+
+    expect(await store.refreshLease(stalled.session_id)).toBe(true);
+    expect(await store.getPresence("stall-agent")).toEqual({
+      agent_name: "stall-agent", online: true, active_sessions: [stalled.session_id],
+    });
+    expect((await store.getSession(stalled.session_id))?.agent_name).toBe("stall-agent");
+  });
+
+  it("does not resurrect a closed session on a late lease refresh", async () => {
+    const closed = await store.createSession("late-refresh-agent", "both");
+    await store.closeSession(closed.session_id);
+
+    expect(await store.refreshLease(closed.session_id)).toBe(false);
+    expect(await redis.exists(SESSION_KEYS.session(closed.session_id), SESSION_KEYS.lease(closed.session_id))).toBe(0);
+    expect(await redis.scard(SESSION_KEYS.agentSessions("late-refresh-agent"))).toBe(0);
+  });
+
+  it("keeps every session when one agent registers concurrently", async () => {
+    const sessions = await Promise.all(
+      // Staggered starts make later prunes overlap earlier, still-initializing registrations.
+      Array.from({ length: 20 }, (_, i) =>
+        new Promise((r) => setTimeout(r, i)).then(() => store.createSession("burst-agent", "both"))
+      )
+    );
+    expect((await store.getPresence("burst-agent")).active_sessions.sort()).toEqual(
+      sessions.map((s) => s.session_id).sort()
+    );
+  });
+
+  it("prunes an agent's expired sessions when the agent registers again", async () => {
+    const live = await store.createSession("prune-agent", "both");
+    const expired = await store.createSession("prune-agent", "both");
+    await redis.del(SESSION_KEYS.lease(expired.session_id));
+
+    const next = await store.createSession("prune-agent", "both");
+    expect((await redis.smembers(SESSION_KEYS.agentSessions("prune-agent"))).sort()).toEqual(
+      [live.session_id, next.session_id].sort()
+    );
+    expect(await redis.exists(SESSION_KEYS.session(expired.session_id))).toBe(0);
+    expect(await store.refreshLease(expired.session_id)).toBe(false);
+  });
+
   it("resolves agent name from session ID", async () => {
     const session = await store.createSession("lookup-agent", "publisher");
 

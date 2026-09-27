@@ -117,6 +117,50 @@ if (tokenActive) {
 // Store transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport> = {};
 
+// ---------------------------------------------------------------------------
+// Idle-session sweep (opt-in)
+//
+// Each session owns a RedisClient (two connections plus lease-refresh and
+// heartbeat timers). A client that vanishes without DELETE would hold them,
+// and keep its agent leased online, until the process exits. With
+// GPTQUEUE_HTTP_IDLE_TIMEOUT_MS > 0, a session with no open request (an SSE
+// GET stream counts as open) for that long is closed; the client's next call
+// gets the spec'd 404 and re-initializes. Unset or 0 keeps sessions forever.
+// ---------------------------------------------------------------------------
+const idleTimeoutMs = Math.max(
+  parseInt(process.env.GPTQUEUE_HTTP_IDLE_TIMEOUT_MS || "0", 10) || 0,
+  0
+);
+const activity = new Map<string, { lastSeen: number; open: number }>();
+
+/** Mark a request on a session open until its response closes. */
+function trackRequest(sessionId: string, res: { on(event: "close", cb: () => void): unknown }): void {
+  const entry = activity.get(sessionId) ?? { lastSeen: Date.now(), open: 0 };
+  entry.open += 1;
+  entry.lastSeen = Date.now();
+  activity.set(sessionId, entry);
+  res.on("close", () => {
+    entry.open -= 1;
+    entry.lastSeen = Date.now();
+  });
+}
+
+if (idleTimeoutMs > 0) {
+  setInterval(() => {
+    const cutoff = Date.now() - idleTimeoutMs;
+    for (const [sid, entry] of activity) {
+      const transport = transports[sid];
+      if (!transport) {
+        activity.delete(sid);
+      } else if (entry.open === 0 && entry.lastSeen < cutoff) {
+        activity.delete(sid);
+        console.log(`[gptqueue-http] closing idle session ${sid}`);
+        transport.close().catch(() => {});
+      }
+    }
+  }, Math.min(Math.max(Math.floor(idleTimeoutMs / 2), 250), 60_000)).unref();
+}
+
 // Create a fresh MCP server + RedisClient per session
 function createSessionServer(): { server: McpServer; redisClient: RedisClient } {
   const redisClient = new RedisClient(null);
@@ -134,6 +178,7 @@ app.post("/mcp", async (req, res) => {
 
   if (sessionId && transports[sessionId]) {
     // Existing session
+    trackRequest(sessionId, res);
     await transports[sessionId].handleRequest(req, res, req.body);
     return;
   }
@@ -149,6 +194,7 @@ app.post("/mcp", async (req, res) => {
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sid) => {
         transports[sid] = transport;
+        activity.set(sid, { lastSeen: Date.now(), open: 0 });
       },
     });
 
@@ -157,6 +203,7 @@ app.post("/mcp", async (req, res) => {
       if (sid && transports[sid]) {
         delete transports[sid];
       }
+      if (sid) activity.delete(sid);
       redisClient.shutdown().catch(() => {});
     };
 
@@ -187,6 +234,7 @@ app.get("/mcp", async (req, res) => {
     res.status(404).json({ error: "Session not found" });
     return;
   }
+  trackRequest(sessionId, res);
   await transports[sessionId].handleRequest(req, res);
 });
 

@@ -88,6 +88,20 @@ describe("inbox dispatcher", () => {
     await mailbox.send(task(agent)); await eventually(async () => calls >= 1); await mailbox.send(task(agent));
     await eventually(async () => calls >= 2); expect(calls).toBeGreaterThanOrEqual(2);
   });
+  it("backs off repeated activation of a runtime that stays busy", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); let calls = 0;
+    const at: number[] = [];
+    const adapter: RuntimeAdapter = { binding: binding("runtime-backoff"), activate: async () => { calls += 1; at.push(Date.now()); return { status: "busy" }; }, close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 50, maxBackoffMs: 400 }); live.push({ agent, dispatcher });
+    await mailbox.send(task(agent));
+    for (let waited = 0; calls < 5 && waited < 3_000; waited += 20) await new Promise((r) => setTimeout(r, 20));
+    // Waits double from the interval (50, 100, 200, 400 ms); Redis rounds each blocking tick up to ~100 ms,
+    // so without backoff every gap stays near one tick.
+    const gaps = at.slice(1).map((t, i) => t - at[i]!);
+    expect(gaps).toHaveLength(4); expect(gaps[3]!).toBeGreaterThanOrEqual(300);
+    const requested = (await redis.xrange(`gptq:inbox-trace:${agent}`, "-", "+")).filter(([, fields]) => fields.includes("activation_requested"));
+    expect(requested.length).toBe(calls);
+  });
   it("bounds completed retries, records exhaustion, and keeps pending work", async () => {
     const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); const requests: string[] = [];
     const prompts: string[] = [];

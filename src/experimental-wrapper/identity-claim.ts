@@ -11,7 +11,13 @@ end
 if ARGV[3] == "fresh" and redis.call("HEXISTS", KEYS[1], ARGV[1]) == 1 then
   return -1
 end
-if redis.call("SCARD", KEYS[3]) > 0 or redis.call("EXISTS", KEYS[4]) == 1 then
+-- Only a leased session is active; expired members linger until the next registration prunes them.
+for _, sid in ipairs(redis.call("SMEMBERS", KEYS[3])) do
+  if redis.call("EXISTS", "gptq:lease:" .. sid) == 1 then
+    return -2
+  end
+end
+if redis.call("EXISTS", KEYS[4]) == 1 then
   return -2
 end
 if redis.call("SET", KEYS[2], ARGV[2], "NX") then

@@ -591,6 +591,25 @@ describe("experimental authenticated bound bridge", () => {
     await next.release();
   });
 
+  it("ignores expired sessions but refuses a leased one when claiming a name", async () => {
+    const name = `gptqueue-experiment-stale-${Date.now()}`;
+    const [stale, live] = [`stale-${Date.now()}`, `live-${Date.now()}`];
+    await cleanupRedis.sadd(SESSION_KEYS.agentSessions(name), stale);
+    await cleanupRedis.hset(SESSION_KEYS.session(stale), "agent_name", name);
+    try {
+      const claim = await acquireWrapperIdentityClaim(TEST_REDIS_URL, name, false);
+      await claim.release();
+
+      await cleanupRedis.sadd(SESSION_KEYS.agentSessions(name), live);
+      await cleanupRedis.set(SESSION_KEYS.lease(live), "alive", "EX", 30);
+      await expect(
+        acquireWrapperIdentityClaim(TEST_REDIS_URL, name, false)
+      ).rejects.toThrow(/concurrent wrapper ownership/u);
+    } finally {
+      await cleanupRedis.del(SESSION_KEYS.agentSessions(name), SESSION_KEYS.session(stale), SESSION_KEYS.lease(live));
+    }
+  });
+
   it("detects a non-wrapper session collision after claiming a name", async () => {
     const name = `gptqueue-experiment-session-race-${Date.now()}`;
     const claim = await acquireWrapperIdentityClaim(TEST_REDIS_URL, name, false);

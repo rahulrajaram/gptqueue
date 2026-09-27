@@ -7,23 +7,25 @@ export type InboxTraceFields = Readonly<{ stage: InboxTraceStage; timestamp: str
 const stream = (agent: string) => `gptq:inbox-events:${agent}`;
 const traceStream = (agent: string) => `gptq:inbox-trace:${agent}`;
 const outstanding = (agent: string, id: string) => `gptq:outstanding:${agent}:${id}`;
-const eligible = async (redis: Redis, message: QueueMessage): Promise<boolean> =>
-  message.type === "task" || ((message.type === "result" || message.type === "error") &&
-    !!message.payload.in_reply_to && await redis.get(outstanding(message.to, message.payload.in_reply_to)) === message.from);
+const awaitsOutstanding = (message: QueueMessage): message is QueueMessage & { payload: { in_reply_to: string } } =>
+  (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 
 export class InboxEvents {
   constructor(private readonly redis: Redis) {}
 
   async pending(agent: string): Promise<readonly QueueMessage[]> {
     const raw = await this.redis.lrange(`gptq:q:${agent}`, 0, -1);
-    const messages: QueueMessage[] = [];
-    for (const value of raw) {
+    const candidates = raw.flatMap((value) => {
       let message: QueueMessage;
-      try { message = JSON.parse(value) as QueueMessage; } catch { continue; }
-      if (message?.to !== agent || typeof message.id !== "string" || !message.payload) continue;
-      if (await eligible(this.redis, message)) messages.push(message);
-    }
-    return Object.freeze(messages);
+      try { message = JSON.parse(value) as QueueMessage; } catch { return []; }
+      if (message?.to !== agent || typeof message.id !== "string" || !message.payload) return [];
+      return message.type === "task" || awaitsOutstanding(message) ? [message] : [];
+    });
+    // One MGET resolves every reply's outstanding-request owner instead of a GET per message.
+    const replies = candidates.filter(awaitsOutstanding);
+    const owners = replies.length === 0 ? [] : await this.redis.mget(replies.map((m) => outstanding(m.to, m.payload.in_reply_to)));
+    const ownerOf = new Map<QueueMessage, string | null>(replies.map((m, i) => [m, owners[i] ?? null]));
+    return Object.freeze(candidates.filter((m) => m.type === "task" || ownerOf.get(m) === m.from));
   }
 
   async wait(agent: string, afterId: string, signal: AbortSignal, blockMs = 1000): Promise<string | null> {

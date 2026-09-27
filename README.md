@@ -305,6 +305,7 @@ Optionally add the hook script to `~/.claude/settings.json` for automatic startu
 | `GPTQUEUE_HOST` | `127.0.0.1` | HTTP server bind host; non-loopback requires `GPTQUEUE_HTTP_TOKEN` |
 | `GPTQUEUE_LAUNCH_ALLOWLIST` | `./.gptqueue/launch-allowlist.json` | Path of the operator wake-launch allowlist (see the security section) |
 | `GPTQUEUE_HTTP_TOKEN` | _(none)_ | Bearer token required on every `/mcp` request when set |
+| `GPTQUEUE_HTTP_IDLE_TIMEOUT_MS` | `0` (off) | Close an HTTP MCP session after this long with no open request (an open SSE stream counts as open); the client gets `404` and re-initializes |
 | `GPTQ_AGENT_NAME` | _(none)_ | Pre-register with this agent name on startup (stdio only) |
 | `GPTQ_QUEUE_BOUND` | `10` | Max messages per agent inbox |
 | `GPTQ_HTTP_PORT` | `3001` | HTTP server port |

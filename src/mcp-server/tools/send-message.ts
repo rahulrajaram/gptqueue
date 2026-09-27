@@ -81,14 +81,17 @@ export async function gateWakeEligibility(
   to: string
 ): Promise<{ readonly record: ActorDirectoryRecord } | undefined> {
   const dir = await client.actorDirectory.get(to);
-  if (
-    !dir.ok ||
-    dir.record === null ||
-    dir.record.profile.activation_policy.mode !== "wake_if_offline"
-  ) {
+  return dir.ok ? wakeEligible(dir.record) : undefined;
+}
+
+/** The same policy gate applied to an already-read directory record. */
+function wakeEligible(
+  record: ActorDirectoryRecord | null
+): { readonly record: ActorDirectoryRecord } | undefined {
+  if (record === null || record.profile.activation_policy.mode !== "wake_if_offline") {
     return undefined;
   }
-  return Object.freeze({ record: dir.record });
+  return Object.freeze({ record });
 }
 
 /**
@@ -253,6 +256,9 @@ async function wakeOfflineLaunchable(
  * sendMessage). Returns the additive `wake` payload, or undefined when the
  * recipient is not wake-eligible or is already active/idle.
  *
+ * `record` is the directory record resolved before the persist; reusing it
+ * saves a second directory read on every durable-actor send.
+ *
  * Shallow linear composition: gate eligibility -> assemble presence -> classify
  * -> dispatch the classified result. Presence dispatch is exhaustively handled
  * by `wakeDecisionForPresence` (a new presence state is a compile error, never
@@ -263,10 +269,10 @@ async function wakeOfflineLaunchable(
  */
 async function maybeWake(
   client: RedisClient,
-  to: string
+  resolved: ActorDirectoryRecord | null
 ): Promise<SendWakeResult | undefined> {
   try {
-    const gate = await gateWakeEligibility(client, to);
+    const gate = wakeEligible(resolved);
     if (gate === undefined) return undefined;
     const { record } = gate;
 
@@ -338,22 +344,28 @@ function unknownRecipient(to: string) {
  * (b) a REGISTERED agent via the canonical registry. Anything else is an
  * unknown recipient and is rejected with a frozen typed error WITHOUT
  * creating any queue (`gptq:q:<to>`) or metadata (`gptq:meta:<to>`) keys.
+ * Both lookups run in one round trip; the directory result keeps precedence.
  */
 async function resolveRecipient(
   client: RedisClient,
   to: string
-): Promise<{ ok: true } | { ok: false; error: { code: string; message: string } }> {
-  const dir = await client.actorDirectory.get(to);
+): Promise<
+  | { ok: true; record: ActorDirectoryRecord | null }
+  | { ok: false; error: { code: string; message: string } }
+> {
+  const [dir, registered] = await Promise.all([
+    client.actorDirectory.get(to),
+    client.sessions.resolveRegistered(to),
+  ]);
   if (!dir.ok) {
     // Fail closed on a corrupt/unreadable directory: do not create keys.
     return { ok: false, error: { code: dir.error.code, message: dir.error.message } };
   }
   if (dir.record !== null) {
-    return { ok: true }; // durable actor path
+    return { ok: true, record: dir.record }; // durable actor path
   }
-  const registered = await client.sessions.resolveRegistered(to);
   if (registered) {
-    return { ok: true }; // registered (plain) agent path
+    return { ok: true, record: null }; // registered (plain) agent path
   }
   return { ok: false, error: { code: "unknown_recipient", message: "" } };
 }
@@ -418,7 +430,7 @@ export async function sendMessage(
   // persist-before-wake INVARIANT: the mailbox RPUSH above was awaited before
   // any wake attempt, so a launched-but-failed activation can never lose an
   // already-persisted, recoverable message. Waking is purely additive.
-  const wake = await maybeWake(client, params.to);
+  const wake = await maybeWake(client, resolved.record);
   if (wake !== undefined) {
     payload.wake = wake;
   }

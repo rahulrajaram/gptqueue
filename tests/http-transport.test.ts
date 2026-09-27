@@ -565,3 +565,67 @@ describe("HTTP transport security (loopback bind + Bearer token)", () => {
     }
   });
 });
+
+describe("HTTP idle-session sweep (GPTQUEUE_HTTP_IDLE_TIMEOUT_MS)", () => {
+  let s: Spawned;
+
+  beforeAll(async () => {
+    s = await spawnHttpServer({ GPTQUEUE_HTTP_IDLE_TIMEOUT_MS: "600" });
+    await waitHealthy(s);
+  });
+
+  afterAll(async () => {
+    await killChild(s);
+  });
+
+  const sessions = async () =>
+    ((await (await fetch(`${s.url}/health`)).json()) as { sessions: number }).sessions;
+  const initialize = async () => {
+    const r = await fetch(`${s.url}/mcp`, { method: "POST", headers: JSON_HEADERS, body: INIT_BODY });
+    await r.text();
+    expect(r.status).toBe(200);
+    const sid = r.headers.get("mcp-session-id")!;
+    const ack = await fetch(`${s.url}/mcp`, {
+      method: "POST",
+      headers: { ...JSON_HEADERS, "mcp-session-id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+    await ack.text();
+    return sid;
+  };
+  const until = async (check: () => Promise<boolean>, timeoutMs = 5000) => {
+    for (const deadline = Date.now() + timeoutMs; Date.now() < deadline;) {
+      if (await check()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error("condition timed out");
+  };
+
+  it("closes a session with no open request once it has been idle past the timeout", async () => {
+    const sid = await initialize();
+    await until(async () => (await sessions()) === 0);
+    await waitForStdout(s, `closing idle session ${sid}`);
+    const r = await fetch(`${s.url}/mcp`, {
+      method: "POST",
+      headers: { ...JSON_HEADERS, "mcp-session-id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_agents", arguments: {} } }),
+    });
+    expect(r.status).toBe(404);
+  });
+
+  it("keeps a session whose SSE stream is open, then sweeps it after the stream closes", async () => {
+    const sid = await initialize();
+    const stream = new AbortController();
+    const sse = await fetch(`${s.url}/mcp`, {
+      method: "GET",
+      headers: { accept: "text/event-stream", "mcp-session-id": sid },
+      signal: stream.signal,
+    });
+    expect(sse.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 1800));
+    expect(s.stdout).not.toContain(`closing idle session ${sid}`);
+
+    stream.abort();
+    await waitForStdout(s, `closing idle session ${sid}`);
+  });
+});
