@@ -1,7 +1,13 @@
 /**
  * Redis key schema for sessions, mailboxes, and leases. This is the single
  * source of truth for every `gptq:*` key string (and the mailbox size bound).
+ * Lua scripts that build keys from a prefix inside the script (e.g.
+ * `'gptq:lease:' .. sid`) must stay in sync with the builders here.
  */
+
+import { createHash } from "node:crypto";
+
+const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
 /** Session-aware key schema. */
 export const SESSION_KEYS = {
@@ -34,6 +40,34 @@ export const SESSION_KEYS = {
 
   /** Retry-deduplication namespace; individual keys expire after 24 hours. */
   idempotency: (sender: string) => `gptq:idempotency:${sender}`,
+
+  /** Header-only wake events for an agent's inbox (stream). */
+  inboxEvents: (agent: string) => `gptq:inbox-events:${agent}`,
+
+  /** Observability trace of an agent's inbox activations (stream). */
+  inboxTrace: (agent: string) => `gptq:inbox-trace:${agent}`,
+
+  /** Owner of an outstanding request awaiting a reply (string with EX). */
+  outstanding: (agent: string, requestId: string) => `gptq:outstanding:${agent}:${requestId}`,
+
+  /** Registered-shell activation record for an agent (string). */
+  activation: (agent: string) => `gptq:activation:${agent}`,
+
+  /** Registered-shell diagnostic profile for an agent (string). */
+  agentProfile: (agent: string) => `gptq:agent-profile:${agent}`,
+
+  /** Marker that an agent has recent outbound traffic (string with EX). */
+  outboundActivity: (agent: string) => `gptq:outbound-activity:${agent}`,
+
+  /** Experimental-wrapper exclusive ownership claim for an agent name (string). */
+  wrapperClaim: (agent: string) => `gptq:experimental-wrapper-claim:${sha256(agent)}`,
+
+  /** Stable mailbox mapping for a (client, runtime_id) binding (string). */
+  runtimeMailbox: (client: string, runtimeId: string) =>
+    `gptq:runtime-mailbox:${sha256(JSON.stringify([client, runtimeId]))}`,
+
+  /** Append-only audit of identity continuity adoptions (stream). */
+  continuityAudit: "gptq:continuity-audit",
 } as const;
 
 /** Default constants. */

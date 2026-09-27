@@ -1,9 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { SESSION_KEYS } from "../core/keys.js";
 import { TaskClaimStore } from "../core/task-claim-store.js";
-
-const CLAIM_KEY_PREFIX = "gptq:experimental-wrapper-claim:";
 
 const ACQUIRE_CLAIM_SCRIPT = `
 if redis.call("EXISTS", KEYS[2]) == 1 then
@@ -83,8 +81,7 @@ export interface WrapperIdentityClaim {
   readonly abandon: () => void;
 }
 
-const claimKeyFor = (agent: string): string =>
-  `${CLAIM_KEY_PREFIX}${createHash("sha256").update(agent).digest("hex")}`;
+const claimKeyFor = SESSION_KEYS.wrapperClaim;
 
 const closeRedis = async (redis: Redis): Promise<void> => {
   try {

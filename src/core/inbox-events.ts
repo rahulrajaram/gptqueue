@@ -1,12 +1,13 @@
 import { Redis } from "ioredis";
 import type { QueueMessage } from "../mcp-server/types.js";
+import { SESSION_KEYS } from "./keys.js";
 
 export type InboxEventType = QueueMessage["type"];
 export type InboxTraceStage = "activation_requested" | "turn_started" | "activation_queued" | "activation_failed" | "task_claimed" | "task_acknowledged" | "reply_sent" | "runtime_bound" | "runtime_unbound";
 export type InboxTraceFields = Readonly<{ stage: InboxTraceStage; timestamp: string; message_id?: string; in_reply_to?: string; claim_id?: string; operation_id?: string; runtime_id?: string; turn_id?: string; code?: string }>;
-const stream = (agent: string) => `gptq:inbox-events:${agent}`;
-const traceStream = (agent: string) => `gptq:inbox-trace:${agent}`;
-const outstanding = (agent: string, id: string) => `gptq:outstanding:${agent}:${id}`;
+const stream = SESSION_KEYS.inboxEvents;
+const traceStream = SESSION_KEYS.inboxTrace;
+const outstanding = SESSION_KEYS.outstanding;
 const awaitsOutstanding = (message: QueueMessage): message is QueueMessage & { payload: { in_reply_to: string } } =>
   (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 
@@ -14,7 +15,7 @@ export class InboxEvents {
   constructor(private readonly redis: Redis) {}
 
   async pending(agent: string): Promise<readonly QueueMessage[]> {
-    const raw = await this.redis.lrange(`gptq:q:${agent}`, 0, -1);
+    const raw = await this.redis.lrange(SESSION_KEYS.queue(agent), 0, -1);
     const candidates = raw.flatMap((value) => {
       let message: QueueMessage;
       try { message = JSON.parse(value) as QueueMessage; } catch { return []; }

@@ -11,7 +11,7 @@ export type ActivationRecord = Readonly<{
   created_at: string;
 }>;
 
-const operationKey = (agent: string) => `gptq:activation:${agent}`;
+const operationKey = SESSION_KEYS.activation;
 
 /** Fences every state write against the current runtime owner. */
 export class ActivationStore {

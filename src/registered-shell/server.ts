@@ -9,6 +9,7 @@ import { createRuntimeController } from "./runtime-controller.js";
 import { createCodexRuntime } from "./codex-runtime.js";
 import { z } from "zod";
 import type { ActivationOutcome } from "./runtime.js";
+import { SESSION_KEYS } from "../core/keys.js";
 
 export type ShellClient = "codex" | "pi";
 export interface RegisteredShellOptions {
@@ -182,7 +183,7 @@ export const startRegisteredShell = async (
     if (!sessionId) throw new Error("Registration returned no session");
     server = createBoundMcpServer({ agentName, redisClient: redis, runtime }, shutdown.signal);
     // Describe the implementation instantiated by this process, not files currently on disk.
-    const registryKey = "gptq:registry";
+    const registryKey = SESSION_KEYS.registry;
     const registrationRaw = await redis.adapterConnection.hget(registryKey, agentName);
     if (!registrationRaw) throw new Error("Registered shell metadata disappeared");
     const registration = JSON.parse(registrationRaw);

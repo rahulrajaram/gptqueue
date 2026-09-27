@@ -24,7 +24,7 @@ export type DeliveryDiagnostics = Readonly<{ agent: string; message_id: string; 
 const json = (raw: string | null): unknown => { try { return raw === null ? null : JSON.parse(raw); } catch { return null; } };
 const record = (v: unknown): Record<string, unknown> => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
 const safeProfile = async (redis: Redis, agent: string): Promise<Readonly<Record<string, unknown>> | null> => {
-  const raw = await redis.get(`gptq:agent-profile:${agent}`);
+  const raw = await redis.get(SESSION_KEYS.agentProfile(agent));
   const parsed = record(json(raw));
   if (Object.keys(parsed).length) return Object.freeze({ label: typeof parsed.label === "string" ? parsed.label : undefined, purpose: typeof parsed.purpose === "string" ? parsed.purpose : undefined, kind: kind(parsed.kind), declaration_source: "self", authoritative: false });
   return null;
@@ -116,7 +116,7 @@ export class AgentDiagnostics {
     const discovery = discoveryRecord({ name: agent, role: typeof reg.role === "string" ? reg.role : "unknown", description: typeof reg.description === "string" ? reg.description : undefined, online, registered_at: reg.registered_at, pid: reg.pid, metadata: reg.metadata });
     const metadata = record(reg.metadata);
     const binding = safeBinding(json(await this.redis.get(SESSION_KEYS.runtimeBinding(agent))));
-    const operation = record(json(await this.redis.get(`gptq:activation:${agent}`)));
+    const operation = record(json(await this.redis.get(SESSION_KEYS.activation(agent))));
     const activation = { state: typeof operation.state === "string" ? operation.state : null, attempt: Number.isSafeInteger(operation.attempt) ? operation.attempt as number : null };
     const profile = await safeProfile(this.redis, agent);
     const derived = deriveReadiness(online, binding, metadata);
@@ -157,7 +157,7 @@ export class AgentDiagnostics {
         online: false, registered_at: reg.registered_at, pid: reg.pid, metadata,
       });
       const profileRaw = needProfile
-        ? record(json(await this.redis.get(`gptq:agent-profile:${name}`)))
+        ? record(json(await this.redis.get(SESSION_KEYS.agentProfile(name))))
         : {};
       const binding = needBinding
         ? safeBinding(json(await this.redis.get(SESSION_KEYS.runtimeBinding(name))))
@@ -210,7 +210,7 @@ export class AgentDiagnostics {
     const queued = await this.redis.lrange(SESSION_KEYS.queue(agent), 0, 1023); if (queued.some((x) => record(json(x)).id === messageId)) status = "queued";
     for (const id of await this.redis.zrange(CLAIM_KEYS.index(agent), 0, -1)) { const c = record(json(await this.redis.hget(CLAIM_KEYS.claims, id))); if (Array.isArray(c.tasks) && c.tasks.some((x) => record(json(typeof x === "string" ? x : null)).id === messageId)) { status = Date.parse(String(c.expires_at)) < Date.now() ? "claim_expired" : "claimed"; claim_id = id; } }
     const dlq = await this.redis.lrange(DLQ_KEYS.list(agent), 0, 1023); if (dlq.some((x) => record(json(x)).id === messageId)) status = "dead_lettered";
-    const traces = (await this.redis.xrevrange(`gptq:inbox-trace:${agent}`, "+", "-", "COUNT", 1024))
+    const traces = (await this.redis.xrevrange(SESSION_KEYS.inboxTrace(agent), "+", "-", "COUNT", 1024))
       .map(([, fields]) => Object.fromEntries(Array.from({ length: Math.floor(fields.length / 2) }, (_, i) => [fields[i * 2], fields[i * 2 + 1]])));
     if (status === "unknown_history") {
       const claim = traces.find(t => t.message_id === messageId && t.stage === "task_claimed");

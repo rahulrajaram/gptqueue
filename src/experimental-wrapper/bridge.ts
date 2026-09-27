@@ -18,6 +18,7 @@ import { stableToolError } from "../mcp-server/tool-result.js";
 import { registerRuntimeTools, type RuntimeTools } from "../registered-shell/runtime-tools.js";
 import { InboxEvents } from "../core/inbox-events.js";
 import { VERSION } from "../version.js";
+import { SESSION_KEYS } from "../core/keys.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const MAX_TRANSPORT_SESSIONS = 4;
@@ -112,7 +113,7 @@ const registerBoundTools = (
     async (params) =>
       safeToolCall(async () => {
         // A provisional mailbox with outbound correlations cannot be silently renamed on bind.
-        await redisClient.adapterConnection.set(`gptq:outbound-activity:${redisClient.requireRegistered()}`, "1");
+        await redisClient.adapterConnection.set(SESSION_KEYS.outboundActivity(redisClient.requireRegistered()), "1");
         const result = await sendMessage(redisClient, boundSendMessageSchema.parse(params));
         const payload = result.structuredContent as Record<string, unknown> | undefined;
         if (payload?.status === "sent" && (params.type === "result" || params.type === "error")) {

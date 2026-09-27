@@ -12,8 +12,8 @@ import { fileURLToPath } from "url";
 import { SESSION_KEYS, SESSION_DEFAULTS } from "./keys.js";
 import type { QueueMessage } from "../mcp-server/types.js";
 
-const eventKey = (agent: string) => `gptq:inbox-events:${agent}`;
-const outstandingKey = (agent: string, id: string) => `gptq:outstanding:${agent}:${id}`;
+const eventKey = SESSION_KEYS.inboxEvents;
+const outstandingKey = SESSION_KEYS.outstanding;
 const eligible = (message: QueueMessage): boolean =>
   message.type === "task" || (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 

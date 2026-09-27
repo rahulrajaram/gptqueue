@@ -1,5 +1,4 @@
 import { Redis } from "ioredis";
-import { createHash } from "node:crypto";
 import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
 import { SESSION_KEYS, CLAIM_KEYS, SESSION_DEFAULTS } from "../core/keys.js";
@@ -99,7 +98,7 @@ export class RedisClient {
     runtimeId?: string
   ): Promise<void> {
     if (!this._sessionId || this._agentName !== source || source === target) throw new Error("Continuity source ownership mismatch");
-    const wrapper = (name: string) => `gptq:experimental-wrapper-claim:${createHash("sha256").update(name).digest("hex")}`;
+    const wrapper = SESSION_KEYS.wrapperClaim;
     // D5: the target-occupancy guard is generated from the SAME shared
     // signal table as applyContinuity's occupied() (core/occupancy-guard.ts):
     // runtime-binding, heartbeat, wrapper claim, live session leases, and
@@ -140,8 +139,8 @@ export class RedisClient {
       return 1
     `, 13, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
       SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), wrapper(target),
-      SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), `gptq:outbound-activity:${source}`, wrapper(source),
-      SESSION_KEYS.heartbeat(source), "gptq:continuity-audit", source, target, this._sessionId, expectedMapping, runtimeId ?? "");
+      SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), SESSION_KEYS.outboundActivity(source), wrapper(source),
+      SESSION_KEYS.heartbeat(source), SESSION_KEYS.continuityAudit, source, target, this._sessionId, expectedMapping, runtimeId ?? "");
     if (result !== 1) throw new Error(`Continuity adoption refused (${result})`);
     this._agentName = target;
     this.startHeartbeat();

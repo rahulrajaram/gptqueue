@@ -189,8 +189,8 @@ export class TaskClaimStore {
       CLAIM_KEYS.claims,
       CLAIM_KEYS.index(actorId),
       DLQ_KEYS.list(actorId),
-      `gptq:inbox-events:${actorId}`,
-      `gptq:inbox-trace:${actorId}`
+      SESSION_KEYS.inboxEvents(actorId),
+      SESSION_KEYS.inboxTrace(actorId)
     )) as number;
     // Counters carry a TTL, but delete them now; escape glob metacharacters so
     // a name like "a*" cannot match other actors' counters.
