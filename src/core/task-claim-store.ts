@@ -157,6 +157,7 @@ export class TaskClaimStore {
   private readonly batchClaimScript: string;
   private readonly ackScript: string;
   private readonly renewScript: string;
+  private readonly requeueScript: string;
 
   constructor(redis: Redis) {
     this.redis = redis;
@@ -170,6 +171,7 @@ export class TaskClaimStore {
     );
     this.ackScript = readFileSync(join(LUA_DIR, "claims-ack.lua"), "utf-8");
     this.renewScript = readFileSync(join(LUA_DIR, "claims-renew.lua"), "utf-8");
+    this.requeueScript = readFileSync(join(LUA_DIR, "claims-requeue.lua"), "utf-8");
   }
 
   /**
@@ -232,43 +234,26 @@ export class TaskClaimStore {
   /**
    * Move one dead-lettered message from the actor's DLQ back to the inbox tail,
    * restoring a fresh recovery budget (the message's counter key is DELeted).
-   * The matching DLQ envelope is LREM'd by exact string match, then the raw
-   * payload is RPUSHed to the inbox. Not found is a typed dlq_entry_not_found
-   * error.
+   * One Lua script finds the matching envelope, LREMs it, RPUSHes the raw
+   * payload to the inbox and clears the counter atomically, so a failure
+   * cannot lose the message between DLQ and inbox. Not found is a typed
+   * dlq_entry_not_found error.
    */
   async requeue(input: RequeueInput): Promise<RequeueResult> {
-    const list = DLQ_KEYS.list(input.actor_id);
-    const raw = await this.redis.lrange(list, 0, -1);
-    let target: string | null = null;
-    for (const payload of raw) {
-      let id: unknown;
-      try {
-        id = (JSON.parse(payload) as { id?: unknown }).id;
-      } catch {
-        continue;
-      }
-      if (id === input.message_id) {
-        target = payload;
-        break;
-      }
-    }
-    if (target === null) {
+    const moved = await this.redis.eval(
+      this.requeueScript,
+      3,
+      DLQ_KEYS.list(input.actor_id),
+      SESSION_KEYS.queue(input.actor_id),
+      CLAIM_KEYS.recoverCount(input.actor_id, input.message_id),
+      input.message_id
+    );
+    if (moved !== 1) {
       return fail(
         "dlq_entry_not_found",
         `no DLQ entry for message '${input.message_id}' on actor '${input.actor_id}'`
       );
     }
-    const removed = await this.redis.lrem(list, 1, target);
-    if (removed !== 1) {
-      return fail(
-        "dlq_entry_not_found",
-        `DLQ entry for message '${input.message_id}' on actor '${input.actor_id}' could not be removed`
-      );
-    }
-    await this.redis.rpush(SESSION_KEYS.queue(input.actor_id), target);
-    await this.redis.del(
-      CLAIM_KEYS.recoverCount(input.actor_id, input.message_id)
-    );
     return { ok: true, requeued: 1 };
   }
 

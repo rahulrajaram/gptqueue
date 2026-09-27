@@ -1044,6 +1044,21 @@ describe("dead-letter queue (tranche 2)", () => {
     expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(0);
   });
 
+  it("requeue moves only the matching envelope and skips undecodable or non-string ids", async () => {
+    const target = JSON.stringify({ id: "m-target", type: "task", payload: {} });
+    const others = ["not json", JSON.stringify({ id: 7 }), JSON.stringify("m-target"), JSON.stringify({ id: "m-other" })];
+    await redis.rpush(DLQ_KEYS.list(actorId), others[0]!, target, ...others.slice(1));
+    await redis.set(CLAIM_KEYS.recoverCount(actorId, "m-target"), "3");
+
+    const numeric = await store.requeue({ actor_id: actorId, message_id: "7" });
+    expect(numeric.ok).toBe(false);
+    expect(expectOk(await store.requeue({ actor_id: actorId, message_id: "m-target" })).requeued).toBe(1);
+
+    expect(await redis.lrange(DLQ_KEYS.list(actorId), 0, -1)).toEqual(others);
+    expect(await redis.lrange(SESSION_KEYS.queue(actorId), 0, -1)).toEqual([target]);
+    expect(await redis.get(CLAIM_KEYS.recoverCount(actorId, "m-target"))).toBeNull();
+  });
+
   it("requeue of a missing message is a typed dlq_entry_not_found", async () => {
     const missing = await store.requeue({
       actor_id: actorId,
