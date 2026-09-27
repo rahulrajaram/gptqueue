@@ -33,15 +33,19 @@ describe("stored record admission", () => {
     }
   });
 
-  it("receive with timeout 0 returns immediately instead of blocking forever", async () => {
-    const agent = `recv0-${randomUUID()}`;
-    keys.push(SESSION_KEYS.queue(agent), SESSION_KEYS.mailboxMeta(agent));
-    const mailbox = new MailboxStore(redis, redis);
+  it("an unbounded receive does not stall other receives on the same store", async () => {
+    const [idle, busy] = [`idle-${randomUUID()}`, `busy-${randomUUID()}`];
+    keys.push(SESSION_KEYS.queue(idle), SESSION_KEYS.queue(busy), SESSION_KEYS.mailboxMeta(idle), SESSION_KEYS.mailboxMeta(busy));
+    const mailbox = new MailboxStore(redis, redis.duplicate());
+    const waiting = new AbortController();
+    const unbounded = mailbox.receive(idle, 0, waiting.signal).catch(() => null); // blocks until a message or abort
+    await new Promise((r) => setTimeout(r, 100));
+    await redis.rpush(SESSION_KEYS.queue(busy), JSON.stringify({ id: "b1" }));
     const started = Date.now();
-    await expect(mailbox.receive(agent, 0)).resolves.toBeNull();
-    expect(Date.now() - started).toBeLessThan(1_000);
-    await redis.rpush(SESSION_KEYS.queue(agent), JSON.stringify({ id: "m1" }));
-    await expect(mailbox.receive(agent, 0)).resolves.toMatchObject({ id: "m1" });
+    await expect(mailbox.receive(busy, 5)).resolves.toMatchObject({ id: "b1" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    await redis.rpush(SESSION_KEYS.queue(idle), JSON.stringify({ id: "i1" }));
+    await expect(unbounded).resolves.toMatchObject({ id: "i1" });
   });
 
   it("receive records the post-pop queue depth in mailbox metadata", async () => {

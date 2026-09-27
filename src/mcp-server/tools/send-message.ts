@@ -2,7 +2,7 @@ import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import type { RedisClient } from "../redis-client.js";
 import type { QueueMessage } from "../types.js";
-import { bindSession } from "./session-binding.js";
+import { bindSession, ensureSessionBinding } from "./session-binding.js";
 import { toolResult, type ToolPayload } from "../tool-result.js";
 import {
   classifyPresence,
@@ -364,7 +364,9 @@ export async function sendMessage(
   client: RedisClient,
   params: z.infer<typeof sendMessageSchema>
 ) {
-  const { agent: sender } = await bindSession(client, params.session_id);
+  // Recipient first: an unknown recipient is reported as such even to a
+  // caller that is not registered itself (lifecycle invariant H8).
+  await ensureSessionBinding(client, params.session_id);
 
   const resolved = await resolveRecipient(client, params.to);
   if (!resolved.ok) {
@@ -380,6 +382,8 @@ export async function sendMessage(
       true
     );
   }
+
+  const { agent: sender } = await bindSession(client, params.session_id);
 
   const message: QueueMessage = {
     id: uuidv4(),
