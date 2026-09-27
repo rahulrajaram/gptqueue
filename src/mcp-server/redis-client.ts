@@ -10,6 +10,7 @@ import { ActorDirectory } from "../core/actor-directory.js";
 import { WakeLeaseStore } from "../core/wake-lease.js";
 import { TaskClaimStore } from "../core/task-claim-store.js";
 import { discoveryRecord, type AgentDiscoveryMetadata, type AgentDiscoveryRecord } from "../core/agent-discovery.js";
+import { GptQueueError } from "./errors.js";
 
 export class RedisClient {
   private redis: Redis;
@@ -82,7 +83,8 @@ export class RedisClient {
 
   requireRegistered(): string {
     if (!this._agentName) {
-      throw new Error(
+      throw new GptQueueError(
+        "AGENT_NOT_REGISTERED",
         "Agent not registered. Call register_agent first with a name."
       );
     }
@@ -155,7 +157,7 @@ export class RedisClient {
   async reconnectSession(sessionId: string): Promise<string> {
     const session = await this.sessionStore.getSession(sessionId);
     if (!session) {
-      throw new Error(`Session ${sessionId} not found in Redis.`);
+      throw new GptQueueError("SESSION_UNAVAILABLE", `Session ${sessionId} not found in Redis.`);
     }
 
     this._sessionId = sessionId;

@@ -1,3 +1,5 @@
+import { GptQueueError } from "./errors.js";
+
 export type ToolPayload = Record<string, unknown>;
 
 export function toolResult(
@@ -17,7 +19,11 @@ export function toolResult(
 
 export function stableToolError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  const code = /Session .* not found|session.*expired/i.test(message)
+  // gptqueue's own errors carry their code; the text patterns below are only
+  // a fallback for errors raised by dependencies (e.g. ioredis).
+  const code = error instanceof GptQueueError
+    ? error.code
+    : /Session .* not found|session.*expired/i.test(message)
     ? "SESSION_UNAVAILABLE"
     : /not registered/i.test(message)
       ? "AGENT_NOT_REGISTERED"
