@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { SESSION_KEYS } from "../core/keys.js";
+import { TaskClaimStore } from "../core/task-claim-store.js";
 
 const CLAIM_KEY_PREFIX = "gptq:experimental-wrapper-claim:";
 
@@ -188,6 +189,9 @@ export async function acquireWrapperIdentityClaim(
     );
     switch (outcome) {
       case 1:
+        // The Lua script removed the identity; also drop the claim state a
+        // later registration of this name would otherwise inherit.
+        await new TaskClaimStore(redis).purgeActor(agent);
         return "unregistered";
       case 2:
         return "session_closed_only";

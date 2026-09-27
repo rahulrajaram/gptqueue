@@ -86,6 +86,33 @@ describe("RedisClient", () => {
     await client.shutdown();
   });
 
+  it("unregister leaves no claims or DLQ for a later agent with the same name", async () => {
+    const first = new RedisClient(null, TEST_REDIS_URL);
+    const { session_id } = await first.register("both", "reuse-agent", "first owner");
+    const raw = new Redis(TEST_REDIS_URL);
+    try {
+      await raw.rpush("gptq:q:reuse-agent", JSON.stringify({ id: "t-1", from: "x", to: "reuse-agent", type: "task", timestamp: new Date().toISOString(), payload: { content: "do" } }));
+      const claimed = await first.taskClaim.claim({ actor_id: "reuse-agent", session_id, max_batch: 1, ttl_seconds: 300, now: new Date().toISOString() });
+      expect(claimed.ok && claimed.claim !== null).toBe(true);
+      await raw.rpush("gptq:dlq:reuse-agent", JSON.stringify({ id: "dead-1" }));
+
+      await first.unregister();
+      await first.shutdown();
+
+      expect(await raw.exists("gptq:claims-index:reuse-agent", "gptq:dlq:reuse-agent")).toBe(0);
+      const second = new RedisClient(null, TEST_REDIS_URL);
+      const again = await second.register("both", "reuse-agent", "second owner");
+      const dlq = await second.taskClaim.deadLetterEntries({ actor_id: "reuse-agent" });
+      expect(dlq.ok && dlq.entries).toEqual([]);
+      const next = await second.taskClaim.claim({ actor_id: "reuse-agent", session_id: again.session_id, max_batch: 1, ttl_seconds: 300, now: new Date(Date.now() + 3_600_000).toISOString() });
+      expect(next.ok && next.claim).toBeNull();
+      await second.unregister();
+      await second.shutdown();
+    } finally {
+      await raw.quit();
+    }
+  });
+
   it("reports queue depth correctly", async () => {
     const sender = new RedisClient(null, TEST_REDIS_URL);
     const receiver = new RedisClient(null, TEST_REDIS_URL);

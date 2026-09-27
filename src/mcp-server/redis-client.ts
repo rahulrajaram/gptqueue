@@ -335,10 +335,12 @@ export class RedisClient {
       await this.sessionStore.closeSession(this._sessionId);
     }
 
-    // Delete everything
+    // Delete everything, including claims, DLQ and streams a later
+    // registration of the same name would otherwise inherit.
     await this.redis.hdel(SESSION_KEYS.registry, name);
     await this.mailbox.deleteMailbox(name);
     await this.redis.del(SESSION_KEYS.heartbeat(name));
+    await this.taskClaimStore.purgeActor(name);
 
     this._agentName = null;
     this._sessionId = null;

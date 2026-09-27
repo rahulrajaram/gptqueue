@@ -158,6 +158,7 @@ export class TaskClaimStore {
   private readonly ackScript: string;
   private readonly renewScript: string;
   private readonly requeueScript: string;
+  private readonly purgeScript: string;
 
   constructor(redis: Redis) {
     this.redis = redis;
@@ -172,6 +173,32 @@ export class TaskClaimStore {
     this.ackScript = readFileSync(join(LUA_DIR, "claims-ack.lua"), "utf-8");
     this.renewScript = readFileSync(join(LUA_DIR, "claims-renew.lua"), "utf-8");
     this.requeueScript = readFileSync(join(LUA_DIR, "claims-requeue.lua"), "utf-8");
+    this.purgeScript = readFileSync(join(LUA_DIR, "claims-purge.lua"), "utf-8");
+  }
+
+  /**
+   * Delete every piece of durable claim state an actor name owns: outstanding
+   * claims, the DLQ, inbox event/trace streams (atomically), then the
+   * per-message recovery counters. Used when an identity is unregistered so
+   * that a later registration of the same name starts clean.
+   */
+  async purgeActor(actorId: string): Promise<number> {
+    const removed = (await this.redis.eval(
+      this.purgeScript,
+      5,
+      CLAIM_KEYS.claims,
+      CLAIM_KEYS.index(actorId),
+      DLQ_KEYS.list(actorId),
+      `gptq:inbox-events:${actorId}`,
+      `gptq:inbox-trace:${actorId}`
+    )) as number;
+    // Counters carry a TTL, but delete them now; escape glob metacharacters so
+    // a name like "a*" cannot match other actors' counters.
+    const pattern = CLAIM_KEYS.recoverCount(actorId.replace(/[*?[\]\\]/g, "\\$&"), "*");
+    for await (const keys of this.redis.scanStream({ match: pattern, count: 500 })) {
+      if ((keys as string[]).length > 0) await this.redis.del(...(keys as string[]));
+    }
+    return removed;
   }
 
   /**

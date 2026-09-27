@@ -92,6 +92,34 @@ describe("TaskClaimStore", () => {
     ...overrides,
   });
 
+  it("purgeActor removes one actor's claims, DLQ, streams and counters, and no one else's", async () => {
+    const globby = "purge*actor";
+    const other = "purge-other";
+    for (const who of [globby, other]) {
+      await pushTasks(redis, who, [`${who}-m1`]);
+      expectOk(await store.claim(claimReq({ actor_id: who })));
+      await redis.rpush(DLQ_KEYS.list(who), JSON.stringify({ id: `${who}-dead` }));
+      await redis.xadd(`gptq:inbox-events:${who}`, "*", "type", "task");
+      await redis.xadd(`gptq:inbox-trace:${who}`, "*", "stage", "task_claimed");
+      await redis.set(CLAIM_KEYS.recoverCount(who, `${who}-m1`), "2");
+    }
+    const otherClaims = await redis.zrange(CLAIM_KEYS.index(other), 0, -1);
+
+    expect(await store.purgeActor(globby)).toBe(1);
+
+    expect(await redis.exists(
+      CLAIM_KEYS.index(globby), DLQ_KEYS.list(globby), `gptq:inbox-events:${globby}`,
+      `gptq:inbox-trace:${globby}`, CLAIM_KEYS.recoverCount(globby, `${globby}-m1`)
+    )).toBe(0);
+    expect(await redis.hlen(CLAIM_KEYS.claims)).toBe(1);
+    // The "*" in the purged name must not glob-match the other actor's state.
+    expect(await redis.hget(CLAIM_KEYS.claims, otherClaims[0]!)).not.toBeNull();
+    expect(await redis.exists(
+      CLAIM_KEYS.index(other), DLQ_KEYS.list(other), `gptq:inbox-events:${other}`,
+      `gptq:inbox-trace:${other}`, CLAIM_KEYS.recoverCount(other, `${other}-m1`)
+    )).toBe(5);
+  });
+
   it("returns claim:null when the inbox is empty", async () => {
     const res = await store.claim(claimReq());
     expectOk(res);
