@@ -44,7 +44,12 @@ export const startInboxDispatcher = async (
     const pending = await events.pending(agent);
     let record = await state.current();
     // Claimed messages are durable in the claim store; do not inject another turn while owned.
-    if (!pending.length || (record && !record.message_ids.some((id) => pending.some((message) => message.id === id)))) {
+    // Clear a record none of whose messages is pending any more, and an
+    // exhausted record once new work it does not cover arrives: new work
+    // re-arms activation instead of starving behind a message that failed.
+    const stale = record !== null && !record.message_ids.some((id) => pending.some((message) => message.id === id));
+    const superseded = record?.state === "exhausted" && pending.some((message) => !record!.message_ids.includes(message.id));
+    if (!pending.length || stale || superseded) {
       if (!await state.save(null)) { stop.abort(); return; }
       record = null;
     }

@@ -117,6 +117,18 @@ describe("inbox dispatcher", () => {
     expect(await redis.llen(SESSION_KEYS.queue(agent))).toBe(1);
     const traces = await redis.xrange(`gptq:inbox-trace:${agent}`, "-", "+"); expect(traces.map(([, fields]) => fields.join(" ")).join(" ")).toContain("activation_attempts_exhausted");
   });
+  it("re-arms activation for new work that arrives after an exhausted message", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); const requests: string[] = [];
+    const adapter: RuntimeAdapter = { binding: binding("runtime-rearm"), activate: async (request) => { requests.push(request.operation_id); return { status: "completed", turn_id: `turn-${requests.length}` }; }, close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10, maxAttempts: 2 }); live.push({ agent, dispatcher });
+    await mailbox.send(task(agent));
+    await eventually(async () => (await redis.get(`gptq:activation:${agent}`))?.includes('"state":"exhausted"') ?? false);
+    expect(requests).toHaveLength(2);
+    await mailbox.send(task(agent)); // new work while the first message is still pending
+    await eventually(async () => requests.length >= 3);
+    const record = JSON.parse((await redis.get(`gptq:activation:${agent}`))!) as { message_ids: string[] };
+    expect(record.message_ids).toHaveLength(2);
+  });
   it("recovers unavailable activation and stops after ownership is fenced", async () => {
     const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); let calls = 0;
     const prompts: string[] = [];
