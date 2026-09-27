@@ -63,7 +63,9 @@ for _, claimId in ipairs(expired) do
         if msgDecoded and type(msg) == 'table' then
           msgId = msg.id
         end
-        if type(msgId) ~= 'string' or #msgId == 0 then
+        -- A claim record without an actor id (corrupt) cannot key a counter;
+        -- re-queue rather than erroring after the claim was already removed.
+        if type(msgId) ~= 'string' or #msgId == 0 or type(actorId) ~= 'string' then
           -- Legacy / undecodable envelope: no message id, so no per-message
           -- counter can be tracked. Re-queue directly to the inbox.
           redis.call('RPUSH', inbox, task)

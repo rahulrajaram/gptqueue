@@ -6,9 +6,9 @@ first acknowledged task.
 
 ## 0. Prerequisites
 
-- Node.js 22+ and npm
+- Node.js 20+ and npm
 - Redis running locally (`redis://127.0.0.1:6379`) — db0 is the live
-  server's database; tests use db15 (see `AGENTS.md`)
+  server's database; tests use db15 (enforced by `vitest.config.ts`)
 
 ## 1. Install
 

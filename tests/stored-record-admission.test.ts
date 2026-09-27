@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { WakeLeaseStore } from "../src/core/wake-lease.js";
 import { MailboxStore } from "../src/core/mailbox-store.js";
 import { ActivationStore } from "../src/registered-shell/activation-store.js";
-import { DLQ_KEYS, SESSION_KEYS, WAKE_LEASE_KEYS } from "../src/core/keys.js";
+import { CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS, WAKE_LEASE_KEYS } from "../src/core/keys.js";
+import { TaskClaimStore } from "../src/core/task-claim-store.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
@@ -30,6 +31,29 @@ describe("stored record admission", () => {
       await redis.set(SESSION_KEYS.activation(agent), bad);
       await expect(store.current()).resolves.toBeNull();
     }
+  });
+
+  it("receive with timeout 0 returns immediately instead of blocking forever", async () => {
+    const agent = `recv0-${randomUUID()}`;
+    keys.push(SESSION_KEYS.queue(agent), SESSION_KEYS.mailboxMeta(agent));
+    const mailbox = new MailboxStore(redis, redis);
+    const started = Date.now();
+    await expect(mailbox.receive(agent, 0)).resolves.toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    await redis.rpush(SESSION_KEYS.queue(agent), JSON.stringify({ id: "m1" }));
+    await expect(mailbox.receive(agent, 0)).resolves.toMatchObject({ id: "m1" });
+  });
+
+  it("recovers tasks from an expired claim record that lacks actor_id", async () => {
+    const agent = `recover-${randomUUID()}`;
+    const claimId = `claim-${randomUUID()}`;
+    keys.push(SESSION_KEYS.queue(agent), CLAIM_KEYS.index(agent), DLQ_KEYS.list(agent));
+    const task = JSON.stringify({ id: "t1", type: "task" });
+    await redis.hset(CLAIM_KEYS.claims, claimId, JSON.stringify({ claim_id: claimId, tasks: [task] }));
+    await redis.zadd(CLAIM_KEYS.index(agent), 1, claimId);
+    const result = await new TaskClaimStore(redis).recoverExpired({ actor_id: agent, now: new Date().toISOString() });
+    expect(result).toMatchObject({ ok: true, recovered: 1, deadlettered: 0 });
+    expect(await redis.lrange(SESSION_KEYS.queue(agent), 0, -1)).toEqual([task]);
   });
 
   it("parks an unparseable received payload in the DLQ instead of throwing", async () => {

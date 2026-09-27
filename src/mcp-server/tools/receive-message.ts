@@ -16,7 +16,7 @@ export const receiveMessageSchema = z.object({
     .min(0)
     .max(60)
     .default(5)
-    .describe("Blocking timeout in whole seconds (default 5; range 0-60)"),
+    .describe("Blocking timeout in whole seconds (default 5; range 0-60; 0 returns immediately)"),
 });
 
 /**

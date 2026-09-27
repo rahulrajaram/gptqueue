@@ -384,9 +384,15 @@ If still using bridges, they can accumulate orphaned gptqueue worker processes. 
 # Count gptqueue child workers
 pgrep -f 'gptqueue' | wc -l
 
-# Kill orphaned workers (use with caution)
-pkill -f 'dist/mcp-server/index.js'
+# Review candidates first: -f matches any command line containing the text,
+# including servers from other checkouts
+pgrep -af 'dist/mcp-server/index.js'
+# then stop only the PIDs you have confirmed are orphaned
+kill <pid> ...
 ```
+
+Stdio servers now exit on their own when their client closes stdin, so
+orphans should only come from older builds.
 
 ## License
 

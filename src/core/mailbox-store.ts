@@ -161,7 +161,10 @@ export class MailboxStore {
     signal?: AbortSignal
   ): Promise<QueueMessage | null> {
     const key = SESSION_KEYS.queue(agentName);
-    const result = signal
+    // BLPOP treats 0 as "block forever"; for this API 0 means "don't wait".
+    const result = timeout === 0
+      ? await this.redis.lpop(key).then((value) => (value === null ? null : [key, value] as [string, string]))
+      : signal
       ? await cancellablePop(this.subscriber, key, timeout, signal)
       : await this.subscriber.blpop(key, timeout);
     if (!result) return null;
