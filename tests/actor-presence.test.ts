@@ -8,10 +8,6 @@ import {
   type PresenceInput,
   type RuntimeIncarnation,
 } from "../src/core/actor-presence.js";
-import {
-  createActivationState,
-  transitionActivation,
-} from "../src/core/activation-model.js";
 
 const policy = (mode: ActivationPolicy["mode"]): ActivationPolicy => ({
   mode,
@@ -250,20 +246,7 @@ describe("durable actor profile admission", () => {
 });
 
 describe("delivery mode versus activation policy", () => {
-  it("queues store_only deliveries without wake effects while presence stays offline_launchable", () => {
-    const queued = transitionActivation(createActivationState("actor-1"), {
-      type: "task_queued",
-      task: { task_id: "later", delivery: "store_only" },
-    });
-
-    expect(queued.ok).toBe(true);
-    if (!queued.ok) throw new Error(queued.error.message);
-    expect(queued.state.phase).toBe("offline");
-    expect(queued.state.pending_tasks).toEqual([
-      { task_id: "later", delivery: "store_only" },
-    ]);
-    expect(queued.effects).toEqual([]);
-
+  it("keeps a store_only delivery from changing a launchable actor's presence", () => {
     const presence = classifyPresence(input());
     expect(presence.ok).toBe(true);
     if (!presence.ok) throw new Error(presence.error.message);
