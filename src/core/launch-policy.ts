@@ -463,9 +463,7 @@ export const evaluateLaunchPolicy = async (
       ok: false,
       error: Object.freeze({
         code: "launch_command_rejected",
-        message: `command '${contract.command}' carries an inline-code flag (${[...contract.args].find((arg) =>
-          DANGEROUS_INTERPRETER_ARGS.has(arg)
-        )}) and is rejected regardless of the launch allowlist; point the interpreter at a fixed script file instead`,
+        message: `command '${contract.command}' carries an inline-code flag (${[...contract.args].find(isInlineCodeArg)}) and is rejected regardless of the launch allowlist; point the interpreter at a fixed script file instead`,
       }),
     });
   }

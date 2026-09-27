@@ -168,11 +168,15 @@ describe("TaskClaimStore", () => {
     const res = await store.claim(claimReq());
     const ok = expectOk(res);
 
-    const own = await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime" });
+    const own = await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime", now: T0 });
     expect(own?.claim_id).toBe(ok.claim!.claim_id);
 
+    // The core never reads the wall clock: an injected time past expiry sees nothing.
+    const later = new Date(Date.parse(T0) + 3_600_000).toISOString();
+    expect(await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime", now: later })).toBeNull();
+
     // A different session never sees this runtime's claim.
-    const wrong = await store.activeClaimFor({ actor_id: actorId, session_id: "session-other" });
+    const wrong = await store.activeClaimFor({ actor_id: actorId, session_id: "session-other", now: T0 });
     expect(wrong).toBeNull();
   });
 
@@ -180,7 +184,7 @@ describe("TaskClaimStore", () => {
     await redis.zadd(CLAIM_KEYS.index(actorId), Date.now(), "junk-claim");
     await redis.hset(CLAIM_KEYS.claims, "junk-claim", "not-json{{{");
     expect(
-      await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime" })
+      await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime", now: T0 })
     ).toBeNull();
   });
 

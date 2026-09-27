@@ -145,6 +145,8 @@ export interface RenewInput {
 export interface ActiveClaimInput {
   readonly actor_id: string;
   readonly session_id: string;
+  /** ISO timestamp; the adapter layer reads the clock, not the core. */
+  readonly now: string;
 }
 
 const EXCERPT = 80;
@@ -480,7 +482,7 @@ export class TaskClaimStore {
     const members = await this.redis.zrange(CLAIM_KEYS.index(input.actor_id), 0, -1);
     if (members.length === 0) return null;
     const raws = await this.redis.hmget(CLAIM_KEYS.claims, ...members);
-    const nowMs = Date.now();
+    const nowMs = Date.parse(input.now);
     for (const raw of raws) {
       if (raw === null) continue;
       const claim = this.parseTaskClaim(raw);

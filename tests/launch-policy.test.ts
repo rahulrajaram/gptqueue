@@ -194,6 +194,12 @@ describe("evaluateLaunchPolicy", () => {
       expect(nodeEval).toMatchObject({ ok: false, error: { code: "launch_command_rejected" } });
       if (!nodeEval.ok) expect(nodeEval.error.message).toMatch(/inline-code/);
 
+      // A glued flag is named in the message, not rendered as "(undefined)".
+      const glued = await evaluateLaunchPolicy({ command: "node", args: ["--eval=process.exit(0)"] });
+      if (glued.ok) throw new Error("glued inline-code flag must be rejected");
+      expect(glued.error.message).toContain("(--eval=process.exit(0))");
+      expect(glued.error.message).not.toContain("undefined");
+
       const pythonC = await evaluateLaunchPolicy({
         command: "python3",
         args: ["-c", "print(1)"],
