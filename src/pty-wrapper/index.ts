@@ -3,6 +3,7 @@
 import * as pty from "node-pty";
 import { IdleDetector } from "./idle-detector.js";
 import { RedisWatcher } from "./redis-watcher.js";
+import { terminalPromptBytes } from "./submit.js";
 
 function parseArgs(argv: string[]): { agent: string; cmd: string; args: string[] } {
   let agent = "";
@@ -78,8 +79,10 @@ watcher.on("message", (count: number) => {
   pendingInjection = true;
 
   const inject = () => {
-    const prompt = `\nYou have ${count} pending message(s) in your GPTQueue inbox. Call claim_tasks to claim a batch (optional max_batch and ttl_seconds), process the tasks, then acknowledge them with acknowledge_tasks (claim_id).\n`;
-    ptyProcess.write(prompt);
+    const prompt = `You have ${count} pending message(s) in your GPTQueue inbox. Call claim_tasks to claim a batch (optional max_batch and ttl_seconds), process the tasks, then acknowledge them with acknowledge_tasks (claim_id).`;
+    // Bracketed paste + CR submits the prompt in the wrapped TUI; a bare LF
+    // does NOT submit (proven against Claude Code CLI 2.1.283, 2026-09-28).
+    ptyProcess.write(terminalPromptBytes(prompt));
     pendingInjection = false;
   };
 
