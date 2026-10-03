@@ -15,12 +15,10 @@
 import { Redis } from "ioredis";
 import { randomUUID } from "crypto";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { WAKE_LEASE_KEYS } from "./keys.js";
+import { LUA_DIR, describeStored, firstNonStringField } from "./stored-read.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
 
 export interface WakeLease {
   readonly lease_id: string;
@@ -72,9 +70,6 @@ export interface WakeLeaseAttachSpawnInput {
   readonly spawned_at: string; // ISO timestamp; the adapter layer reads the clock, not the core
 }
 
-const EXCERPT = 80;
-const excerptOf = (raw: string): string =>
-  raw.length <= EXCERPT ? raw : `${raw.slice(0, EXCERPT)}...`;
 
 export class WakeLeaseStore {
   private readonly redis: Redis;
@@ -145,7 +140,7 @@ export class WakeLeaseStore {
     if (stored === null) {
       return fail(
         "store_corrupt",
-        `stored wake lease is corrupt (${excerptOf(raw)}); refusing to operate on it`
+        `stored wake lease is corrupt (${describeStored(raw, firstNonStringField(raw, LEASE_STRING_FIELDS))}); refusing to operate on it`
       );
     }
     return { ok: true, lease: stored, coalesced: coalesced === 1 };
@@ -202,7 +197,9 @@ export class WakeLeaseStore {
       if (
         typeof parsed === "object" &&
         parsed !== null &&
-        typeof (parsed as { lease_id?: unknown }).lease_id === "string"
+        LEASE_STRING_FIELDS.every(
+          (field) => typeof (parsed as Record<string, unknown>)[field] === "string"
+        )
       ) {
         return Object.freeze(parsed as WakeLease);
       }
@@ -212,6 +209,9 @@ export class WakeLeaseStore {
     return null;
   }
 }
+
+/** Every field a stored wake lease must carry as a string. */
+const LEASE_STRING_FIELDS = ["lease_id", "actor_id", "issued_by_session", "issued_at", "expires_at"] as const;
 
 const fail = (
   code: WakeLeaseError["code"],

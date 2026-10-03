@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Redis } from 'ioredis';
 import { root, runRoot, redisUrl, publicEvidence } from './pi-support.js';
 import { SESSION_KEYS } from '../../src/core/keys.js';
+import { nodePrefixPath } from "./local-tools.js";
 
 it.skipIf(process.env.GPTQUEUE_GEMINI_ACCEPTANCE !== '1')('observes Gemini CLI registration and exact self-message mechanics', async () => {
   const run = randomUUID(), directory = join(runRoot, 'gemini', run), cwd = join(directory, 'workspace');
@@ -21,7 +22,7 @@ it.skipIf(process.env.GPTQUEUE_GEMINI_ACCEPTANCE !== '1')('observes Gemini CLI r
   const redis = new Redis(redisUrl);
   try {
     const prompt = `Use only the gptqueue MCP tools. Register yourself as ${agent}, role both. Send yourself a status message with content ${nonce}, idempotency_key ${nonce}. Receive it and verify the exact message id and content. Do not use shell, files, or contact another agent. Return the original tool results.`;
-    const child = spawn('/home/rahul/nodeenv2251-311/bin/gemini', ['--extensions', 'none', '--allowed-mcp-server-names', 'gptqueue',
+    const child = spawn(nodePrefixPath("bin/gemini"), ['--extensions', 'none', '--allowed-mcp-server-names', 'gptqueue',
       '--approval-mode', 'yolo', '--output-format', 'stream-json', '--prompt', prompt],
     { cwd, env: { ...process.env, NO_UPDATE_NOTIFIER: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';

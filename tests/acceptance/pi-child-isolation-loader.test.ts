@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { nodePrefixPath } from "./local-tools.js";
 
-const piDist = "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist";
+const piDist = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist");
 
 describe("owned Pi child resource-loader scope", () => {
   it.skipIf(!existsSync(join(piDist, "index.js")))("loads only the explicitly supplied owned extension under a fresh profile", async () => {

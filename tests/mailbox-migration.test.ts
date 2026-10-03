@@ -10,13 +10,13 @@
  *     new session exists AND the transfer has completed, rolling the new
  *     session back on transfer failure so the old name is untouched.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { MailboxStore } from "../src/core/mailbox-store.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { SessionStore } from "../src/core/session-store.js";
-import { SESSION_KEYS } from "../src/core/keys.js";
+import { CLAIM_KEYS, DLQ_KEYS, DLQ_PROVISIONAL, SESSION_KEYS, SESSION_DEFAULTS } from "../src/core/keys.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
@@ -165,6 +165,20 @@ describe("MailboxStore.migrateMessages (atomic transfer, F2)", () => {
     expect(await contents(redis, "src")).toEqual([msg(2)]);
     expect(await contents(redis, "dst")).toEqual([msg(1)]);
   });
+
+  // RF1: the guard must refuse on ANY indexed claim. The rename caller
+  // recovers expired claims first; one that expires between that recovery
+  // and this transfer still owns its tasks and must not be stranded.
+  it("refuses the transfer while the source claims index holds any claim, even an expired one (RF1)", async () => {
+    await redis.rpush(SESSION_KEYS.queue("src"), msg(1));
+    await redis.zadd(CLAIM_KEYS.index("src"), Date.now() - 60_000, "expired-claim");
+
+    await expect(
+      store.migrateMessages("src", "dst", CLAIM_KEYS.index("src"))
+    ).rejects.toThrow(/claimed tasks/);
+    expect(await contents(redis, "src")).toEqual([msg(1)]);
+    expect(await contents(redis, "dst")).toEqual([]);
+  });
 });
 
 describe("RedisClient.register rename path (F2: no message loss)", () => {
@@ -207,6 +221,212 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
     expect(await redis.hexists(SESSION_KEYS.registry, "new-name")).toBe(1);
     expect(await redis.exists(SESSION_KEYS.heartbeat("old-name"))).toBe(0);
   });
+
+  it("refuses to rename while the old name holds claimed tasks, leaving everything intact", async () => {
+    const first = await client.register("both", "old-name", "first");
+    await redis.rpush(SESSION_KEYS.queue("old-name"), JSON.stringify({ id: "t-1", from: "x", to: "old-name", type: "task", timestamp: new Date().toISOString(), payload: { content: "do" } }));
+    const claimed = await client.taskClaim.claim({ actor_id: "old-name", session_id: first.session_id, max_batch: 1, ttl_seconds: 300, now: new Date().toISOString() });
+    if (!claimed.ok || claimed.claim === null) throw new Error("expected a claim");
+    await seedOldMailbox(1);
+
+    await expect(client.register("both", "new-name", "second")).rejects.toThrow(/unexpired claimed tasks/);
+
+    expect(client.agentName).toBe("old-name");
+    expect(client.sessionId).toBe(first.session_id);
+    expect(await contents(redis, "old-name")).toEqual([msg(1)]);
+    expect(await redis.hexists(SESSION_KEYS.registry, "new-name")).toBe(0);
+    // The claim still belongs to the old identity and can be acknowledged.
+    const ack = await client.taskClaim.acknowledge({ claim_id: claimed.claim.claim_id, actor_id: "old-name", session_id: first.session_id });
+    expect(ack.ok).toBe(true);
+  });
+
+  it("allows a rename when the old name's only claims have already expired", async () => {
+    await client.register("both", "old-name", "first");
+    await redis.zadd(CLAIM_KEYS.index("old-name"), Date.now() - 60_000, "long-expired-claim");
+    await seedOldMailbox(1);
+
+    const second = await client.register("both", "new-name", "second");
+    expect(second.name).toBe("new-name");
+    expect(await contents(redis, "new-name")).toEqual([msg(1)]);
+  });
+
+  const taskFor = (id: string) =>
+    JSON.stringify({ id, from: "x", to: "old-name", type: "task", timestamp: new Date().toISOString(), payload: { content: "do" } });
+
+  const claimOne = async (sessionId: string, ttlSeconds: number, now: Date) => {
+    const claimed = await client.taskClaim.claim({ actor_id: "old-name", session_id: sessionId, max_batch: 1, ttl_seconds: ttlSeconds, now: now.toISOString() });
+    if (!claimed.ok || claimed.claim === null) throw new Error("expected a claim");
+    return claimed.claim;
+  };
+
+  it("a rename recovers the old name's expired claims and moves their tasks instead of stranding them (RF1)", async () => {
+    const first = await client.register("both", "old-name", "first");
+    const task = taskFor("t-expired");
+    await redis.rpush(SESSION_KEYS.queue("old-name"), task);
+    // Claimed a minute ago with a 1 s TTL: expired, never acknowledged.
+    const claim = await claimOne(first.session_id, 1, new Date(Date.now() - 60_000));
+    await seedOldMailbox(1);
+
+    const second = await client.register("both", "new-name", "second");
+
+    expect(second.name).toBe("new-name");
+    // Recovery re-queues at the old inbox's tail, then the whole inbox moves.
+    expect(await contents(redis, "new-name")).toEqual([msg(1), task]);
+    expect(await contents(redis, "old-name")).toEqual([]);
+    expect(await redis.zcard(CLAIM_KEYS.index("old-name"))).toBe(0);
+    expect(await redis.hget(CLAIM_KEYS.claims, claim.claim_id)).toBeNull();
+  });
+
+  it("a rename moves tasks its recovery dead-letters, and the old DLQ, to the new name's DLQ (FIX5)", async () => {
+    const first = await client.register("both", "old-name", "first");
+    const capped = taskFor("t-capped");
+    await redis.rpush(SESSION_KEYS.queue("old-name"), capped);
+    await claimOne(first.session_id, 1, new Date(Date.now() - 60_000));
+    // At the cap already, so the rename's recovery quarantines it.
+    await redis.set(CLAIM_KEYS.recoverCount("old-name", "t-capped"), String(DLQ_PROVISIONAL.RECOVER_CAP));
+    const olderDead = taskFor("t-older-dead");
+    await redis.lpush(DLQ_KEYS.list("old-name"), olderDead);
+    const existingDead = JSON.stringify({ id: "t-new-name-dead", type: "task" });
+    await redis.lpush(DLQ_KEYS.list("new-name"), existingDead);
+
+    await client.register("both", "new-name", "second");
+
+    // Newest first: the just-quarantined task, the old DLQ in its order,
+    // then what the new name already held.
+    expect(await redis.lrange(DLQ_KEYS.list("new-name"), 0, -1)).toEqual([capped, olderDead, existingDead]);
+    expect(await redis.exists(DLQ_KEYS.list("old-name"))).toBe(0);
+    const listed = await client.taskClaim.deadLetterEntries({ actor_id: "new-name" });
+    expect(listed.ok && listed.entries.map((e) => e.message_id)).toEqual(["t-capped", "t-older-dead", "t-new-name-dead"]);
+    expect(await client.taskClaim.requeue({ actor_id: "new-name", message_id: "t-capped" })).toMatchObject({ ok: true });
+    expect(await contents(redis, "new-name")).toEqual([capped]);
+  });
+
+  it("a rename moves the old DLQ even when the old inbox is empty, and trims to the DLQ bound (FIX5)", async () => {
+    await client.register("both", "old-name", "first");
+    const dead = Array.from({ length: 3 }, (_, i) => taskFor(`t-dead-${i}`));
+    await redis.rpush(DLQ_KEYS.list("old-name"), ...dead);
+    const store = new MailboxStore(redis, redis);
+
+    await store.migrateMessages("old-name", "new-name", CLAIM_KEYS.index("old-name"), 2);
+
+    expect(await redis.lrange(DLQ_KEYS.list("new-name"), 0, -1)).toEqual(dead.slice(0, 2));
+    expect(await redis.exists(DLQ_KEYS.list("old-name"))).toBe(0);
+  });
+
+  it("a DLQ move larger than one push chunk keeps its order (FIX5)", async () => {
+    const dead = Array.from({ length: 600 }, (_, i) => taskFor(`t-chunk-${i}`));
+    await redis.rpush(DLQ_KEYS.list("old-name"), ...dead);
+    await redis.rpush(DLQ_KEYS.list("new-name"), "kept-tail");
+    const store = new MailboxStore(redis, redis);
+
+    await store.migrateMessages("old-name", "new-name", undefined, 1000);
+
+    expect(await redis.lrange(DLQ_KEYS.list("new-name"), 0, -1)).toEqual([...dead, "kept-tail"]);
+  });
+
+  it("a rename onto a wrong-typed DLQ fails before moving anything (FIX5)", async () => {
+    await client.register("both", "old-name", "first");
+    await seedOldMailbox(2);
+    const dead = taskFor("t-dead");
+    await redis.lpush(DLQ_KEYS.list("old-name"), dead);
+    await redis.set(DLQ_KEYS.list("new-name"), "not-a-list");
+
+    await expect(client.register("both", "new-name", "second")).rejects.toThrow(/wrong type/);
+
+    expect(client.agentName).toBe("old-name");
+    expect(await contents(redis, "old-name")).toEqual([msg(1), msg(2)]);
+    expect(await contents(redis, "new-name")).toEqual([]);
+    expect(await redis.lrange(DLQ_KEYS.list("old-name"), 0, -1)).toEqual([dead]);
+  });
+
+  it("a rename that cannot recover onto a wrong-typed old inbox fails and keeps the expired claim's tasks (FIX1)", async () => {
+    const first = await client.register("both", "old-name", "first");
+    const task = taskFor("t-kept");
+    await redis.rpush(SESSION_KEYS.queue("old-name"), task);
+    const claim = await claimOne(first.session_id, 1, new Date(Date.now() - 60_000));
+    // The claim emptied the inbox; replace it with a string so RPUSH fails.
+    await redis.set(SESSION_KEYS.queue("old-name"), "not-a-list");
+
+    await expect(client.register("both", "new-name", "second")).rejects.toThrow();
+
+    expect(client.agentName).toBe("old-name");
+    const kept = await redis.hget(CLAIM_KEYS.claims, claim.claim_id);
+    expect(kept).not.toBeNull();
+    expect(JSON.parse(kept!).tasks).toEqual([task]);
+    expect(await redis.zscore(CLAIM_KEYS.index("old-name"), claim.claim_id)).not.toBeNull();
+    expect(await redis.hexists(SESSION_KEYS.registry, "new-name")).toBe(0);
+  });
+
+  it("a refused rename keeps refreshing the original session's lease (RF2)", async () => {
+    // Fake only the interval timers that drive heartbeat and lease refresh.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const first = await client.register("both", "old-name", "first");
+      await redis.rpush(SESSION_KEYS.queue("old-name"), taskFor("t-live"));
+      await claimOne(first.session_id, 300, new Date());
+
+      await expect(client.register("both", "new-name", "second")).rejects.toThrow(/unexpired claimed tasks/);
+
+      // Drop the lease as if its TTL ran out; only a still-running refresh
+      // timer for the ORIGINAL session can bring it back.
+      await redis.del(SESSION_KEYS.lease(first.session_id));
+      vi.advanceTimersByTime(SESSION_DEFAULTS.LEASE_REFRESH_INTERVAL_SECONDS * 1000);
+
+      const deadline = Date.now() + 3000;
+      while ((await redis.exists(SESSION_KEYS.lease(first.session_id))) !== 1) {
+        if (Date.now() > deadline) throw new Error("original session's lease was not refreshed after the failed rename");
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect((await client.sessions.getPresence("old-name")).online).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a refused rename onto an existing name leaves that name's registration intact (RF3)", async () => {
+    const owner = new RedisClient(null, TEST_REDIS_URL);
+    try {
+      await owner.register("both", "new-name", "existing owner");
+      const before = await redis.hget(SESSION_KEYS.registry, "new-name");
+      expect(before).not.toBeNull();
+
+      const first = await client.register("both", "old-name", "first");
+      await redis.rpush(SESSION_KEYS.queue("old-name"), taskFor("t-live"));
+      await claimOne(first.session_id, 300, new Date());
+
+      await expect(client.register("both", "new-name", "second")).rejects.toThrow(/unexpired claimed tasks/);
+
+      expect(await redis.hget(SESSION_KEYS.registry, "new-name")).toBe(before);
+      expect(await client.sessions.resolveRegistered("new-name")).toBe(true);
+      expect((await client.listAgents()).map((a) => a.name)).toContain("new-name");
+    } finally {
+      await owner.shutdown();
+    }
+  });
+
+  it("rename rollback never deletes a registry value written after its own (RF3)", async () => {
+    await client.register("both", "old-name", "first");
+    await seedOldMailbox(1);
+    const concurrent = JSON.stringify({ name: "new-name", role: "both", registered_at: "concurrent" });
+
+    // Another process registers the destination between this attempt's
+    // session creation and its failed transfer.
+    const internals = client as unknown as { mailbox: MailboxStore };
+    const realMigrate = internals.mailbox.migrateMessages.bind(internals.mailbox);
+    internals.mailbox.migrateMessages = (async () => {
+      await redis.hset(SESSION_KEYS.registry, "new-name", concurrent);
+      throw new Error("migration failed");
+    }) as typeof realMigrate;
+
+    await expect(client.register("both", "new-name", "second")).rejects.toThrow(/migration failed/);
+    internals.mailbox.migrateMessages = realMigrate;
+
+    expect(await redis.hget(SESSION_KEYS.registry, "new-name")).toBe(concurrent);
+    expect(await contents(redis, "old-name")).toEqual([msg(1)]);
+  });
+
+  // Overlapping renames, successful overlaps and the rollback side hashes
+  // are covered exhaustively in registry-rollback.test.ts (R2).
 
   it("createSession failure changes nothing: old session, mailbox, and registry intact", async () => {
     const first = await client.register("both", "old-name", "first");

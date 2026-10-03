@@ -66,6 +66,19 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | `dlq_status` | List the calling agent's dead-letter queue (DLQ) entries, newest first. A message is dead-lettered after it has been recovered (re-queued) more than `RECOVER_CAP` times without an acknowledge, so a perpetually failing message cannot loop through lazy recovery forever. Supports an optional `limit` (default 50, range 1–1000) |
 | `dlq_requeue` | Move one dead-lettered message (by `message_id` from `dlq_status`) from the calling agent's DLQ back to the tail of its own inbox, restoring a fresh recovery budget. Not found is a structured `dlq_entry_not_found` error |
 
+### Registered shell (additional tools)
+
+The registered shell (`bin/gptqueue-session`) registers four additive tools on top of the table above:
+
+| Tool | Description |
+|---|---|
+| `find_agents` | Find exact agent candidates by declared purpose and identity. Ambiguous matches are never routed automatically; online does not imply activation readiness |
+| `get_agent_details` | Inspect an exact mailbox, runtime binding, published capabilities, declared role and activation readiness. Omit `agent` for the current connection. No message content or credentials |
+| `get_delivery_status` | Inspect one message's queue, claim, acknowledgement or dead-letter evidence without consuming it. Missing retained evidence means unknown, not delivered |
+| `set_agent_profile` | Declare this connection's readable label, purpose and kind. A declaration is a discovery hint, never proof of controller authority or permission to take over another mailbox |
+
+`package.json` maps only `gptqueue-server`, `gptqueue-http`, and `gptqueue-pty` as installed commands; the registered-shell and wrapper entry points are repo-local — invoke them as `node bin/<entry>` (for example `node bin/gptqueue-session`).
+
 ### Dead-letter queue (provisional policy)
 
 Lazy recovery (in `claims-recover.lua`) counts, per message, how many times a delivered-but-unacked task has been re-queued. Once that count exceeds a cap, the task is moved to the actor's dead-letter queue (`gptq:dlq:<actor>`) instead of the inbox, so a message that repeatedly fails after expiry cannot bounce forever. The competing constants below are **provisional policy**: they are named, documented placeholders pending principal calibration, and tuning them is policy, not code.
@@ -84,15 +97,27 @@ Acknowledging a claim clears the counters of its tasks, and `dlq_requeue` restor
 
 ## Prerequisites
 
-- **Node.js** >= 18
+- **Node.js** >= 20
 - **Redis** running locally (default `redis://127.0.0.1:6379`)
 
 ## Install
 
+From npm (ships prebuilt; provides `gptqueue-server`, `gptqueue-http` and `gptqueue-pty`):
+
+```bash
+npm install -g gptqueue
+```
+
+`gptqueue-pty` needs the native `node-pty` module. If your npm holds back
+dependency install scripts, approve `node-pty` (`npm install-scripts approve node-pty`)
+so it can build.
+
+From source:
+
 ```bash
 git clone https://github.com/rahulrajaram/gptqueue.git
 cd gptqueue
-npm install   # builds automatically via postinstall
+npm install   # builds automatically via prepare
 ```
 
 ## Transports
@@ -165,9 +190,14 @@ which let a caller register an arbitrary program (or a shell like
 that hole, GPTQueue now gates every runtime launch behind an **operator
 allowlist**.
 
-The allowlist is an operator-authored file at `./.gptqueue/launch-allowlist.json`
-relative to the server's working directory (override the path with the
-`GPTQUEUE_LAUNCH_ALLOWLIST` env var). Format (version 2):
+The allowlist is an operator-authored file at
+`$XDG_CONFIG_HOME/gptqueue/launch-allowlist.json` (default
+`~/.config/gptqueue/launch-allowlist.json`), deliberately outside any agent
+workspace: an allowlist that agents can edit is one they can authorize
+themselves with. Override the path with `GPTQUEUE_LAUNCH_ALLOWLIST`, and keep it
+somewhere agents cannot write. Symlinks and group- or world-writable files are
+refused. A legacy `./.gptqueue/launch-allowlist.json` in the working directory
+is no longer read; the refusal message names the new location. Format (version 2):
 
 ```json
 {
@@ -290,10 +320,15 @@ Optionally add the hook script to `~/.claude/settings.json` for automatic startu
 |---|---|---|
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
 | `GPTQUEUE_HOST` | `127.0.0.1` | HTTP server bind host; non-loopback requires `GPTQUEUE_HTTP_TOKEN` |
-| `GPTQUEUE_LAUNCH_ALLOWLIST` | `./.gptqueue/launch-allowlist.json` | Path of the operator wake-launch allowlist (see the security section) |
+| `GPTQUEUE_LAUNCH_ALLOWLIST` | `~/.config/gptqueue/launch-allowlist.json` | Path of the operator wake-launch allowlist; keep it outside agent workspaces (see the security section) |
 | `GPTQUEUE_HTTP_TOKEN` | _(none)_ | Bearer token required on every `/mcp` request when set |
+| `GPTQUEUE_HTTP_IDLE_TIMEOUT_MS` | `3600000` (1 hour) | Close an HTTP MCP session after this long with no open request (an open SSE stream counts as open); the client gets `404` and re-initializes. `0` disables |
+| `GPTQUEUE_HTTP_MAX_SESSIONS` | `256` | Maximum concurrent HTTP MCP sessions; further `initialize` requests get `503` |
 | `GPTQ_AGENT_NAME` | _(none)_ | Pre-register with this agent name on startup (stdio only) |
 | `GPTQ_QUEUE_BOUND` | `10` | Max messages per agent inbox |
+| `AGENT_ATTRIBUTION_CALLER` | `gptqueue-pty` | Attribution for PTY-wrapped child CLI processes |
+| `AGENT_ATTRIBUTION_PROJECT` | Current directory name | Project attribution for PTY-wrapped child CLI processes |
+| `AGENT_ATTRIBUTION_SESSION` | Agent name | Session attribution for PTY-wrapped child CLI processes |
 | `GPTQ_HTTP_PORT` | `3001` | HTTP server port |
 | `REDIS_HOST` | `127.0.0.1` | Redis host (hook script only) |
 | `REDIS_PORT` | `6379` | Redis port (hook script only) |
@@ -303,7 +338,7 @@ Optionally add the hook script to `~/.claude/settings.json` for automatic startu
 The PTY wrapper lets you run any CLI (e.g. `claude`, `codex`) inside a PTY that monitors Redis for incoming messages and injects prompts when the process goes idle:
 
 ```bash
-gptqueue-pty --agent alice --cmd claude
+node bin/gptqueue-pty --agent alice --cmd claude
 ```
 
 When a woken agent has pending messages, the injected prompt instructs it to
@@ -352,9 +387,15 @@ If still using bridges, they can accumulate orphaned gptqueue worker processes. 
 # Count gptqueue child workers
 pgrep -f 'gptqueue' | wc -l
 
-# Kill orphaned workers (use with caution)
-pkill -f 'dist/mcp-server/index.js'
+# Review candidates first: -f matches any command line containing the text,
+# including servers from other checkouts
+pgrep -af 'dist/mcp-server/index.js'
+# then stop only the PIDs you have confirmed are orphaned
+kill <pid> ...
 ```
+
+Stdio servers now exit on their own when their client closes stdin, so
+orphans should only come from older builds.
 
 ## License
 

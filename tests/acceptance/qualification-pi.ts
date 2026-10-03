@@ -8,10 +8,11 @@ import { Redis } from "ioredis";
 import { SESSION_KEYS } from "../../src/core/keys.js";
 import type { Availability, ModelParticipant, Participant, RouteAdapter, RouteSpec, RuntimeStatus } from "./qualification-types.js";
 import { createRegisteredPiExtension } from "../../src/registered-shell/pi-extension.js";
+import { nodePrefixPath } from "./local-tools.js";
 
 export const piQualificationRoute = "pi-rpc-cli" as const;
 export const piSdkQualificationRoute = "pi-sdk" as const;
-const installed = "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist";
+const installed = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist");
 const repo = resolve(import.meta.dirname, "../..");
 type Json = Record<string, unknown>;
 type LaunchInput = Readonly<{ role: "sender" | "receiver"; pairId: string; nonce: string; redisUrl: string }>;

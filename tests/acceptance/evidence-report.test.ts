@@ -567,9 +567,13 @@ describe("frozen acceptance evidence report", () => {
     if (process.env.GPTQUEUE_ACCEPTANCE_ENFORCE === "1") expect(report.aggregates.overall.outcome).toBe("meets");
   });
 
-  it("rejects mutated Pi headless initiative reply and claim evidence", () => {
-    const file = findReceipts(join(artifactRoot, "pi-headless-initiative")).find(candidate => piHeadlessInitiativeEvidence(readJson(candidate)) !== undefined);
-    if (!file) throw new Error("retained Pi headless initiative receipt missing");
+  it("rejects mutated Pi headless initiative reply and claim evidence", (ctx) => {
+    const receipts = findReceipts(join(artifactRoot, "pi-headless-initiative"));
+    ctx.skip(receipts.length === 0, "retained Pi headless initiative receipts absent");
+    // Receipts exist, so the predicate must accept at least one: a broken
+    // predicate has to fail here, not quietly skip.
+    const file = receipts.find(candidate => piHeadlessInitiativeEvidence(readJson(candidate)) !== undefined);
+    if (!file) throw new Error(`none of ${receipts.length} retained Pi headless initiative receipts satisfies the evidence predicate`);
     const receipt = readJson(file);
     expect(piHeadlessInitiativeEvidence(receipt)).toBeDefined();
     const wrongReply = JSON.parse(JSON.stringify(receipt)) as Json;

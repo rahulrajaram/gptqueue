@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPiExtension, validateCatalog, GPTQUEUE_TOOLS, RUNTIME_TOOL_NAMES, type PiAPI, type SessionClient } from "../src/registered-shell/pi-extension.js";
+import { RUNTIME_TOOL_NAMES } from "../src/registered-shell/tool-names.js";
+import { createPiExtension, validateCatalog, GPTQUEUE_TOOLS, type PiAPI, type SessionClient } from "../src/registered-shell/pi-extension.js";
 
 const catalog = { tools: GPTQUEUE_TOOLS.map((name) => ({ name, inputSchema: { type: "object" } })) };
 const makeClient = () => ({
@@ -41,6 +42,21 @@ describe("registered Pi extension", () => {
     expect(client.callTool).toHaveBeenCalledWith({ name: "receive_message", arguments: { timeout: 30 } }, undefined, { signal });
     await handlers.get("session_shutdown")!();
     expect(client.close).toHaveBeenCalledOnce();
+  });
+  it("destroys a sidecar whose close() hangs past the bound", async () => {
+    vi.useFakeTimers();
+    try {
+      const destroy = vi.fn();
+      const client = { ...makeClient(), close: vi.fn(() => new Promise<void>(() => undefined)), destroy };
+      const { pi, handlers } = fakePi();
+      await createPiExtension(async () => client)(pi);
+      const shutdown = handlers.get("session_shutdown")!().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(await shutdown).toBeInstanceOf(Error);
+      expect(destroy).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("closes and exits for an invalid catalog", async () => {
     const exit = interceptExit(); const client = makeClient();
@@ -90,7 +106,7 @@ describe("registered Pi extension", () => {
 
 
 it("accepts previous runtime catalogs and optional diagnostics without accepting foreign tools", () => {
-  const tools = [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES.slice(0, 5)].map(name => ({ name, inputSchema: { type: "object" } }));
+  const tools = [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES].map(name => ({ name, inputSchema: { type: "object" } }));
   expect(validateCatalog({ tools }, true)).toHaveLength(9);
   expect(validateCatalog({ tools: [...tools, { name: "find_agents", inputSchema: { type: "object" } }] }, true)).toHaveLength(10);
   expect(() => validateCatalog({ tools: [...tools, { name: "foreign_tool", inputSchema: { type: "object" } }] }, true)).toThrow(/mismatch/);

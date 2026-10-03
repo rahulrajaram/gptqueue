@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { RedisClient } from "./redis-client.js";
 import { GPTQUEUE_INSTRUCTIONS, registerTools } from "../transports/setup-tools.js";
+import { VERSION } from "../version.js";
 
 // Name comes from CLI arg or env var. If neither, starts unregistered.
 const initialName = process.argv[2] || process.env.GPTQ_AGENT_NAME || null;
@@ -12,7 +13,7 @@ const redisClient = new RedisClient(null);
 
 const server = new McpServer({
   name: "gptqueue",
-  version: "1.0.0",
+  version: VERSION,
 }, { instructions: GPTQUEUE_INSTRUCTIONS });
 
 registerTools(server, redisClient);
@@ -22,14 +23,22 @@ if (initialName) {
   await redisClient.register("both", initialName);
 }
 
-// Graceful shutdown
+// Graceful shutdown. Besides signals, exit when the client goes away (stdin
+// ends or the MCP connection closes): an orphaned server would otherwise keep
+// refreshing its lease and pin the agent online forever.
+let shuttingDown = false;
 async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   await redisClient.shutdown();
   process.exit(0);
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+process.stdin.on("end", shutdown);
+process.stdin.on("close", shutdown);
 
 // Start
 const transport = new StdioServerTransport();
 await server.connect(transport);
+server.server.onclose = () => void shutdown();

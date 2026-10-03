@@ -11,6 +11,7 @@ import { readCodexAppserverHistory } from "./codex-appserver-history.js";
 import { RedisClient } from "../../src/mcp-server/redis-client.js";
 import type { QueueMessage } from "../../src/mcp-server/types.js";
 import type { Availability, ModelParticipant, Participant, RouteAdapter, RouteId, RouteSpec, RuntimeStatus } from "./qualification-types.js";
+import { CODEX_BIN } from "./local-tools.js";
 
 export const codexRouteIds = Object.freeze([
   "codex-appserver", "codex-interactive", "codex-headless", "codex-native-child", "codex-fork", "codex-resume",
@@ -32,7 +33,7 @@ type CodexOptions = Readonly<{
   tuiTrustRoot?: string;
 }>;
 
-const DEFAULT_CODEX = "/home/rahul/.local/bin/codex";
+const DEFAULT_CODEX = CODEX_BIN;
 const model = (options: CodexOptions): string => options.model ?? process.env.GPTQUEUE_CODEX_MODEL ?? "gpt-5.6-luna";
 const object = (value: unknown): JsonObject | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : undefined;
 const nonEmpty = (value: unknown): value is string => typeof value === "string" && value.length > 0;

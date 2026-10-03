@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
 import { SESSION_KEYS } from '../../src/core/keys.js';
 
-const installed = '/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist';
+const installed = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist");
 export const root = resolve(import.meta.dirname, '../..');
 export const runRoot = resolve(root, '.gptqueue/acceptance/20260912-evaluation');
 export const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/15';
@@ -18,6 +18,7 @@ export async function until<T>(read: () => Promise<T>, accept: (value: T) => boo
 
 export { sanitizeEvidence as publicEvidence } from './public-evidence.js';
 import { sanitizeEvidence as publicEvidence } from './public-evidence.js';
+import { nodePrefixPath } from "./local-tools.js";
 
 export async function startPiPeer(cwd: string, instructions?: string) {
   await mkdir(cwd, { recursive: true });

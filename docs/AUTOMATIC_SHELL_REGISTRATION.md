@@ -39,11 +39,11 @@ For example, a new wrapper registration appears in the structured response as:
       "label": "gptqueue · codex · c0e7d21f",
       "uuid": "c0e7d21f-a327-4eda-b12b-779ae9a44e8a",
       "client": "codex",
-      "working_directory": "/home/rahul/Documents/gptqueue",
+      "working_directory": "/path/to/gptqueue",
       "registered_at": "2026-09-04T23:36:49.554Z",
       "pid": 3709271,
       "role": "both",
-      "description": "codex interactive shell in /home/rahul/Documents/gptqueue",
+      "description": "codex interactive shell in /path/to/gptqueue",
       "online": true
     }
   ]
@@ -92,7 +92,7 @@ not configuration values:
 npm run build
 python3 scripts/install-shell-registration.py \
   --redis-url redis://127.0.0.1:6379/0 \
-  --node-bin /home/rahul/nodeenv2251-311/bin/node
+  --node-bin "$(command -v node)"
 ```
 
 Apply the same command with `--apply`. It changes only:
@@ -193,7 +193,7 @@ SessionStart/UserPromptSubmit command hook. Review the plan after building:
 
 ```sh
 python3 scripts/install-inbox-activation.py \
-  --node-bin /home/rahul/nodeenv2251-311/bin/node
+  --node-bin "$(command -v node)"
 ```
 
 Add `--apply` to install it into `~/.codex/hooks.json`, preserving other hooks.

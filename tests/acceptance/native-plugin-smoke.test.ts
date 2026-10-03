@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Redis } from "ioredis";
 import { afterEach, describe, it } from "vitest";
 import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
-import { opencodeBin, modelsPath, newConfigHome, newWorkDir, repo } from "./opencode-support.js";
+import { opencodeBin, modelsPath, newConfigHome, newWorkDir, opencodePrerequisites, repo } from "./opencode-support.js";
 
 const pluginPath = join(repo, "dist/registered-shell/opencode-plugin.js");
 const artifactDir = join(repo, ".gptqueue/repair-qualification/20260912/native-plugin-smoke");
@@ -60,7 +60,11 @@ describe("native OpenCode plugin loader smoke", () => {
     await owned?.close();
   });
 
-  it("loads default-only plugin, exposes tools, and auto-registers a native session", async () => {
+  it("loads default-only plugin, exposes tools, and auto-registers a native session", async (ctx) => {
+    const prerequisites = opencodePrerequisites(existsSync, { binary: opencodeBin, models: modelsPath, plugin: pluginPath });
+    ctx.skip(prerequisites.kind === "unavailable", "OpenCode model/binary prerequisites unavailable");
+    // OpenCode is present: a missing built plugin is a build failure, not a skip.
+    if (prerequisites.kind === "build_missing") throw new Error(prerequisites.detail);
     const stderr: string[] = [];
     const stdout: string[] = [];
     let phase = "prerequisites";

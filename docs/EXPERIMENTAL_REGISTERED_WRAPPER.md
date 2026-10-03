@@ -114,17 +114,16 @@ nonzero and closes its connections without deleting state it no longer owns.
 
 ## Repeatable verification
 
-Run the focused regression suite on db15 through Overwatch:
+Run the focused regression suite on db15 directly with Node/vitest:
 
 ```sh
 npm run build
-overwatch run --profile npm_test --stream -- \
-  env REDIS_URL=redis://127.0.0.1:6379/15 "$(command -v node)" \
-  node_modules/vitest/vitest.mjs run tests/experimental-wrapper*.test.ts
+REDIS_URL=redis://127.0.0.1:6379/15 node node_modules/vitest/vitest.mjs run \
+  tests/experimental-wrapper*.test.ts
 ```
 
-The explicit Node path uses your shell's runtime even if the Overwatch daemon
-has an older Node on its PATH.
+Pass `REDIS_URL` explicitly in the same command so the vitest process always
+runs against the isolated db15 test database.
 
 The suite covers cancellation followed by delayed delivery, concurrent receive
 isolation, transport deletion, bridge shutdown, the Pi tool filter and startup

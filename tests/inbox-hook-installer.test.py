@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -7,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/install-inbox-activation.py"
-NODE = Path(os.environ.get("NODE", "/home/rahul/nodeenv2251-311/bin/node"))
+NODE = Path(os.environ.get("NODE") or shutil.which("node") or "node")
 
 
 class InboxHookInstallerTest(unittest.TestCase):

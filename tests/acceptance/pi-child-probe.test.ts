@@ -13,12 +13,15 @@ import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { CLAIM_KEYS, SESSION_KEYS } from "../../src/core/keys.js";
 import { createRegisteredPiExtension } from "../../src/registered-shell/pi-extension.js";
+import { homePath, nodePrefixPath } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_PI_CHILD_ACCEPTANCE === "1";
 const root = resolve(import.meta.dirname, "../..");
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
-const piInstalled = "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist";
-const subagentsSource = "/home/rahul/.pi/agent/git/github.com/rahulrajaram/pi-subagents/src/index.ts";
+const piInstalled = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist");
+// Test-only override: PI_SUBAGENTS_SOURCE points at a pi-subagents extension
+// checkout's src/index.ts. Defaults to a generic user-local extension path.
+const subagentsSource = process.env.PI_SUBAGENTS_SOURCE ?? homePath(".pi/agent/extensions/pi-subagents/src/index.ts");
 const subagentsRoot = resolve(dirname(subagentsSource), "..");
 const modelProvider = "openrouter";
 const modelId = process.env.GPTQUEUE_PI_MODEL ?? "z-ai/glm-5.3-flash";
@@ -163,7 +166,7 @@ describe.skipIf(!enabled)("Pi native Agent child GPTQueue acceptance", () => {
         interopDefault: true,
         alias: {
           "@earendil-works/pi-coding-agent": join(piInstalled, "index.js"),
-          "@earendil-works/pi-tui": "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-tui/dist/index.js",
+          "@earendil-works/pi-tui": nodePrefixPath("lib/node_modules/@earendil-works/pi-tui/dist/index.js"),
           "@sinclair/typebox": join(subagentsRoot, "node_modules/@sinclair/typebox/build/cjs/index.js"),
         },
       });

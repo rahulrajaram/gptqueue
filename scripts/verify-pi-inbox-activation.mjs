@@ -3,11 +3,11 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createRegisteredPiExtension, createPiExtension, GPTQUEUE_TOOLS, RUNTIME_TOOL_NAMES } from '../dist/registered-shell/pi-extension.js';
-const installed = process.env.PI_NODE_MODULES ?? '/home/rahul/nodeenv2251-311/lib/node_modules';
+const installed = process.env.PI_NODE_MODULES ?? join(dirname(dirname(process.execPath)), 'lib', 'node_modules');
 const moduleAt = (pkg, file) => import(pathToFileURL(join(installed, '@earendil-works', pkg, 'dist', file)).href);
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await moduleAt('pi-coding-agent', 'index.js');
 const { getModel } = await moduleAt('pi-ai', 'compat.js');

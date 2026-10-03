@@ -32,6 +32,19 @@ describe("InboxEvents", () => {
     expect(await redis.xlen("gptq:inbox-events:a")).toBe(1);
   });
 
+  it("pending keeps queue order and only correlated replies from the expected peer", async () => {
+    await redis.hset("gptq:meta:b", "max_size", 10); await redis.hset("gptq:meta:a", "max_size", 10);
+    await store.send(message({ id: "task-1" })); await store.send(message({ id: "task-2" }));
+    await store.send(message({ id: "t-a", from: "b", to: "a" }));
+    await store.send(message({ id: "reply-2", from: "b", to: "a", type: "error", payload: { content: "no", in_reply_to: "task-2" } }));
+    await store.send(message({ id: "wrong", from: "c", to: "a", type: "result", payload: { content: "x", in_reply_to: "task-1" } }));
+    await store.send(message({ id: "status", from: "b", to: "a", type: "status", payload: { content: "x" } }));
+    await store.send(message({ id: "reply-1", from: "b", to: "a", type: "result", payload: { content: "ok", in_reply_to: "task-1" } }));
+    await store.send(message({ id: "orphan", from: "b", to: "a", type: "result", payload: { content: "?" } }));
+    expect((await events.pending("a")).map((m) => m.id)).toEqual(["t-a", "reply-2", "reply-1"]);
+    expect(await events.pending("nobody")).toEqual([]);
+  });
+
   it("preflights a bad stream key before enqueue", async () => {
     await redis.hset("gptq:meta:b", "max_size", 10); await redis.set("gptq:inbox-events:b", "bad");
     await expect(store.send(message())).rejects.toThrow(); expect(await redis.llen("gptq:q:b")).toBe(0);
@@ -70,9 +83,41 @@ describe("InboxEvents", () => {
     write.mockRestore();
   });
 
-  it("waits for an event and cancellation owns only its connection", async () => {
+  it("waits for an event", async () => {
     await redis.hset("gptq:meta:b", "max_size", 10); const controller = new AbortController();
     const waiting = events.wait("b", "0-0", controller.signal, 2000); await store.send(message());
-    await expect(waiting).resolves.toBeTruthy(); controller.abort();
+    await expect(waiting).resolves.toBeTruthy();
+  });
+
+  it("a waiter reuses one blocking connection and replaces it after an abort", async () => {
+    const duplicate = vi.spyOn(redis, "duplicate");
+    const waiter = events.createWaiter();
+    try {
+      const signal = new AbortController().signal;
+      for (let i = 0; i < 3; i += 1) await waiter.wait("idle-agent", "$", signal, 10);
+      expect(duplicate).toHaveBeenCalledTimes(1);
+
+      const controller = new AbortController();
+      const blocked = waiter.wait("idle-agent", "$", controller.signal, 30_000);
+      await new Promise((r) => setTimeout(r, 100));
+      controller.abort();
+      await expect(blocked).rejects.toThrow();
+      await waiter.wait("idle-agent", "$", new AbortController().signal, 10);
+      expect(duplicate).toHaveBeenCalledTimes(2);
+    } finally {
+      waiter.close();
+      duplicate.mockRestore();
+    }
+  });
+
+  it("cancels a blocked wait promptly without touching the shared connection", async () => {
+    const controller = new AbortController();
+    const started = Date.now();
+    const waiting = events.wait("nobody-sends-here", "$", controller.signal, 30_000);
+    await new Promise((r) => setTimeout(r, 100)); // the duplicate connection is now blocked in XREAD
+    controller.abort();
+    await expect(waiting).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(5_000); // not the 30 s block timeout
+    expect(await redis.ping()).toBe("PONG"); // the shared client still works
   });
 });

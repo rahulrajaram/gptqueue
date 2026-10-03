@@ -19,17 +19,24 @@
 import { Redis } from "ioredis";
 import { randomUUID } from "crypto";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import {
   CLAIM_KEYS,
   DLQ_KEYS,
   DLQ_PROVISIONAL,
   SESSION_KEYS,
 } from "./keys.js";
+import { LUA_DIR, describeStored, firstNonStringField } from "./stored-read.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
+/**
+ * The Lua `purge_actor_claims(claims, index, dlq, events, trace, actor)`
+ * function (claims-purge.lua). Scripts that retire an identity
+ * interpolate it so the claim purge is atomic with the retirement (RF5).
+ */
+export const purgeActorClaimsLua: string = readFileSync(
+  join(LUA_DIR, "claims-purge.lua"),
+  "utf-8"
+);
 
 /** One outstanding durable task claim. Tasks are raw inbox payloads, pop order. */
 export interface TaskClaim {
@@ -69,11 +76,9 @@ export type RenewResult =
   | Readonly<{ ok: true; claim_id: string; expires_at: string }>
   | Readonly<{ ok: false; error: TaskClaimStoreError }>;
 
-export type RecoverResult = Readonly<{
-  ok: true;
-  recovered: number;
-  deadlettered: number;
-}>;
+export type RecoverResult =
+  | Readonly<{ ok: true; recovered: number; deadlettered: number }>
+  | Readonly<{ ok: false; error: TaskClaimStoreError }>;
 
 export type DeadLetterEntriesInput = Readonly<{
   actor_id: string;
@@ -145,11 +150,10 @@ export interface RenewInput {
 export interface ActiveClaimInput {
   readonly actor_id: string;
   readonly session_id: string;
+  /** ISO timestamp; the adapter layer reads the clock, not the core. */
+  readonly now: string;
 }
 
-const EXCERPT = 80;
-const excerptOf = (raw: string): string =>
-  raw.length <= EXCERPT ? raw : `${raw.slice(0, EXCERPT)}...`;
 
 export class TaskClaimStore {
   private readonly redis: Redis;
@@ -157,6 +161,8 @@ export class TaskClaimStore {
   private readonly batchClaimScript: string;
   private readonly ackScript: string;
   private readonly renewScript: string;
+  private readonly requeueScript: string;
+  private readonly purgeScript: string;
 
   constructor(redis: Redis) {
     this.redis = redis;
@@ -170,6 +176,31 @@ export class TaskClaimStore {
     );
     this.ackScript = readFileSync(join(LUA_DIR, "claims-ack.lua"), "utf-8");
     this.renewScript = readFileSync(join(LUA_DIR, "claims-renew.lua"), "utf-8");
+    this.requeueScript = readFileSync(join(LUA_DIR, "claims-requeue.lua"), "utf-8");
+    this.purgeScript = `${purgeActorClaimsLua}
+return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`;
+  }
+
+  /**
+   * Delete every piece of durable claim state an actor name owns, in one
+   * atomic script: outstanding claims, the DLQ, inbox event/trace streams,
+   * and the recovery counters of the messages those claims and the DLQ hold.
+   * Counters are deleted by exact key, never by prefix scan, so another
+   * actor whose name extends this one with ':' keeps its counters (RF7);
+   * counters of already-acknowledged messages expire with their TTL. Returns
+   * the number of claims removed.
+   */
+  async purgeActor(actorId: string): Promise<number> {
+    return (await this.redis.eval(
+      this.purgeScript,
+      5,
+      CLAIM_KEYS.claims,
+      CLAIM_KEYS.index(actorId),
+      DLQ_KEYS.list(actorId),
+      SESSION_KEYS.inboxEvents(actorId),
+      SESSION_KEYS.inboxTrace(actorId),
+      actorId
+    )) as number;
   }
 
   /**
@@ -178,7 +209,10 @@ export class TaskClaimStore {
    * observers). Returns how many tasks were re-queued and how many were
    * dead-lettered. Recovered messages re-enter at the inbox's tail; a message
    * whose recovery counter exceeds DLQ_PROVISIONAL.RECOVER_CAP is quarantined
-   * to the actor's DLQ instead (see the module doc).
+   * to the actor's DLQ instead (see the module doc). When the inbox, the DLQ
+   * or a recovery counter holds the wrong type, nothing changes and the
+   * result is a typed store_corrupt: the expired claims stay put until their
+   * tasks have a durable destination (FIX1).
    */
   async recoverExpired(input: RecoverInput): Promise<RecoverResult> {
     const nowMs = Date.parse(input.now);
@@ -193,8 +227,14 @@ export class TaskClaimStore {
       DLQ_PROVISIONAL.RECOVER_CAP,
       DLQ_PROVISIONAL.DLQ_MAX_LENGTH,
       DLQ_PROVISIONAL.RECOVER_COUNTER_TTL_SECONDS
-    )) as [number, number];
-    return { ok: true, recovered, deadlettered };
+    )) as [number, number | string];
+    if (recovered === -1) {
+      return fail(
+        "store_corrupt",
+        `cannot recover expired claims for actor '${input.actor_id}': its ${String(deadlettered)} key holds the wrong type; the claims are kept`
+      );
+    }
+    return { ok: true, recovered, deadlettered: deadlettered as number };
   }
 
   /**
@@ -232,43 +272,26 @@ export class TaskClaimStore {
   /**
    * Move one dead-lettered message from the actor's DLQ back to the inbox tail,
    * restoring a fresh recovery budget (the message's counter key is DELeted).
-   * The matching DLQ envelope is LREM'd by exact string match, then the raw
-   * payload is RPUSHed to the inbox. Not found is a typed dlq_entry_not_found
-   * error.
+   * One Lua script finds the matching envelope, RPUSHes the raw payload to
+   * the inbox, then LREMs it and clears the counter. The inbox write comes
+   * first, so a failing push (e.g. WRONGTYPE) rejects before the DLQ entry or
+   * counter is touched. Not found is a typed dlq_entry_not_found error.
    */
   async requeue(input: RequeueInput): Promise<RequeueResult> {
-    const list = DLQ_KEYS.list(input.actor_id);
-    const raw = await this.redis.lrange(list, 0, -1);
-    let target: string | null = null;
-    for (const payload of raw) {
-      let id: unknown;
-      try {
-        id = (JSON.parse(payload) as { id?: unknown }).id;
-      } catch {
-        continue;
-      }
-      if (id === input.message_id) {
-        target = payload;
-        break;
-      }
-    }
-    if (target === null) {
+    const moved = await this.redis.eval(
+      this.requeueScript,
+      3,
+      DLQ_KEYS.list(input.actor_id),
+      SESSION_KEYS.queue(input.actor_id),
+      CLAIM_KEYS.recoverCount(input.actor_id, input.message_id),
+      input.message_id
+    );
+    if (moved !== 1) {
       return fail(
         "dlq_entry_not_found",
         `no DLQ entry for message '${input.message_id}' on actor '${input.actor_id}'`
       );
     }
-    const removed = await this.redis.lrem(list, 1, target);
-    if (removed !== 1) {
-      return fail(
-        "dlq_entry_not_found",
-        `DLQ entry for message '${input.message_id}' on actor '${input.actor_id}' could not be removed`
-      );
-    }
-    await this.redis.rpush(SESSION_KEYS.queue(input.actor_id), target);
-    await this.redis.del(
-      CLAIM_KEYS.recoverCount(input.actor_id, input.message_id)
-    );
     return { ok: true, requeued: 1 };
   }
 
@@ -305,10 +328,11 @@ export class TaskClaimStore {
 
     // Lazy recovery before any new claim: an expired unacked claim's messages
     // are re-queued (atomically, per claim) before we pop a fresh batch.
-    await this.recoverExpired({
+    const recovery = await this.recoverExpired({
       actor_id: input.actor_id,
       now: input.now,
     });
+    if (!recovery.ok) return recovery;
 
     const claimId = randomUUID();
     const expiresAt = new Date(
@@ -352,7 +376,7 @@ export class TaskClaimStore {
     if (claim === null) {
       return fail(
         "store_corrupt",
-        `fresh claim ${claimId} failed to round-trip (${excerptOf(stored)}); refusing to operate on it`
+        `fresh claim ${claimId} failed to round-trip (${describeStored(stored, claimFailure(stored))}); refusing to operate on it`
       );
     }
     return { ok: true, claim };
@@ -362,7 +386,8 @@ export class TaskClaimStore {
    * Acknowledge an outstanding claim, confirming same-runtime batch delivery.
    * Removes the claim from the hash and index only for its owning session.
    * Returns how many tasks were acknowledged. A second ack is `unknown_claim`;
-   * a foreign session is `not_claim_owner` naming the owning session.
+   * a foreign session is `not_claim_owner`. The owning session id is never
+   * echoed: a session id is a bearer credential for its agent.
    */
   async acknowledge(input: AcknowledgeInput): Promise<AcknowledgeResult> {
     const result = (await this.redis.eval(
@@ -387,7 +412,7 @@ export class TaskClaimStore {
     }
     return fail(
       "not_claim_owner",
-      `claim '${input.claim_id}' is owned by session '${detail}'`
+      `claim '${input.claim_id}' is owned by another session`
     );
   }
 
@@ -452,22 +477,23 @@ export class TaskClaimStore {
     }
     return fail(
       "not_claim_owner",
-      `claim '${input.claim_id}' is owned by session '${detail}'`
+      `claim '${input.claim_id}' is owned by another session`
     );
   }
 
   /**
    * Return the first non-expired outstanding claim for an actor owned by the
-   * given session, or null. HGETALL-free: scans the actor's zset members and
-   * HGETs each. Corrupt stored JSON is skipped (returns nothing) so workload
-   * derivation on a hot path can never fail; this is intentionally separate
-   * from `get`'s typed store_corrupt path.
+   * given session, or null. HGETALL-free: reads the actor's zset members and
+   * fetches them with one HMGET. Corrupt stored JSON is skipped (returns
+   * nothing) so workload derivation on a hot path can never fail; this is
+   * intentionally separate from `get`'s typed store_corrupt path.
    */
   async activeClaimFor(input: ActiveClaimInput): Promise<TaskClaim | null> {
     const members = await this.redis.zrange(CLAIM_KEYS.index(input.actor_id), 0, -1);
-    const nowMs = Date.now();
-    for (const claimId of members) {
-      const raw = await this.redis.hget(CLAIM_KEYS.claims, claimId);
+    if (members.length === 0) return null;
+    const raws = await this.redis.hmget(CLAIM_KEYS.claims, ...members);
+    const nowMs = Date.parse(input.now);
+    for (const raw of raws) {
       if (raw === null) continue;
       const claim = this.parseTaskClaim(raw);
       if (claim === null) continue; // skip corrupt silently on the hot path
@@ -488,7 +514,7 @@ export class TaskClaimStore {
     if (claim === null) {
       return fail(
         "store_corrupt",
-        `stored claim '${claimId}' is corrupt (${excerptOf(raw)}); refusing to operate on it`
+        `stored claim '${claimId}' is corrupt (${describeStored(raw, claimFailure(raw))}); refusing to operate on it`
       );
     }
     return { ok: true, claim };
@@ -525,6 +551,10 @@ export class TaskClaimStore {
     return null;
   }
 }
+
+/** Which part of a stored claim parseTaskClaim rejected; called only after it has. */
+const claimFailure = (raw: string): string =>
+  firstNonStringField(raw, ["claim_id", "actor_id", "session_id", "claimed_at", "expires_at"]) ?? "tasks";
 
 const fail = (
   code: TaskClaimStoreErrorCode,

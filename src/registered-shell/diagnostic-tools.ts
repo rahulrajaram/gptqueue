@@ -5,18 +5,18 @@ import { toolResult, stableToolError } from "../mcp-server/tool-result.js";
 import { CodexSocketClient } from "./codex-socket.js";
 import type { RuntimeTools } from "./runtime-tools.js";
 import { AgentDiagnostics } from "../core/agent-diagnostics.js";
+import { SESSION_KEYS } from "../core/keys.js";
 
 /** Machine-readable MCP annotations mirroring the prose [safety: ...] prefixes. */
 const READ_ONLY = { readOnlyHint: true } as const;
 const WRITABLE = { readOnlyHint: false } as const;
 
-export const DIAGNOSTIC_TOOL_NAMES = ["find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] as const;
-export const agentProfileSchema = z.object({
+const agentProfileSchema = z.object({
   label: z.string().trim().min(1).max(120),
   purpose: z.string().trim().min(1).max(500),
   kind: z.enum(["controller", "worker", "interactive", "unknown"]),
 }).strict();
-export const findAgentsSchema = z.object({ query: z.string().max(200).optional(), client: z.enum(["codex", "pi"]).optional(),
+export const findAgentsSchema = z.object({ query: z.string().max(200).optional(), client: z.enum(["codex", "pi", "opencode"]).optional(),
   working_directory: z.string().max(4096).optional(), kind: agentProfileSchema.shape.kind.optional(),
   online: z.boolean().optional(), activation_ready: z.boolean().optional(), limit: z.number().int().min(1).max(100).default(50),
 }).strict();
@@ -60,7 +60,7 @@ export const registerDiagnosticTools = (server: McpServer, client: RedisClient, 
   server.tool("set_agent_profile", "[safety: writable] Declare this connection's readable label, purpose and kind. A declaration is a discovery hint, never proof of controller authority or permission to take over another mailbox.",
     agentProfileSchema.shape, WRITABLE, params => safe(async () => {
       const profile = Object.freeze({ ...agentProfileSchema.parse(params), declaration_source: "self", updated_at: new Date().toISOString() });
-      await client.adapterConnection.set(`gptq:agent-profile:${client.requireRegistered()}`, JSON.stringify(profile));
+      await client.adapterConnection.set(SESSION_KEYS.agentProfile(client.requireRegistered()), JSON.stringify(profile));
       return { status: "ok", agent: client.requireRegistered(), profile };
     }));
 };

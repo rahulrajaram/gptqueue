@@ -31,7 +31,7 @@ interface ParseState {
 }
 
 export const DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/14";
-export const TOOL_TIMEOUT_SECONDS = 70;
+const TOOL_TIMEOUT_SECONDS = 70;
 const DISPOSABLE_AGENT_PREFIX = "gptqueue-experiment-";
 
 export const usage = (): string =>
@@ -117,7 +117,7 @@ const requireSafeAgentName = (value: string | undefined): string => {
   return name;
 };
 
-export const redisDatabase = (redisUrl: string): number => {
+const redisDatabase = (redisUrl: string): number => {
   const parsed = new URL(redisUrl);
   if (parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
     throw new Error(`Redis URL must use redis:// or rediss://: ${redisUrl}`);
@@ -133,7 +133,7 @@ export const redisDatabase = (redisUrl: string): number => {
   return database;
 };
 
-export const requireIsolatedRedis = (redisUrl: string): string => {
+const requireIsolatedRedis = (redisUrl: string): string => {
   if (redisDatabase(redisUrl) === 0) {
     throw new Error(
       "The experimental wrapper refuses Redis db0; pass an isolated Redis URL such as redis://127.0.0.1:6379/14."

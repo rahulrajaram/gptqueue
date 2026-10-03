@@ -114,7 +114,7 @@ The minimum durable actor profile is:
 | Field | Meaning | Default |
 | --- | --- | --- |
 | `actor_id` | Stable internal identity | Generated once |
-| `alias` | Human-facing address such as `metabuilder` | Chosen at registration |
+| `alias` | Human-facing address such as `coordinator-agent` | Chosen at registration |
 | `capabilities` | Structured routing claims | Empty until declared |
 | `workspace_root` | Source repository the actor owns | Registration directory |
 | `working_directory` | Default process directory | `workspace_root` |
@@ -239,7 +239,7 @@ outside that assumption.
 
 ## Constraints and non-goals for the first wedge
 
-- Do not add MetaBuilder as a GPTQueue runtime dependency.
+- Do not add an external coordinator product as a GPTQueue runtime dependency.
 - Do not require Redis knowledge from agent clients.
 - Do not depend on typing into an arbitrary historical shell.
 - Do not allow a sender to override a receiver's execution contract.

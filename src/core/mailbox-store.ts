@@ -7,46 +7,16 @@
 
 import { Redis } from "ioredis";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
-import { SESSION_KEYS, SESSION_DEFAULTS } from "./keys.js";
-import type { QueueMessage } from "../mcp-server/types.js";
+import { join } from "path";
+import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL } from "./keys.js";
+import type { QueueMessage } from "./types.js";
+import { LUA_DIR } from "./stored-read.js";
 
-const eventKey = (agent: string) => `gptq:inbox-events:${agent}`;
-const outstandingKey = (agent: string, id: string) => `gptq:outstanding:${agent}:${id}`;
+const eventKey = SESSION_KEYS.inboxEvents;
+const outstandingKey = SESSION_KEYS.outstanding;
 const eligible = (message: QueueMessage): boolean =>
   message.type === "task" || (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
-
-/** Own the blocking socket so cancelling one receive cannot affect another. */
-const cancellablePop = async (
-  subscriber: Redis,
-  key: string,
-  timeout: number,
-  signal: AbortSignal
-) => {
-  signal.throwIfAborted();
-  const connection = subscriber.duplicate({
-    lazyConnect: true,
-    // A destructive pop must never be replayed after a connection failure.
-    retryStrategy: () => null,
-    autoResendUnfulfilledCommands: false,
-    maxRetriesPerRequest: 0,
-    enableOfflineQueue: false,
-  });
-  const cancel = () => connection.disconnect();
-  signal.addEventListener("abort", cancel, { once: true });
-  try {
-    await connection.connect();
-    signal.throwIfAborted();
-    return await connection.blpop(key, timeout);
-  } finally {
-    signal.removeEventListener("abort", cancel);
-    connection.disconnect();
-  }
-};
 
 export class MailboxStore {
   private readonly redis: Redis;
@@ -54,6 +24,9 @@ export class MailboxStore {
   private readonly boundedPushScript: string;
   private readonly boundedPushIdempotentScript: string;
   private readonly migrateMessagesScript: string;
+  /** Blocking connections owned by in-flight receives, broken on client shutdown. */
+  private readonly receiveConnections = new Set<Redis>();
+  private receivesClosed = false;
   readonly queueBound: number;
 
   constructor(redis: Redis, subscriber: Redis, queueBound?: number) {
@@ -161,21 +134,82 @@ export class MailboxStore {
     signal?: AbortSignal
   ): Promise<QueueMessage | null> {
     const key = SESSION_KEYS.queue(agentName);
-    const result = signal
-      ? await cancellablePop(this.subscriber, key, timeout, signal)
-      : await this.subscriber.blpop(key, timeout);
+    // Every pop gets its own connection: a long or unbounded BLPOP (timeout 0
+    // blocks until a message arrives) must never hold the shared subscriber
+    // and stall other receives behind it.
+    const result = await this.cancellablePop(key, timeout, signal);
     if (!result) return null;
 
-    const message: QueueMessage = JSON.parse(result[1]);
+    let message: QueueMessage;
+    try {
+      message = JSON.parse(result[1]) as QueueMessage;
+    } catch {
+      // BLPOP already removed it: park the unparseable payload in the DLQ so
+      // it stays inspectable instead of vanishing inside a thrown error.
+      await this.redis
+        .multi()
+        .lpush(DLQ_KEYS.list(agentName), result[1])
+        .ltrim(DLQ_KEYS.list(agentName), 0, DLQ_PROVISIONAL.DLQ_MAX_LENGTH - 1)
+        .exec();
+      return null;
+    }
 
-    const len = await this.redis.llen(SESSION_KEYS.queue(agentName));
-    await this.redis.hset(
-      SESSION_KEYS.mailboxMeta(agentName),
-      "current_size",
-      len
+    // One round trip: record the post-pop depth for get_queue_status.
+    await this.redis.eval(
+      "return redis.call('HSET', KEYS[2], 'current_size', redis.call('LLEN', KEYS[1]))",
+      2,
+      SESSION_KEYS.queue(agentName),
+      SESSION_KEYS.mailboxMeta(agentName)
     );
 
     return message;
+  }
+
+  /**
+   * Break every in-flight receive's blocking connection and refuse new ones.
+   * The owning client calls this on shutdown: a receive whose caller passed no
+   * signal is otherwise owned by nobody, and would stay parked in BLPOP and
+   * later consume a message whose response can no longer be delivered.
+   */
+  closeReceives(): void {
+    this.receivesClosed = true;
+    for (const connection of this.receiveConnections) connection.disconnect();
+    this.receiveConnections.clear();
+  }
+
+  private throwIfReceivesClosed(): void {
+    if (this.receivesClosed) throw new Error("receive refused: the client is shutting down");
+  }
+
+  /** Own the blocking socket so cancelling one receive cannot affect another. */
+  private async cancellablePop(
+    key: string,
+    timeout: number,
+    signal: AbortSignal | undefined
+  ): Promise<[string, string] | null> {
+    signal?.throwIfAborted();
+    this.throwIfReceivesClosed();
+    const connection = this.subscriber.duplicate({
+      lazyConnect: true,
+      // A destructive pop must never be replayed after a connection failure.
+      retryStrategy: () => null,
+      autoResendUnfulfilledCommands: false,
+      maxRetriesPerRequest: 0,
+      enableOfflineQueue: false,
+    });
+    const cancel = () => connection.disconnect();
+    signal?.addEventListener("abort", cancel, { once: true });
+    this.receiveConnections.add(connection);
+    try {
+      await connection.connect();
+      signal?.throwIfAborted();
+      this.throwIfReceivesClosed();
+      return await connection.blpop(key, timeout);
+    } finally {
+      this.receiveConnections.delete(connection);
+      signal?.removeEventListener("abort", cancel);
+      connection.disconnect();
+    }
   }
 
   /** Get queue depth for a named agent. */
@@ -191,21 +225,27 @@ export class MailboxStore {
       ? [agentName]
       : Object.keys(await this.redis.hgetall(SESSION_KEYS.registry));
 
-    const statuses = [];
+    if (targets.length === 0) return [];
+    // One pipelined round trip for every agent's depth and bound.
+    const pipe = this.redis.pipeline();
     for (const name of targets) {
-      const d = await this.redis.llen(SESSION_KEYS.queue(name));
-      const meta = await this.redis.hgetall(SESSION_KEYS.mailboxMeta(name));
-      statuses.push({
+      pipe.llen(SESSION_KEYS.queue(name)).hget(SESSION_KEYS.mailboxMeta(name), "max_size");
+    }
+    const results = (await pipe.exec()) ?? [];
+    return targets.map((name, i) => {
+      const [depthError, depth] = results[i * 2] ?? [null, 0];
+      const [boundError, bound] = results[i * 2 + 1] ?? [null, null];
+      if (depthError) throw depthError;
+      if (boundError) throw boundError;
+      return {
         agent: name,
-        depth: d,
+        depth: Number(depth),
         max_size: parseInt(
-          meta["max_size"] ||
-            String(SESSION_DEFAULTS.DEFAULT_QUEUE_BOUND),
+          (bound as string | null) || String(SESSION_DEFAULTS.DEFAULT_QUEUE_BOUND),
           10
         ),
-      });
-    }
-    return statuses;
+      };
+    });
   }
 
   /** Initialize mailbox metadata for an agent. */
@@ -234,18 +274,32 @@ export class MailboxStore {
    * list to the destination tail: either every message has moved or none
    * has, so a failure or crash mid-migration can never strand or lose a
    * message the way the legacy per-message LPOP/RPUSH loop could. Returns
-   * the number of messages transferred.
+   * the number of messages transferred. With `sourceClaimsIndex`, the
+   * transfer is refused while that index holds any claim; callers recover
+   * expired claims first. With `deadLetterBound`, the source's dead-letter
+   * queue moves too, in the same step, to the head of the destination's,
+   * which is then trimmed to that bound (FIX5).
    */
   async migrateMessages(
     fromAgent: string,
-    toAgent: string
+    toAgent: string,
+    sourceClaimsIndex?: string,
+    deadLetterBound?: number
   ): Promise<number> {
-    const count = await this.redis.eval(
-      this.migrateMessagesScript,
-      2,
-      SESSION_KEYS.queue(fromAgent),
-      SESSION_KEYS.queue(toAgent)
-    );
-    return typeof count === "number" ? count : parseInt(String(count), 10);
+    const keys = [SESSION_KEYS.queue(fromAgent), SESSION_KEYS.queue(toAgent)];
+    if (sourceClaimsIndex) keys.push(sourceClaimsIndex);
+    const args: number[] = [];
+    if (deadLetterBound !== undefined) {
+      keys.push(DLQ_KEYS.list(fromAgent), DLQ_KEYS.list(toAgent));
+      args.push(deadLetterBound);
+    }
+    const raw = await this.redis.eval(this.migrateMessagesScript, keys.length, ...keys, ...args);
+    const count = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+    if (count === -1) {
+      throw new Error(
+        `cannot move '${fromAgent}' to '${toAgent}' while it has unexpired claimed tasks; acknowledge them, or wait for their claims to expire, first`
+      );
+    }
+    return count;
   }
 }

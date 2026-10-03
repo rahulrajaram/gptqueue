@@ -15,6 +15,7 @@ import { sanitizeEvidence } from "./public-evidence.js";
 import { assertSetupTurnCompleted } from "./qualification-idle-task.js";
 import { assertBusyDeliveryObservation, type BusyControllerEvent, type BusyPromptAcceptance } from "./qualification-busy-task.js";
 import type { GenericParticipant, RawEvidenceRef } from "./qualification-types.js";
+import { CODEX_BIN } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_QUALIFICATION_BUSY_TASK === "1";
 const repo = resolve(import.meta.dirname, "../..");
@@ -49,7 +50,7 @@ const sourceHashes = async (): Promise<Json> => {
     (await readdir(join(repo, prefix), { recursive: true })).filter(path => /\.(?:ts|js|json)$/u.test(path)).map(path => `${prefix}/${path}`)));
   const labels = [...new Set([...sourceLabels, ...trees.flat()])].sort();
   const files: Record<string, string> = Object.fromEntries(labels.map(file => [file, join(repo, file)]));
-  files.node_executable = process.execPath; files.codex_executable = process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex";
+  files.node_executable = process.execPath; files.codex_executable = process.env.CODEX_BIN ?? CODEX_BIN;
   return Object.fromEntries(await Promise.all(Object.entries(files).map(async ([label, path]) => [label, await fileHash(path)])));
 };
 const evidenceRef = (path: string, sha256: string, source: Json, oracleSha: string): RawEvidenceRef => ({
@@ -91,14 +92,14 @@ describe("Codex appserver busy-task qualification", () => {
       await persist("started", { runner_pid: process.pid, source_revision: bytesHash(Buffer.from(JSON.stringify(source))), oracle_sha256: oracleSha });
       redis = await startOwnedRedis(); observer = new Redis(redis.url); workspace = await mkdtemp(join(tmpdir(), "gptqueue-busy-task-"));
       receipt.redis = { port: Number(new URL(redis.url).port), database: 15, owned_process: true };
-      codex = createCodexAdapters({ workspaceRoot: workspace, codexBin: process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex", model: "gpt-5.6-luna" }); generic = createGenericAdapters({ repo });
+      codex = createCodexAdapters({ workspaceRoot: workspace, codexBin: process.env.CODEX_BIN ?? CODEX_BIN, model: "gpt-5.6-luna" }); generic = createGenericAdapters({ repo });
       const nativeAdapter = codex.adapters.find(({ spec }) => spec.id === "codex-appserver"), peerAdapter = generic.adapters.find(({ spec }) => spec.id === "generic-stdio");
       if (!nativeAdapter || !peerAdapter) throw new Error("required adapters unavailable");
       const signal = AbortSignal.timeout(420_000);
       if ((await nativeAdapter.preflight(signal)).kind !== "available" || (await peerAdapter.preflight(signal)).kind !== "available") throw new Error("required adapter unavailable");
       peer = await peerAdapter.launch({ role: "sender", pairId: runId, nonce: `peer-${runId}`, redisUrl: redis.url }, signal) as GenericParticipant;
       model = await nativeAdapter.launch({ role: "receiver", pairId: runId, nonce: `model-${runId}`, redisUrl: redis.url }, signal) as CodexParticipant;
-      receipt.identities = { peer: peer.identity, model: model.identity }; receipt.provenance = model.provenance; receipt.executable_paths = { node: process.execPath, codex: process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex" }; await persist("launched", receipt.identities);
+      receipt.identities = { peer: peer.identity, model: model.identity }; receipt.provenance = model.provenance; receipt.executable_paths = { node: process.execPath, codex: process.env.CODEX_BIN ?? CODEX_BIN }; await persist("launched", receipt.identities);
       receipt.row_id = "codex-appserver:automatic:busy-deferral"; receipt.console_locator = `receipt=${join(artifactDir, "receipt.json")} runner_pid=${process.pid}`;
       const controllerEvents: Array<BusyControllerEvent & Json> = [{ kind: "controller_prompt", at: Date.now(), prompt: "Call get_runtime_status and list_agents, then reply READY and end this turn." }]; receipt.controller_ledger = controllerEvents;
       await peer.call("list_agents", {}, signal);

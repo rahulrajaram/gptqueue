@@ -7,8 +7,10 @@ import { createBoundMcpServer } from "../experimental-wrapper/bridge.js";
 import { createLifecycleLog, safeLifecycleCode } from "./lifecycle-log.js";
 import { createRuntimeController } from "./runtime-controller.js";
 import { createCodexRuntime } from "./codex-runtime.js";
+import { bootstrapCodexBinding } from "./codex-bootstrap.js";
 import { z } from "zod";
 import type { ActivationOutcome } from "./runtime.js";
+import { SESSION_KEYS } from "../core/keys.js";
 
 export type ShellClient = "codex" | "pi";
 export interface RegisteredShellOptions {
@@ -182,11 +184,12 @@ export const startRegisteredShell = async (
     if (!sessionId) throw new Error("Registration returned no session");
     server = createBoundMcpServer({ agentName, redisClient: redis, runtime }, shutdown.signal);
     // Describe the implementation instantiated by this process, not files currently on disk.
-    const registryKey = "gptq:registry";
+    const registryKey = SESSION_KEYS.registry;
     const registrationRaw = await redis.adapterConnection.hget(registryKey, agentName);
     if (!registrationRaw) throw new Error("Registered shell metadata disappeared");
     const registration = JSON.parse(registrationRaw);
-    await redis.adapterConnection.hset(registryKey, agentName, JSON.stringify({ ...registration,
+    // Publishing a completed value also drops the name's rollback bookkeeping (R2).
+    await redis.sessions.publishRegistration(agentName, JSON.stringify({ ...registration,
       metadata: { ...registration.metadata, protocol_version: 2,
         tool_names: ["send_message", "receive_message", "list_agents", "get_queue_status",
           "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status",
@@ -208,6 +211,14 @@ export const startRegisteredShell = async (
       "Registered shell transport startup timed out", shutdown.signal);
     lifecycle.emit({ event: "transport_connected", phase: "transport", duration_ms: lifecycle.elapsed() - transportStarted, session_id: sessionId });
     shutdown.signal.throwIfAborted();
+    if (options.client === "codex") {
+      lifecycle.emit({ event: "native_binding_started", phase: "binding", session_id: sessionId });
+      void bootstrapCodexBinding(runtime, redis.requireRegistered(), identity.working_directory, shutdown.signal)
+        .then(ready => lifecycle.emit({ event: ready ? "native_binding_ready" : "native_binding_unavailable",
+          phase: "binding", session_id: sessionId, code: ready ? undefined : "native_identity_unavailable" }))
+        .catch(() => lifecycle.emit({ event: "native_binding_unavailable", phase: "binding",
+          session_id: sessionId, code: "native_transport_error" }));
+    }
     return Object.freeze({ get agentName() { return redis.agentName ?? agentName; },
       get sessionId() { return redis.sessionId ?? sessionId; }, closed, close: cleanup });
   } catch (error) {

@@ -6,14 +6,14 @@ first acknowledged task.
 
 ## 0. Prerequisites
 
-- Node.js 22+ and npm
+- Node.js 20+ and npm
 - Redis running locally (`redis://127.0.0.1:6379`) — db0 is the live
-  server's database; tests use db15 (see `AGENTS.md`)
+  server's database; tests use db15 (enforced by `vitest.config.ts`)
 
 ## 1. Install
 
 ```bash
-cd /home/rahul/Documents/gptqueue
+cd /path/to/gptqueue
 scripts/install.sh              # builds, restarts the server on 127.0.0.1:8101, health-checks
 curl http://127.0.0.1:8101/health
 ```
@@ -74,7 +74,7 @@ the tasks return to the inbox — process tasks idempotently (see
 Agents that are not running can be launched when work arrives:
 
 1. The **operator** allowlists launchable commands in
-   `.gptqueue/launch-allowlist.json` (fail-closed; exact argv templates only;
+   `~/.config/gptqueue/launch-allowlist.json` (fail-closed; exact argv templates only;
    shells and interpreter inline-code flags like `node -e` are always
    rejected — point interpreters at a fixed script file instead):
 

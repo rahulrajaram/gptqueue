@@ -1,6 +1,5 @@
 import {
   createOpenCodePlugin,
-  type OpenCodeNativeClient,
   type OpenCodePluginInput,
   type OpenCodePluginHooks,
 } from "./opencode-plugin-factory.js";

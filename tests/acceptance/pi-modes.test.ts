@@ -9,8 +9,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { root, runRoot, redisUrl, publicEvidence, until } from './pi-support.js';
 import { SESSION_KEYS } from '../../src/core/keys.js';
+import { nodePrefixPath } from "./local-tools.js";
 
-const cli = '/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js';
+const cli = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
 const quote = (arg: string) => "'" + arg.replaceAll("'", "'\\''") + "'";
 
 for (const mode of ['interactive', 'headless'] as const) it.skipIf(process.env.GPTQUEUE_PI_MODES !== '1')(
