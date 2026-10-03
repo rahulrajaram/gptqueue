@@ -141,6 +141,21 @@ const launch = (
     stdio: "inherit",
   });
 
+/**
+ * Exit-code precedence after cleanup: a cleanup failure overrides a clean
+ * child exit (with the signal's code if interrupted, else 1), and an
+ * interrupt reports the signal even when the child itself exited 0.
+ */
+export const finalExitCode = (
+  childCode: number,
+  firstSignal: NodeJS.Signals | null,
+  cleanupFailed: boolean
+): number => {
+  if (cleanupFailed) return firstSignal ? exitCodeFor({ code: null, signal: firstSignal }) : 1;
+  if (firstSignal && childCode === 0) return exitCodeFor({ code: null, signal: firstSignal });
+  return childCode;
+};
+
 export const exitCodeFor = (outcome: ChildOutcome): number => {
   if (outcome.code !== null) return outcome.code;
   if (outcome.signal) {
@@ -246,10 +261,10 @@ export async function runExperimentalWrapper(
   let bridge: BoundBridge | null = null;
   let child: ChildProcess | null = null;
   let registered = false;
-  let bridgeClosed = false;
-  let registrationReleased = false;
-  let claimReleased = false;
-  let redisShutdown = false;
+  // Cleanup phases, in the order their ownership nests: the bridge serves the
+  // registration, which the identity claim protects, all over one Redis
+  // client. Ordering lives in this list rather than in guard flags.
+  const released = new Set<CleanupPhase>();
   let cleanupInFlight: Promise<CleanupReport> | null = null;
   const cleanupFailures = new Map<CleanupPhase, Error>();
   let cleanupForced = false;
@@ -259,88 +274,72 @@ export async function runExperimentalWrapper(
     cleanupForced = true;
     identityClaim?.abandon();
     redisClient.forceDisconnect();
-    redisShutdown = true;
+    released.add("redis");
   };
+
+  interface CleanupStep {
+    readonly phase: CleanupPhase;
+    /** Whether this step may run yet on this attempt. */
+    readonly ready: (finalAttempt: boolean) => boolean;
+    /** True when there is nothing to release (counts as released). */
+    readonly absent: () => boolean;
+    /** Failure recorded instead of running once cleanup has been forced. */
+    readonly abandonedMessage?: string;
+    /** Release the resource; a returned Error is a non-fatal warning. */
+    readonly release: () => Promise<Error | null | undefined | void>;
+  }
+  const steps: readonly CleanupStep[] = [
+    {
+      phase: "bridge",
+      ready: () => true,
+      absent: () => !bridge,
+      release: () => bridge!.close(),
+    },
+    {
+      phase: "registration",
+      ready: () => true,
+      absent: () => !redisClient.registered,
+      abandonedMessage: "Registration cleanup was abandoned after its deadline.",
+      release: () => releaseRegistration(redisClient, options.cleanup, identityClaim),
+    },
+    {
+      phase: "claim",
+      ready: (finalAttempt) => released.has("registration") || finalAttempt,
+      absent: () => !identityClaim,
+      abandonedMessage: "Identity claim remains fail-closed after cleanup timeout.",
+      release: () => identityClaim!.release(),
+    },
+    {
+      phase: "redis",
+      ready: (finalAttempt) => (released.has("registration") && released.has("claim")) || finalAttempt,
+      absent: () => false,
+      release: () => redisClient.shutdown(),
+    },
+  ];
 
   const cleanup = (finalAttempt: boolean): Promise<CleanupReport> => {
     if (cleanupInFlight) return cleanupInFlight;
     cleanupInFlight = (async () => {
-      if (!bridgeClosed) {
-        if (!bridge) {
-          bridgeClosed = true;
+      for (const step of steps) {
+        if (released.has(step.phase) || !step.ready(finalAttempt)) continue;
+        if (step.absent()) {
+          released.add(step.phase);
+        } else if (step.abandonedMessage && cleanupForced) {
+          cleanupFailures.set(step.phase, new Error(step.abandonedMessage));
         } else {
           try {
-            await bridge.close();
-            bridgeClosed = true;
-            cleanupFailures.delete("bridge");
+            const warning = await step.release();
+            released.add(step.phase);
+            if (warning instanceof Error) cleanupFailures.set(step.phase, warning);
+            else cleanupFailures.delete(step.phase);
           } catch (error) {
-            cleanupFailures.set("bridge", asError(error));
+            cleanupFailures.set(step.phase, asError(error));
           }
         }
       }
-
-      if (!registrationReleased) {
-        if (!redisClient.registered) {
-          registrationReleased = true;
-        } else if (cleanupForced) {
-          cleanupFailures.set(
-            "registration",
-            new Error("Registration cleanup was abandoned after its deadline.")
-          );
-        } else {
-          try {
-            const warning = await releaseRegistration(
-              redisClient,
-              options.cleanup,
-              identityClaim
-            );
-            registrationReleased = true;
-            if (warning) {
-              cleanupFailures.set("registration", warning);
-            } else {
-              cleanupFailures.delete("registration");
-            }
-          } catch (error) {
-            cleanupFailures.set("registration", asError(error));
-          }
-        }
-      }
-
-      if (!claimReleased && (registrationReleased || finalAttempt)) {
-        if (!identityClaim) {
-          claimReleased = true;
-        } else if (cleanupForced) {
-          cleanupFailures.set(
-            "claim",
-            new Error("Identity claim remains fail-closed after cleanup timeout.")
-          );
-        } else {
-          try {
-            await identityClaim.release();
-            claimReleased = true;
-            cleanupFailures.delete("claim");
-          } catch (error) {
-            cleanupFailures.set("claim", asError(error));
-          }
-        }
-      }
-
-      if (
-        !redisShutdown &&
-        ((registrationReleased && claimReleased) || finalAttempt)
-      ) {
-        try {
-          await redisClient.shutdown();
-          redisShutdown = true;
-          cleanupFailures.delete("redis");
-        } catch (error) {
-          cleanupFailures.set("redis", asError(error));
-        }
-      }
-
       return Object.freeze({
         failures: new Map(cleanupFailures),
-        registrationReleased,
+        registrationReleased: released.has("registration"),
       });
     })().finally(() => {
       cleanupInFlight = null;
@@ -441,18 +440,14 @@ export async function runExperimentalWrapper(
       try {
         let report = await cleanup(false);
         if (report.failures.size > 0) report = await cleanup(true);
-        if (report.failures.size > 0) {
-          for (const [phase, error] of report.failures) {
-            console.error(
-              `[gptqueue-experiment] cleanup ${phase} failed: ${error.message}`
-            );
-          }
-          resultCode = firstSignal
-            ? exitCodeFor({ code: null, signal: firstSignal })
-            : 1;
-        } else if (firstSignal && resultCode === 0) {
-          resultCode = exitCodeFor({ code: null, signal: firstSignal });
-        } else if (registered && report.registrationReleased) {
+        for (const [phase, error] of report.failures) {
+          console.error(
+            `[gptqueue-experiment] cleanup ${phase} failed: ${error.message}`
+          );
+        }
+        const childCode = resultCode;
+        resultCode = finalExitCode(childCode, firstSignal, report.failures.size > 0);
+        if (report.failures.size === 0 && !(firstSignal && childCode === 0) && registered && report.registrationReleased) {
           console.error(
             `[gptqueue-experiment] ${options.cleanup === "unregister" ? "unregistered" : "closed"} "${options.agent}" after ${options.client} exit`
           );

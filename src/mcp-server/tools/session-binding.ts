@@ -1,4 +1,5 @@
 import type { RedisClient } from "../redis-client.js";
+import { GptQueueError } from "../errors.js";
 
 /**
  * Ensure a session-scoped tool call is bound to a durable session.
@@ -31,9 +32,8 @@ export async function ensureSessionBinding(
  * name + session id, so a lost/unknown session reports the same condition
  * under the same error code (SESSION_UNAVAILABLE via stableToolError).
  *
- * Throws "Session binding not found..." (matches tool-result.ts's
- * SESSION_UNAVAILABLE regex) when the caller is registered but has no bound
- * session, and lets requireRegistered() throw AGENT_NOT_REGISTERED when the
+ * Throws a GptQueueError coded SESSION_UNAVAILABLE when the caller is
+ * registered but has no bound session, and lets requireRegistered() throw AGENT_NOT_REGISTERED when the
  * caller was never registered at all.
  */
 export async function bindSession(
@@ -44,7 +44,8 @@ export async function bindSession(
   const agent = client.requireRegistered();
   const bound = client.sessionId;
   if (!bound) {
-    throw new Error(
+    throw new GptQueueError(
+      "SESSION_UNAVAILABLE",
       "Session binding not found. Call register_agent first with a name and retain the session_id."
     );
   }

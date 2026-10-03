@@ -73,5 +73,5 @@ export async function custodyRelease(
     now: new Date().toISOString(),
   });
 
-  return custodyOpResult(result, { status: "released" });
+  return custodyOpResult(result);
 }

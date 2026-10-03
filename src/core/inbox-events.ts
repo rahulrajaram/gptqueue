@@ -1,29 +1,73 @@
 import { Redis } from "ioredis";
-import type { QueueMessage } from "../mcp-server/types.js";
+import type { QueueMessage } from "./types.js";
+import { SESSION_KEYS } from "./keys.js";
 
 export type InboxEventType = QueueMessage["type"];
-export type InboxTraceStage = "activation_requested" | "turn_started" | "activation_queued" | "activation_failed" | "task_claimed" | "task_acknowledged" | "reply_sent" | "runtime_bound" | "runtime_unbound";
+export type InboxTraceStage = "activation_requested" | "activation_deferred" | "turn_started" | "activation_queued" | "activation_failed" | "task_claimed" | "task_acknowledged" | "reply_sent" | "runtime_bound" | "runtime_unbound";
 export type InboxTraceFields = Readonly<{ stage: InboxTraceStage; timestamp: string; message_id?: string; in_reply_to?: string; claim_id?: string; operation_id?: string; runtime_id?: string; turn_id?: string; code?: string }>;
-const stream = (agent: string) => `gptq:inbox-events:${agent}`;
-const traceStream = (agent: string) => `gptq:inbox-trace:${agent}`;
-const outstanding = (agent: string, id: string) => `gptq:outstanding:${agent}:${id}`;
-const eligible = async (redis: Redis, message: QueueMessage): Promise<boolean> =>
-  message.type === "task" || ((message.type === "result" || message.type === "error") &&
-    !!message.payload.in_reply_to && await redis.get(outstanding(message.to, message.payload.in_reply_to)) === message.from);
+const stream = SESSION_KEYS.inboxEvents;
+const traceStream = SESSION_KEYS.inboxTrace;
+const outstanding = SESSION_KEYS.outstanding;
+const awaitsOutstanding = (message: QueueMessage): message is QueueMessage & { payload: { in_reply_to: string } } =>
+  (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 
 export class InboxEvents {
   constructor(private readonly redis: Redis) {}
 
   async pending(agent: string): Promise<readonly QueueMessage[]> {
-    const raw = await this.redis.lrange(`gptq:q:${agent}`, 0, -1);
-    const messages: QueueMessage[] = [];
-    for (const value of raw) {
+    const raw = await this.redis.lrange(SESSION_KEYS.queue(agent), 0, -1);
+    const candidates = raw.flatMap((value) => {
       let message: QueueMessage;
-      try { message = JSON.parse(value) as QueueMessage; } catch { continue; }
-      if (message?.to !== agent || typeof message.id !== "string" || !message.payload) continue;
-      if (await eligible(this.redis, message)) messages.push(message);
-    }
-    return Object.freeze(messages);
+      try { message = JSON.parse(value) as QueueMessage; } catch { return []; }
+      if (message?.to !== agent || typeof message.id !== "string" || !message.payload) return [];
+      return message.type === "task" || awaitsOutstanding(message) ? [message] : [];
+    });
+    // One MGET resolves every reply's outstanding-request owner instead of a GET per message.
+    const replies = candidates.filter(awaitsOutstanding);
+    const owners = replies.length === 0 ? [] : await this.redis.mget(replies.map((m) => outstanding(m.to, m.payload.in_reply_to)));
+    const ownerOf = new Map<QueueMessage, string | null>(replies.map((m, i) => [m, owners[i] ?? null]));
+    return Object.freeze(candidates.filter((m) => m.type === "task" || ownerOf.get(m) === m.from));
+  }
+
+  /**
+   * A waiter reuses one blocking connection across waits instead of opening
+   * one per call (a dispatcher waits roughly once a second). Aborting a wait
+   * disconnects it, which is how a blocked XREAD is interrupted; a broken or
+   * aborted connection is replaced on the next wait. Call close() when done.
+   */
+  createWaiter(): Readonly<{
+    wait(agent: string, afterId: string, signal: AbortSignal, blockMs?: number): Promise<string | null>;
+    close(): void;
+  }> {
+    let connection: Redis | null = null;
+    const fresh = async (): Promise<Redis> => {
+      if (connection && connection.status === "ready") return connection;
+      connection?.disconnect();
+      const next = this.redis.duplicate({ lazyConnect: true, retryStrategy: () => null, maxRetriesPerRequest: 0, enableOfflineQueue: false, autoResendUnfulfilledCommands: false });
+      next.on("error", () => undefined); // The awaited command reports failures to the caller.
+      connection = next;
+      await next.connect();
+      return next;
+    };
+    return Object.freeze({
+      wait: async (agent: string, afterId: string, signal: AbortSignal, blockMs = 1000): Promise<string | null> => {
+        signal.throwIfAborted();
+        const current = await fresh();
+        const cancel = () => current.disconnect();
+        signal.addEventListener("abort", cancel, { once: true });
+        try {
+          signal.throwIfAborted();
+          const result = await current.xread("BLOCK", blockMs, "STREAMS", stream(agent), afterId) as [string, [string, string[]][]][] | null;
+          return result?.[0]?.[1]?.at(-1)?.[0] ?? null;
+        } catch (error) {
+          current.disconnect();
+          throw error;
+        } finally {
+          signal.removeEventListener("abort", cancel);
+        }
+      },
+      close: () => { connection?.disconnect(); connection = null; },
+    });
   }
 
   async wait(agent: string, afterId: string, signal: AbortSignal, blockMs = 1000): Promise<string | null> {

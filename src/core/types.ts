@@ -36,3 +36,17 @@ export interface AgentPresence {
   readonly online: boolean;
   readonly active_sessions: readonly string[];
 }
+
+/** A message as stored in an agent's mailbox (JSON in gptq:q:<name>). */
+export interface QueueMessage {
+  readonly id: string;
+  readonly from: string;
+  readonly to: string;
+  readonly timestamp: string;
+  readonly type: "task" | "result" | "status" | "error" | "ping";
+  readonly payload: Readonly<{
+    content: string;
+    metadata?: Readonly<Record<string, unknown>>;
+    in_reply_to?: string;
+  }>;
+}

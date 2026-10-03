@@ -8,11 +8,14 @@ import { createPiRuntime, type PiRuntimeHost } from "./pi-runtime.js";
 import type { ActivationRequest, ActivationOutcome, RuntimeBinding } from "./runtime.js";
 import { runtimeBindingSchema } from "./runtime.js";
 import { z } from "zod";
+import { VERSION } from "../version.js";
+import { RUNTIME_TOOL_NAMES, SHELL_TOOL_NAMES } from "./tool-names.js";
 
 export const GPTQUEUE_TOOLS = ["send_message", "receive_message", "list_agents", "get_queue_status"] as const;
-export const RUNTIME_TOOL_NAMES = ["claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] as const;
-const REQUIRED_RUNTIME_TOOLS = RUNTIME_TOOL_NAMES.slice(0, 5);
-export const STARTUP_TIMEOUT_MS = 10_000;
+/** Every registered-shell tool; the runtime subset is required. */
+export const SHELL_TOOLS = SHELL_TOOL_NAMES;
+const REQUIRED_RUNTIME_TOOLS = RUNTIME_TOOL_NAMES;
+const STARTUP_TIMEOUT_MS = 10_000;
 type CatalogTool = { name?: string; description?: string; inputSchema?: unknown };
 type BoundTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
 type ToolDefinition = {
@@ -40,6 +43,8 @@ export interface SessionClient {
     options?: { signal?: AbortSignal }): Promise<CallToolResult>;
   getInstructions?(): string | undefined;
   close(): Promise<void>;
+  /** Forcefully end the connection when a graceful close() hangs. */
+  destroy?(): void;
   setActivationHandler?(handler: (binding: RuntimeBinding, request: ActivationRequest, signal: AbortSignal) => Promise<ActivationOutcome>): void;
 }
 
@@ -58,7 +63,7 @@ const withTimeout = async <T>(work: (signal: AbortSignal) => Promise<T>, timeout
 
 export const validateCatalog = (catalog: { tools?: CatalogTool[] }, runtimeEnabled = false): readonly BoundTool[] => {
   const expected: readonly string[] = runtimeEnabled ? [...GPTQUEUE_TOOLS, ...REQUIRED_RUNTIME_TOOLS] : GPTQUEUE_TOOLS;
-  const allowed: readonly string[] = runtimeEnabled ? [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES] : GPTQUEUE_TOOLS;
+  const allowed: readonly string[] = runtimeEnabled ? [...GPTQUEUE_TOOLS, ...SHELL_TOOLS] : GPTQUEUE_TOOLS;
   const tools = catalog.tools ?? [];
   const names = tools.map((tool) => tool.name);
   if (new Set(names).size !== names.length || names.some(name => !name || !allowed.includes(name)) || expected.some((name) => !names.includes(name))) {
@@ -91,7 +96,14 @@ export const createPiExtension = (
   const close = async () => {
     runtime?.invalidate(); runtime = undefined; binding = undefined;
     const old = client; client = undefined;
-    if (old) await withTimeout(() => old.close(), 2_500);
+    if (!old) return;
+    try {
+      await withTimeout(() => old.close(), 2_500);
+    } catch (error) {
+      // A wedged close must not leave the sidecar process running.
+      old.destroy?.();
+      throw error;
+    }
   };
   const fatal = async (error: unknown): Promise<never> => {
     console.error(`[gptqueue] Pi registration readiness failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -205,7 +217,7 @@ export const createRegisteredPiExtension = (options: {
     args: [options.sidecarPath ?? fileURLToPath(new URL("../../bin/gptqueue-session", import.meta.url)),
       "--client", "pi", "--redis-url", options.redisUrl],
   });
-  const client = new Client({ name: "gptqueue-pi", version: "1.0.0" });
+  const client = new Client({ name: "gptqueue-pi", version: VERSION });
   let activationHandler: ((binding: RuntimeBinding, request: ActivationRequest, signal: AbortSignal) => Promise<ActivationOutcome>) | undefined;
   client.setRequestHandler(z.object({
     method: z.literal("gptqueue/activate"),
@@ -225,6 +237,10 @@ export const createRegisteredPiExtension = (options: {
       getInstructions: () => client.getInstructions(),
       setActivationHandler: (handler) => { activationHandler = handler; },
       close: () => client.close(),
+      destroy: () => {
+        const pid = transport.pid;
+        if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+      },
     };
   } catch (error) {
     await transport.close();

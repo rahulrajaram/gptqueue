@@ -288,6 +288,10 @@ describe("experimental authenticated bound bridge", () => {
           "session_id"
         );
       }
+      // Same read/write hints as the main server's tools of the same name.
+      expect(Object.fromEntries(catalog.tools.map((tool) => [tool.name, tool.annotations?.readOnlyHint]))).toEqual({
+        send_message: false, receive_message: false, list_agents: true, get_queue_status: true,
+      });
       const forbidden = await client.callTool({
         name: "register_agent",
         arguments: {
@@ -440,6 +444,39 @@ describe("experimental authenticated bound bridge", () => {
     }
   });
 
+  it("forwards SIGINT to a running child, exits 130, and still cleans up", async () => {
+    const name = `gptqueue-experiment-sigint-${Date.now()}`;
+    const workspace = join(REPOSITORY_ROOT, ".gptqueue");
+    const probePath = join(workspace, `sigint-probe-${Date.now()}.mjs`);
+    const previousBinary = process.env.GPTQ_EXPERIMENT_CODEX_BIN;
+    // Only the wrapper's own handlers may see the simulated interrupt.
+    const foreign = process.listeners("SIGINT");
+    for (const listener of foreign) process.off("SIGINT", listener);
+    await writeFile(probePath, "#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 30000);\n", { encoding: "utf8", mode: 0o700 });
+    process.env.GPTQ_EXPERIMENT_CODEX_BIN = probePath;
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const run = runExperimentalWrapper([
+        "codex", "--agent", name, "--workspace", workspace,
+        "--redis-url", TEST_REDIS_URL, "--cleanup", "unregister", "--", "wait",
+      ]);
+      for (let i = 0; i < 200 && !stderr.mock.calls.some(([line]) => String(line).includes("launching codex")); i += 1) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await new Promise((r) => setTimeout(r, 200)); // let the child start
+      process.emit("SIGINT");
+      await expect(run).resolves.toBe(exitCodeFor({ code: null, signal: "SIGINT" }));
+      expect(await cleanupRedis.hexists(SESSION_KEYS.registry, name)).toBe(0);
+      expect(await cleanupRedis.exists(SESSION_KEYS.wrapperClaim(name))).toBe(0);
+    } finally {
+      for (const listener of foreign) process.on("SIGINT", listener);
+      stderr.mockRestore();
+      await rm(probePath, { force: true });
+      if (previousBinary === undefined) delete process.env.GPTQ_EXPERIMENT_CODEX_BIN;
+      else process.env.GPTQ_EXPERIMENT_CODEX_BIN = previousBinary;
+    }
+  });
+
   it.each(["missing", "replaced"] as const)(
     "closes its claim connection after a %s claim prevents cleanup",
     async (failure) => {
@@ -589,6 +626,25 @@ describe("experimental authenticated bound bridge", () => {
 
     const next = await acquireWrapperIdentityClaim(TEST_REDIS_URL, name, true);
     await next.release();
+  });
+
+  it("ignores expired sessions but refuses a leased one when claiming a name", async () => {
+    const name = `gptqueue-experiment-stale-${Date.now()}`;
+    const [stale, live] = [`stale-${Date.now()}`, `live-${Date.now()}`];
+    await cleanupRedis.sadd(SESSION_KEYS.agentSessions(name), stale);
+    await cleanupRedis.hset(SESSION_KEYS.session(stale), "agent_name", name);
+    try {
+      const claim = await acquireWrapperIdentityClaim(TEST_REDIS_URL, name, false);
+      await claim.release();
+
+      await cleanupRedis.sadd(SESSION_KEYS.agentSessions(name), live);
+      await cleanupRedis.set(SESSION_KEYS.lease(live), "alive", "EX", 30);
+      await expect(
+        acquireWrapperIdentityClaim(TEST_REDIS_URL, name, false)
+      ).rejects.toThrow(/concurrent wrapper ownership/u);
+    } finally {
+      await cleanupRedis.del(SESSION_KEYS.agentSessions(name), SESSION_KEYS.session(stale), SESSION_KEYS.lease(live));
+    }
   });
 
   it("detects a non-wrapper session collision after claiming a name", async () => {

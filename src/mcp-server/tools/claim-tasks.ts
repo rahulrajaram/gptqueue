@@ -58,7 +58,15 @@ export async function claimTasks(
   // undefined (unlimited), which is exactly the pre-enforcement behavior.
   let max_concurrent_claims: number | undefined;
   const dir = await client.actorDirectory.get(actor_id);
-  if (dir.ok && dir.record !== null) {
+  if (!dir.ok) {
+    // Fail closed: an unreadable record may carry a ceiling this claim must
+    // honor, so claiming without one would exceed it.
+    return toolResult(
+      { status: "error", error: { code: dir.error.code, message: dir.error.message } },
+      true
+    );
+  }
+  if (dir.record !== null) {
     // H4 invariant guard: a durable directory record, if present for the
     // caller's name, must carry the SAME actor_id as the caller name. Since
     // actor_register derives actor_id from the registered name, a mismatch

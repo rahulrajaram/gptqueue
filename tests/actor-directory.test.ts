@@ -8,6 +8,8 @@ import {
 } from "../src/core/actor-directory.js";
 import { ACTOR_KEYS } from "../src/core/keys.js";
 import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
+import { RedisClient } from "../src/mcp-server/redis-client.js";
+import { actorStatus, actorStatusSchema } from "../src/mcp-server/tools/actor-status.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
@@ -158,7 +160,8 @@ describe("ActorDirectory", () => {
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected actor_owned_elsewhere");
     expect(res.error.code).toBe("actor_owned_elsewhere");
-    expect(res.error.message).toContain("session-a");
+    // A session id is a bearer credential: the owner must never be echoed.
+    expect(res.error.message).not.toContain("session-a");
   });
 
   it("allows the owning session to update its own profile", async () => {
@@ -210,6 +213,59 @@ describe("ActorDirectory", () => {
     if (res.ok) throw new Error("expected store_corrupt");
     expect(res.error.code).toBe("store_corrupt");
     expect(res.error.message).toContain("actor-a");
+  });
+
+  it("returns store_corrupt for a stored profile missing required fields", async () => {
+    await redis.hset(ACTOR_KEYS.profiles, "actor-a", JSON.stringify({ profile: { actor_id: "actor-a" }, registered_by: "session-a" }));
+    const res = await store.get("actor-a");
+    if (res.ok) throw new Error("expected store_corrupt");
+    expect(res.error.code).toBe("store_corrupt");
+  });
+
+  it("returns store_corrupt for a stored record whose launch contract is missing or malformed", async () => {
+    const valid = { profile: profileInput(), registered_by: "session-a", registered_at: T0 };
+    for (const bad of [
+      valid, // launch absent: contractReadiness would dereference undefined
+      { ...valid, launch: "/usr/bin/pi" },
+      { ...valid, launch: { command: "/usr/bin/pi" } }, // args absent: dispatch would spread undefined
+      { ...valid, launch: { command: "/usr/bin/pi", args: [7] } },
+      { ...valid, launch: { command: 7, args: [] } },
+      { ...valid, launch: { command: "/usr/bin/pi", args: [], cwd: 7 } },
+      { ...valid, profile: profileInput({ activation_policy: { mode: "store_only" } }), launch: [] },
+    ]) {
+      await redis.hset(ACTOR_KEYS.profiles, "actor-a", JSON.stringify(bad));
+      const res = await store.get("actor-a");
+      if (res.ok) throw new Error(`expected store_corrupt for ${JSON.stringify(bad)}`);
+      expect(res.error.code).toBe("store_corrupt");
+    }
+  });
+
+  it("still admits a null launch, which reads as not runnable", async () => {
+    // A legacy wake_if_offline record without a launch classifies unavailable.
+    await redis.hset(
+      ACTOR_KEYS.profiles,
+      "actor-a",
+      JSON.stringify({ profile: profileInput(), launch: null, registered_by: "session-a", registered_at: T0 })
+    );
+    const res = expectOk(await store.get("actor-a"));
+    expect(res.record).not.toBeNull();
+    expect(store.contractReadiness(res.record!)).toBe("not_runnable");
+  });
+
+  it("actor_status reports store_corrupt, not a TypeError, for a record without a launch", async () => {
+    await redis.hset(
+      ACTOR_KEYS.profiles,
+      "actor-a",
+      JSON.stringify({ profile: profileInput(), registered_by: "session-a", registered_at: T0 })
+    );
+    const client = new RedisClient(null, TEST_REDIS_URL);
+    try {
+      const res = await actorStatus(client, actorStatusSchema.parse({ actor_id: "actor-a" }));
+      expect(res.isError).toBe(true);
+      expect(res.structuredContent).toMatchObject({ status: "error", error: { code: "store_corrupt" } });
+    } finally {
+      await client.shutdown();
+    }
   });
 
   it("reports contractReadiness both ways", async () => {

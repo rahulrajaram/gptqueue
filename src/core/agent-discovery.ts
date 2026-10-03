@@ -2,7 +2,7 @@
 export type AgentDiscoveryMetadata = Readonly<{
   label: string;
   uuid: string | null;
-  client: "codex" | "pi" | null;
+  client: "codex" | "pi" | "opencode" | null;
   working_directory: string | null;
 }>;
 
@@ -22,13 +22,13 @@ const uuid = (value: unknown): string | null =>
   typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
     ? value : null;
 
-const client = (value: unknown): "codex" | "pi" | null =>
-  value === "codex" || value === "pi" ? value : null;
+const client = (value: unknown): "codex" | "pi" | "opencode" | null =>
+  value === "codex" || value === "pi" || value === "opencode" ? value : null;
 
 const directory = (value: unknown): string | null =>
   typeof value === "string" && value.startsWith("/") ? value : null;
 
-export const discoveryMetadata = (
+const discoveryMetadata = (
   name: string,
   metadata?: unknown
 ): AgentDiscoveryMetadata => {

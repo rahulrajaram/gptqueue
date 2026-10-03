@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { createServer, type Server } from "node:http";
 import { execSync, spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -10,6 +10,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
+
+// Mirrors src/transports/http.ts sessionLogTag: logs must carry a tag, never the bearer session id.
+const sessionLogTag = (sid: string): string =>
+  `sid-sha256:${createHash("sha256").update(sid).digest("hex").slice(0, 12)}`;
 import { registerTools } from "../src/transports/setup-tools.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
@@ -563,5 +567,120 @@ describe("HTTP transport security (loopback bind + Bearer token)", () => {
     } finally {
       await killChild(s);
     }
+  });
+});
+
+describe("HTTP session cap (GPTQUEUE_HTTP_MAX_SESSIONS)", () => {
+  let s: Spawned;
+
+  beforeAll(async () => {
+    s = await spawnHttpServer({ GPTQUEUE_HTTP_MAX_SESSIONS: "2" });
+    await waitHealthy(s);
+  });
+
+  afterAll(async () => {
+    await killChild(s);
+  });
+
+  it("refuses initialize with 503 once the cap is reached, and admits again after a close", async () => {
+    const init = () => fetch(`${s.url}/mcp`, { method: "POST", headers: JSON_HEADERS, body: INIT_BODY });
+    const first = await init(); await first.text();
+    const second = await init(); await second.text();
+    expect([first.status, second.status]).toEqual([200, 200]);
+    const third = await init();
+    expect(third.status).toBe(503);
+    expect(((await third.json()) as { error: string }).error).toContain("GPTQUEUE_HTTP_MAX_SESSIONS");
+
+    const closed = await fetch(`${s.url}/mcp`, { method: "DELETE", headers: { "mcp-session-id": first.headers.get("mcp-session-id")! } });
+    await closed.text();
+    const again = await init(); await again.text();
+    expect(again.status).toBe(200);
+  });
+});
+
+describe("HTTP idle-session sweep (GPTQUEUE_HTTP_IDLE_TIMEOUT_MS)", () => {
+  let s: Spawned;
+
+  beforeAll(async () => {
+    s = await spawnHttpServer({ GPTQUEUE_HTTP_IDLE_TIMEOUT_MS: "600" });
+    await waitHealthy(s);
+  });
+
+  afterAll(async () => {
+    await killChild(s);
+  });
+
+  const sessions = async () =>
+    ((await (await fetch(`${s.url}/health`)).json()) as { sessions: number }).sessions;
+  const initialize = async () => {
+    const r = await fetch(`${s.url}/mcp`, { method: "POST", headers: JSON_HEADERS, body: INIT_BODY });
+    await r.text();
+    expect(r.status).toBe(200);
+    const sid = r.headers.get("mcp-session-id")!;
+    const ack = await fetch(`${s.url}/mcp`, {
+      method: "POST",
+      headers: { ...JSON_HEADERS, "mcp-session-id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+    await ack.text();
+    return sid;
+  };
+  const until = async (check: () => Promise<boolean>, timeoutMs = 5000) => {
+    for (const deadline = Date.now() + timeoutMs; Date.now() < deadline;) {
+      if (await check()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error("condition timed out");
+  };
+
+  it("closes a session with no open request once it has been idle past the timeout", async () => {
+    const sid = await initialize();
+    await until(async () => (await sessions()) === 0);
+    await waitForStdout(s, `closing idle session ${sessionLogTag(sid)}`);
+    expect(s.stdout).not.toContain(sid);
+    const r = await fetch(`${s.url}/mcp`, {
+      method: "POST",
+      headers: { ...JSON_HEADERS, "mcp-session-id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_agents", arguments: {} } }),
+    });
+    expect(r.status).toBe(404);
+  });
+
+  it("treats inherited property names as unknown sessions and survives the sweep", async () => {
+    for (const bogus of ["constructor", "__proto__", "toString"]) {
+      const post = await fetch(`${s.url}/mcp`, {
+        method: "POST",
+        headers: { ...JSON_HEADERS, "mcp-session-id": bogus },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "list_agents", arguments: {} } }),
+      });
+      await post.text();
+      expect(post.status).toBe(404);
+      for (const method of ["GET", "DELETE"]) {
+        const r = await fetch(`${s.url}/mcp`, { method, headers: { "mcp-session-id": bogus } });
+        await r.text();
+        expect(r.status).toBe(404);
+      }
+    }
+    // Several sweep intervals (600 ms timeout) later, the server is still up.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(s.child.exitCode).toBeNull();
+    expect((await fetch(`${s.url}/health`)).ok).toBe(true);
+  });
+
+  it("keeps a session whose SSE stream is open, then sweeps it after the stream closes", async () => {
+    const sid = await initialize();
+    const stream = new AbortController();
+    const sse = await fetch(`${s.url}/mcp`, {
+      method: "GET",
+      headers: { accept: "text/event-stream", "mcp-session-id": sid },
+      signal: stream.signal,
+    });
+    expect(sse.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 1800));
+    expect(s.stdout).not.toContain(`closing idle session ${sessionLogTag(sid)}`);
+
+    stream.abort();
+    await waitForStdout(s, `closing idle session ${sessionLogTag(sid)}`);
+    expect(s.stdout).not.toContain(sid);
   });
 });

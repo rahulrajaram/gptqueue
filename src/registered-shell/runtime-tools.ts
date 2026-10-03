@@ -13,9 +13,7 @@ import { registerDiagnosticTools } from "./diagnostic-tools.js";
 const READ_ONLY = { readOnlyHint: true } as const;
 const WRITABLE = { readOnlyHint: false } as const;
 
-export const RUNTIME_TOOL_NAMES = Object.freeze([
-  "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status",
-] as const);
+export { RUNTIME_TOOL_NAMES } from "./tool-names.js";
 
 export interface RuntimeTools {
   bind(binding: RuntimeBinding): Promise<Record<string, unknown>>;

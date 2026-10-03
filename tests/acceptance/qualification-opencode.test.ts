@@ -18,10 +18,11 @@ describe("OpenCode qualification route adapters", () => {
     expect(config.mcp).toMatchObject({ gptqueue: { enabled: false } });
   });
 
-  it("reports the interactive identity/history observer as a setup gap", async () => {
+  it("reports the interactive identity/history observer as a setup gap", async (ctx) => {
     const adapter = opencodeRouteAdapter("opencode-interactive");
     expect(adapter).toBeDefined();
     const result = await adapter!.preflight(new AbortController().signal);
+    ctx.skip(result.kind === "blocked_prerequisite", "OpenCode runtime prerequisites are not installed");
     if (result.kind === "available") {
       throw new Error("interactive route must retain its explicit native identity/history setup gap");
     }
@@ -36,11 +37,12 @@ describe("OpenCode qualification route adapters", () => {
     expect(result.kind).not.toBe("setup_gap");
   });
 
-  it("exposes run, fork, and resume through their native qualified lifecycles", async () => {
+  it("exposes run, fork, and resume through their native qualified lifecycles", async (ctx) => {
     for (const route of ["opencode-run", "opencode-fork", "opencode-resume"] as const) {
       const adapter = opencodeRouteAdapter(route);
       expect(adapter).toBeDefined();
       const result = await adapter!.preflight(new AbortController().signal);
+      ctx.skip(result.kind === "blocked_prerequisite", `OpenCode runtime prerequisites are not installed (${route})`);
       expect(result.kind).toBe("available");
     }
   });

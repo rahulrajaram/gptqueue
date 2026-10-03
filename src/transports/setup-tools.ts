@@ -81,7 +81,10 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
     "[safety: writable] Receive and consume the next message from this agent's GPTQueue inbox. Returns the message or timeout.",
     receiveMessageSchema.shape,
     WRITABLE,
-    async (params) => safeToolCall(() => receiveMessage(redisClient, receiveMessageSchema.parse(params)))
+    // The request signal ends the receive's blocking pop when the MCP client
+    // cancels the call or its session closes.
+    async (params, extra) =>
+      safeToolCall(() => receiveMessage(redisClient, receiveMessageSchema.parse(params), extra.signal))
   );
 
   server.tool(

@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Install commithooks dispatchers and lib into .git/ (run by `npm prepare`).
+
+Dispatchers go to `git rev-parse --git-path hooks`, which every checkout of
+the repository shares; the library goes beside them, to
+`<git-common-dir>/lib`, where the .githooks stubs look for it first (falling
+back to `<git-dir>/lib`, where older installs put it).
+
+Source: $COMMITHOOKS_DIR, default ~/Documents/commithooks. Skips, without
+failing, when the source is absent, outside a git checkout, or when
+core.hooksPath or a custom dispatcher already routes hooks elsewhere.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOOKS = ("pre-commit", "commit-msg", "pre-push", "post-checkout", "post-merge")
+
+
+def regular_file(path: Path) -> bool:
+    return path.exists() and stat.S_ISREG(path.lstat().st_mode)
+
+
+def main() -> int:
+    source = Path(os.environ.get("COMMITHOOKS_DIR", Path.home() / "Documents" / "commithooks"))
+    if not (source / "lib" / "common.sh").is_file():
+        print(f"Commithooks not found at {source} (skipping)")
+        return 0
+
+    result = subprocess.run(["git", "rev-parse", "--git-dir"], capture_output=True, text=True)
+    if result.returncode != 0:
+        print("Not in a git repository (skipping)")
+        return 0
+
+    routing = subprocess.run(
+        ["git", "config", "--show-origin", "--get", "core.hooksPath"],
+        capture_output=True, text=True,
+    )
+    if routing.returncode == 0:
+        print(f"Preserving core.hooksPath: {routing.stdout.strip()} (skipping)")
+        return 0
+    if routing.returncode != 1:
+        raise RuntimeError(routing.stderr.strip() or "Cannot inspect core.hooksPath")
+
+    git_dir = Path(result.stdout.strip()).resolve()
+    if git_dir == Path("/") or not git_dir.is_dir():
+        raise RuntimeError(f"Unsafe git directory: {git_dir}")
+    if any((git_dir / name).exists() for name in ("rebase-merge", "rebase-apply", "MERGE_HEAD")):
+        raise RuntimeError("Rebase or merge in progress")
+
+    # Dispatchers go where git runs hooks: from a linked worktree that is the
+    # common .git/hooks, not <git-dir>/hooks. Every checkout runs them, so the
+    # library they need goes to the common git dir too (FIX7); in a linked
+    # worktree <git-dir>/lib would serve only the installing checkout.
+    hooks_path = subprocess.run(
+        ["git", "rev-parse", "--git-path", "hooks"], capture_output=True, text=True, check=True,
+    )
+    # Inspect the path git reports before resolving it: resolve() follows a
+    # symlinked hooks directory to its target, which then looks ordinary.
+    reported = Path(hooks_path.stdout.strip())
+    if reported.is_symlink() or (reported.exists() and not reported.is_dir()):
+        print(f"Preserving custom hooks directory: {reported} (skipping)")
+        return 0
+    hooks_dir = reported.resolve()
+
+    sources = [(source / hook, hooks_dir / hook) for hook in HOOKS if regular_file(source / hook)]
+    if not sources:
+        raise RuntimeError(f"{source} contains no regular dispatcher hooks")
+    copies = []
+    for src, dst in sources:
+        if dst.exists() or dst.is_symlink():
+            if regular_file(dst) and dst.read_bytes() == src.read_bytes():
+                continue  # Already current; preserve contents and permissions.
+            sample = dst.with_name(f"{dst.name}.sample")
+            if not (regular_file(dst) and regular_file(sample) and dst.read_bytes() == sample.read_bytes()):
+                print(f"Preserving custom dispatcher: {dst} (skipping installation)")
+                return 0
+        copies.append((src, dst))
+
+    common = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True, check=True,
+    )
+    common_dir = Path(common.stdout.strip()).resolve()
+    if common_dir == Path("/") or not common_dir.is_dir():
+        raise RuntimeError(f"Unsafe git common directory: {common_dir}")
+
+    # Stage the library, keep the previous one as a recoverable backup, then publish.
+    lib_dst = common_dir / "lib"
+    stage = Path(tempfile.mkdtemp(prefix=".lib-stage-", dir=common_dir))
+    shutil.copytree(source / "lib", stage, dirs_exist_ok=True, symlinks=True)
+    backup = None
+    if lib_dst.exists() or lib_dst.is_symlink():
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = common_dir / "commithooks-backups" / stamp / "lib"
+        backup.parent.mkdir(parents=True, exist_ok=False)
+        lib_dst.rename(backup)
+    try:
+        stage.rename(lib_dst)
+    except OSError:
+        if backup is not None and not lib_dst.exists() and not lib_dst.is_symlink():
+            backup.rename(lib_dst)
+        print(f"Install failed; staged tree retained at {stage}", file=sys.stderr)
+        raise
+
+    hooks_dir.mkdir(exist_ok=True)
+    for src, dst in copies:
+        shutil.copy2(src, dst)
+        dst.chmod(0o755)
+    print(f"Commithooks installed from {source}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

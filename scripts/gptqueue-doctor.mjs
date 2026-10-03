@@ -4,6 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Redis } from 'ioredis';
+import { SESSION_KEYS } from '../dist/core/keys.js';
 import { AgentDiagnostics } from '../dist/core/agent-diagnostics.js';
 import { prepareContinuity, applyContinuity } from '../dist/core/mailbox-continuity.js';
 import { probeActivationReady, bindingAgrees } from '../dist/core/doctor-probe.js';
@@ -48,7 +49,7 @@ try {
         let binding = null;
         if (agent) {
           try {
-            const raw = await redis.get(`gptq:runtime-binding:${agent}`);
+            const raw = await redis.get(SESSION_KEYS.runtimeBinding(agent));
             if (raw) {
               const parsed = JSON.parse(raw);
               if (typeof parsed?.runtime_id === 'string' && typeof parsed?.epoch === 'string') {

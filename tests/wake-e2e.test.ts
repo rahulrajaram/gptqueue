@@ -264,6 +264,61 @@ describe("wake-on-send e2e", () => {
     expect(await redis.exists(WAKE_LEASE_KEYS.lease("storeonly"))).toBe(0);
   });
 
+  it("policy flipped to store_only during a delayed send: wake uses the post-enqueue record and does not launch", async () => {
+    const reg = await sender.register("publisher", "wake-sender-flip", "sends");
+    await registerActor(sender, "flipper", "wake_if_offline", sleepyLaunch(), reg.session_id);
+
+    // Inject the policy change between resolve and wake: while the enqueue is
+    // in flight (e.g. retrying a full inbox) the owner updates the actor to
+    // store_only. The send must observe the updated record, not the stale one.
+    const enqueue = sender.sendMessage.bind(sender);
+    sender.sendMessage = async (message) => {
+      const sent = await enqueue(message);
+      await registerActor(sender, "flipper", "store_only", sleepyLaunch(), reg.session_id);
+      return sent;
+    };
+
+    const res = parseText(
+      await sendMessage(
+        sender,
+        sendMessageSchema.parse({ to: "flipper", content: "delayed", type: "task" })
+      )
+    );
+    killPid(res.wake?.pid);
+    expect(res.status).toBe("sent");
+    expect(res.wake).toBeUndefined();
+    expect(await redis.exists(WAKE_LEASE_KEYS.lease("flipper"))).toBe(0);
+  });
+
+  it("policy flipped to wake_if_offline during a delayed send: wake uses the post-enqueue record and launches (FIX4)", async () => {
+    const reg = await sender.register("publisher", "wake-sender-unflip", "sends");
+    await registerActor(sender, "unflipper", "store_only", sleepyLaunch(), reg.session_id);
+
+    // The reverse flip: the record read before the enqueue is store_only,
+    // and the owner enables waking while the enqueue is in flight. The
+    // offline recipient must be launched from the fresh record.
+    const enqueue = sender.sendMessage.bind(sender);
+    sender.sendMessage = async (message) => {
+      const sent = await enqueue(message);
+      await registerActor(sender, "unflipper", "wake_if_offline", sleepyLaunch(), reg.session_id);
+      return sent;
+    };
+
+    const res = parseText(
+      await sendMessage(
+        sender,
+        sendMessageSchema.parse({ to: "unflipper", content: "delayed", type: "task" })
+      )
+    );
+    try {
+      expect(res.status).toBe("sent");
+      expect(res.wake?.status).toBe("wake_dispatched");
+      expect((await sender.wakeLease.get("unflipper"))?.lease_id).toBe(res.wake?.lease_id);
+    } finally {
+      killPid(res.wake?.pid);
+    }
+  });
+
   it("plain agent (no directory record): regression, byte-identical send path", async () => {
     const plain = new RedisClient(null, TEST_REDIS_URL);
     try {

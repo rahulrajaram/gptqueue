@@ -2,7 +2,7 @@ import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import type { RedisClient } from "../redis-client.js";
 import type { QueueMessage } from "../types.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession, ensureSessionBinding } from "./session-binding.js";
 import { toolResult, type ToolPayload } from "../tool-result.js";
 import {
   classifyPresence,
@@ -71,24 +71,17 @@ export type SendWakeResult =
   | Readonly<{ status: "wake_error"; error_message: string }>;
 
 /**
- * Reject anything that is not a durable `wake_if_offline` actor record.
- * Presence-gated eligibility: plain agents and store_only actors resolve to
- * no wake. Returns `{ record }` when the recipient is wake-eligible, else
- * undefined. Pure policy gate — performs no presence assembly or lease work.
+ * Wake policy gate: only a durable `wake_if_offline` actor record is
+ * wake-eligible; plain agents and store_only actors get no wake. Pure: it
+ * performs no presence assembly or lease work.
  */
-export async function gateWakeEligibility(
-  client: Pick<RedisClient, "actorDirectory">,
-  to: string
-): Promise<{ readonly record: ActorDirectoryRecord } | undefined> {
-  const dir = await client.actorDirectory.get(to);
-  if (
-    !dir.ok ||
-    dir.record === null ||
-    dir.record.profile.activation_policy.mode !== "wake_if_offline"
-  ) {
+export function wakeEligible(
+  record: ActorDirectoryRecord | null
+): { readonly record: ActorDirectoryRecord } | undefined {
+  if (record === null || record.profile.activation_policy.mode !== "wake_if_offline") {
     return undefined;
   }
-  return Object.freeze({ record: dir.record });
+  return Object.freeze({ record });
 }
 
 /**
@@ -253,6 +246,13 @@ async function wakeOfflineLaunchable(
  * sendMessage). Returns the additive `wake` payload, or undefined when the
  * recipient is not wake-eligible or is already active/idle.
  *
+ * `resolved` is the directory record read before the persist. It only tells
+ * whether the recipient is a durable actor: a plain agent (null) is never
+ * woken and costs no further read. For every durable actor the directory is
+ * re-read AFTER the persist, and eligibility and the launch contract come
+ * from that fresh record, so a policy change made while the send was delayed
+ * is honoured in either direction (wake_if_offline <-> store_only, FIX4).
+ *
  * Shallow linear composition: gate eligibility -> assemble presence -> classify
  * -> dispatch the classified result. Presence dispatch is exhaustively handled
  * by `wakeDecisionForPresence` (a new presence state is a compile error, never
@@ -263,10 +263,15 @@ async function wakeOfflineLaunchable(
  */
 async function maybeWake(
   client: RedisClient,
-  to: string
+  resolved: ActorDirectoryRecord | null
 ): Promise<SendWakeResult | undefined> {
   try {
-    const gate = await gateWakeEligibility(client, to);
+    if (resolved === null) return undefined;
+    const fresh = await client.actorDirectory.get(resolved.profile.actor_id);
+    if (!fresh.ok) {
+      return { status: "wake_error", error_message: fresh.error.message };
+    }
+    const gate = wakeEligible(fresh.record);
     if (gate === undefined) return undefined;
     const { record } = gate;
 
@@ -338,22 +343,28 @@ function unknownRecipient(to: string) {
  * (b) a REGISTERED agent via the canonical registry. Anything else is an
  * unknown recipient and is rejected with a frozen typed error WITHOUT
  * creating any queue (`gptq:q:<to>`) or metadata (`gptq:meta:<to>`) keys.
+ * Both lookups run in one round trip; the directory result keeps precedence.
  */
 async function resolveRecipient(
   client: RedisClient,
   to: string
-): Promise<{ ok: true } | { ok: false; error: { code: string; message: string } }> {
-  const dir = await client.actorDirectory.get(to);
+): Promise<
+  | { ok: true; record: ActorDirectoryRecord | null }
+  | { ok: false; error: { code: string; message: string } }
+> {
+  const [dir, registered] = await Promise.all([
+    client.actorDirectory.get(to),
+    client.sessions.resolveRegistered(to),
+  ]);
   if (!dir.ok) {
     // Fail closed on a corrupt/unreadable directory: do not create keys.
     return { ok: false, error: { code: dir.error.code, message: dir.error.message } };
   }
   if (dir.record !== null) {
-    return { ok: true }; // durable actor path
+    return { ok: true, record: dir.record }; // durable actor path
   }
-  const registered = await client.sessions.resolveRegistered(to);
   if (registered) {
-    return { ok: true }; // registered (plain) agent path
+    return { ok: true, record: null }; // registered (plain) agent path
   }
   return { ok: false, error: { code: "unknown_recipient", message: "" } };
 }
@@ -362,6 +373,8 @@ export async function sendMessage(
   client: RedisClient,
   params: z.infer<typeof sendMessageSchema>
 ) {
+  // Recipient first: an unknown recipient is reported as such even to a
+  // caller that is not registered itself (lifecycle invariant H8).
   await ensureSessionBinding(client, params.session_id);
 
   const resolved = await resolveRecipient(client, params.to);
@@ -379,9 +392,11 @@ export async function sendMessage(
     );
   }
 
+  const { agent: sender } = await bindSession(client, params.session_id);
+
   const message: QueueMessage = {
     id: uuidv4(),
-    from: client.requireRegistered(),
+    from: sender,
     to: params.to,
     timestamp: new Date().toISOString(),
     type: params.type,
@@ -418,7 +433,7 @@ export async function sendMessage(
   // persist-before-wake INVARIANT: the mailbox RPUSH above was awaited before
   // any wake attempt, so a launched-but-failed activation can never lose an
   // already-persisted, recoverable message. Waking is purely additive.
-  const wake = await maybeWake(client, params.to);
+  const wake = await maybeWake(client, resolved.record);
   if (wake !== undefined) {
     payload.wake = wake;
   }

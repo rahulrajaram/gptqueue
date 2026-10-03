@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { requireRetained } from "./retained-evidence.js";
 
 type Adjudication = Readonly<{
   original_receipt: Readonly<{ path: string; sha256: string; immutable: boolean; execution_status: string; execution_detail: string }>;
@@ -16,9 +17,10 @@ type Adjudication = Readonly<{
 const digest = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex");
 
 describe("offline cross-model adjudication", () => {
-  it("admits only the recovered exact chain while preserving the timed-out receipt", () => {
+  it("admits only the recovered exact chain while preserving the timed-out receipt", (ctx) => {
     const root = join(process.cwd(), ".gptqueue/repair-qualification/20260912/qualification-cross-model/8a903b8f-0638-46d6-b44a-269dfccad35a");
     const artifactPath = join(root, "offline-adjudication.json");
+    requireRetained(ctx, artifactPath);
     const artifact = JSON.parse(readFileSync(artifactPath, "utf8")) as Adjudication;
     const receiptPath = join(process.cwd(), artifact.original_receipt.path);
     expect(artifact.original_receipt.immutable).toBe(true);

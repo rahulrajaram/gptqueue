@@ -1,16 +1,41 @@
 import { Redis } from "ioredis";
-import { createHash } from "node:crypto";
 import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
-import { SESSION_KEYS, CLAIM_KEYS, SESSION_DEFAULTS } from "../core/keys.js";
+import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS, DLQ_PROVISIONAL, SESSION_DEFAULTS } from "../core/keys.js";
 import { occupancyGuardLua } from "../core/occupancy-guard.js";
 import { MailboxStore } from "../core/mailbox-store.js";
 import { SessionStore } from "../core/session-store.js";
 import { CustodyStore } from "../core/custody-store.js";
 import { ActorDirectory } from "../core/actor-directory.js";
 import { WakeLeaseStore } from "../core/wake-lease.js";
-import { TaskClaimStore } from "../core/task-claim-store.js";
+import { TaskClaimStore, purgeActorClaimsLua } from "../core/task-claim-store.js";
 import { discoveryRecord, type AgentDiscoveryMetadata, type AgentDiscoveryRecord } from "../core/agent-discovery.js";
+import { GptQueueError } from "./errors.js";
+
+/**
+ * Retire a name in ONE atomic step (RF5): close this client's session, then
+ * delete the registry entry, mailbox, heartbeat and all durable claim state.
+ * A registration of the same name lands wholly before it (a co-owner this
+ * destructive unregister retires, as before) or wholly after it (a new owner
+ * whose state nothing here touches); it can no longer fall in between and
+ * lose its claims.
+ *
+ * KEYS: 1 session, 2 lease, 3 agent sessions, 4 registry, 5 inbox,
+ *       6 mailbox meta, 7 heartbeat, 8 claims, 9 claims index, 10 DLQ,
+ *       11 inbox events, 12 inbox trace
+ * ARGV: 1 agent name, 2 session id ('' when there is none)
+ */
+const UNREGISTER_SCRIPT = `
+${purgeActorClaimsLua}
+if ARGV[2] ~= '' then
+  redis.call('DEL', KEYS[1], KEYS[2])
+  redis.call('SREM', KEYS[3], ARGV[2])
+end
+redis.call('HDEL', KEYS[4], ARGV[1])
+local removed = purge_actor_claims(KEYS[8], KEYS[9], KEYS[10], KEYS[11], KEYS[12], ARGV[1])
+redis.call('DEL', KEYS[5], KEYS[6], KEYS[7])
+return removed
+`;
 
 export class RedisClient {
   private redis: Redis;
@@ -83,7 +108,8 @@ export class RedisClient {
 
   requireRegistered(): string {
     if (!this._agentName) {
-      throw new Error(
+      throw new GptQueueError(
+        "AGENT_NOT_REGISTERED",
         "Agent not registered. Call register_agent first with a name."
       );
     }
@@ -99,7 +125,7 @@ export class RedisClient {
     runtimeId?: string
   ): Promise<void> {
     if (!this._sessionId || this._agentName !== source || source === target) throw new Error("Continuity source ownership mismatch");
-    const wrapper = (name: string) => `gptq:experimental-wrapper-claim:${createHash("sha256").update(name).digest("hex")}`;
+    const wrapper = SESSION_KEYS.wrapperClaim;
     // D5: the target-occupancy guard is generated from the SAME shared
     // signal table as applyContinuity's occupied() (core/occupancy-guard.ts):
     // runtime-binding, heartbeat, wrapper claim, live session leases, and
@@ -134,14 +160,18 @@ export class RedisClient {
       redis.call('SREM', KEYS[5], ARGV[3])
       redis.call('SADD', KEYS[6], ARGV[3])
       redis.call('HSET', KEYS[2], ARGV[2], cjson.encode(targetReg))
+      -- A completed target value: drop its rollback bookkeeping (R2).
+      redis.call('HDEL', KEYS[14], ARGV[2])
+      redis.call('HDEL', KEYS[15], ARGV[2])
       redis.call('HDEL', KEYS[2], ARGV[1])
       redis.call('DEL', KEYS[12])
       redis.call('XADD', KEYS[13], 'MAXLEN', '~', 1000, '*', 'event', 'runtime_continuity', 'target', ARGV[2], 'source', ARGV[1], 'runtime_id', ARGV[5], 'session_id', ARGV[3])
       return 1
-    `, 13, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
+    `, 15, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
       SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), wrapper(target),
-      SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), `gptq:outbound-activity:${source}`, wrapper(source),
-      SESSION_KEYS.heartbeat(source), "gptq:continuity-audit", source, target, this._sessionId, expectedMapping, runtimeId ?? "");
+      SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), SESSION_KEYS.outboundActivity(source), wrapper(source),
+      SESSION_KEYS.heartbeat(source), SESSION_KEYS.continuityAudit, SESSION_KEYS.registryPending, SESSION_KEYS.registryRestore,
+      source, target, this._sessionId, expectedMapping, runtimeId ?? "");
     if (result !== 1) throw new Error(`Continuity adoption refused (${result})`);
     this._agentName = target;
     this.startHeartbeat();
@@ -156,7 +186,7 @@ export class RedisClient {
   async reconnectSession(sessionId: string): Promise<string> {
     const session = await this.sessionStore.getSession(sessionId);
     if (!session) {
-      throw new Error(`Session ${sessionId} not found in Redis.`);
+      throw new GptQueueError("SESSION_UNAVAILABLE", `Session ${sessionId} not found in Redis.`);
     }
 
     this._sessionId = sessionId;
@@ -217,7 +247,16 @@ export class RedisClient {
 
     if (renaming) {
       try {
-        await this.mailbox.migrateMessages(oldName!, name);
+        // RF1: re-queue the old name's expired claims first so their tasks
+        // move with the mailbox. The transfer then refuses atomically while
+        // any claim remains (live, or expired since this recovery), so no
+        // claimed task is stranded under the retired name. A recovery that
+        // cannot place its tasks changes nothing (FIX1) and fails the rename.
+        const recovery = await this.taskClaimStore.recoverExpired({ actor_id: oldName!, now: new Date().toISOString() });
+        if (!recovery.ok) throw new Error(recovery.error.message);
+        // FIX5: the old name's DLQ, including any task that recovery just
+        // quarantined, moves with the mailbox so the new name can requeue it.
+        await this.mailbox.migrateMessages(oldName!, name, CLAIM_KEYS.index(oldName!), DLQ_PROVISIONAL.DLQ_MAX_LENGTH);
       } catch (error) {
         // The transfer is all-or-nothing: every message is still under the
         // old name. Roll the new session back so the visible state is
@@ -231,7 +270,10 @@ export class RedisClient {
           rollbackFailures.push(`closeSession(${session.session_id})`);
         }
         try {
-          await this.redis.hdel(SESSION_KEYS.registry, name);
+          // RF3: the destination may be another live registration whose
+          // entry session creation overwrote. Restore it, and never delete
+          // a value written after this attempt's own.
+          await this.sessionStore.undoRegistryWrite(session.registry_write);
         } catch {
           rollbackFailures.push(`registry:${name}`);
         }
@@ -272,11 +314,9 @@ export class RedisClient {
         },
       } : {}),
     };
-    await this.redis.hset(
-      SESSION_KEYS.registry,
-      name,
-      JSON.stringify(registration)
-    );
+    // A completed value: publishing it also drops the name's rollback
+    // bookkeeping, so no failed attempt's undo can overwrite it (R2).
+    await this.sessionStore.publishRegistration(name, JSON.stringify(registration));
     await this.mailbox.ensureMailbox(name);
 
     // Start both session lease refresh and legacy heartbeat
@@ -331,14 +371,27 @@ export class RedisClient {
     this.heartbeatTimer = null;
     this.sessionStore.stopLeaseRefresh();
 
-    if (this._sessionId) {
-      await this.sessionStore.closeSession(this._sessionId);
-    }
-
-    // Delete everything
-    await this.redis.hdel(SESSION_KEYS.registry, name);
-    await this.mailbox.deleteMailbox(name);
-    await this.redis.del(SESSION_KEYS.heartbeat(name));
+    // Delete everything, including claims, DLQ and streams a later
+    // registration of the same name would otherwise inherit, atomically.
+    const sessionId = this._sessionId ?? "";
+    await this.redis.eval(
+      UNREGISTER_SCRIPT,
+      12,
+      SESSION_KEYS.session(sessionId),
+      SESSION_KEYS.lease(sessionId),
+      SESSION_KEYS.agentSessions(name),
+      SESSION_KEYS.registry,
+      SESSION_KEYS.queue(name),
+      SESSION_KEYS.mailboxMeta(name),
+      SESSION_KEYS.heartbeat(name),
+      CLAIM_KEYS.claims,
+      CLAIM_KEYS.index(name),
+      DLQ_KEYS.list(name),
+      SESSION_KEYS.inboxEvents(name),
+      SESSION_KEYS.inboxTrace(name),
+      name,
+      sessionId
+    );
 
     this._agentName = null;
     this._sessionId = null;
@@ -361,16 +414,24 @@ export class RedisClient {
 
   async listAgents(): Promise<AgentDiscoveryRecord[]> {
     const registry = await this.redis.hgetall(SESSION_KEYS.registry);
-    const agents = [];
-    for (const [name, json] of Object.entries(registry)) {
+    const entries = Object.entries(registry).flatMap(([name, json]) => {
       let parsed: unknown;
-      try { parsed = JSON.parse(json); } catch { continue; }
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-      const reg = parsed as Record<string, unknown>;
-      // Prefer session-based presence; fall back to legacy heartbeat
-      const presence = await this.sessionStore.getPresence(name);
-      const legacyHeartbeat = await this.redis.get(SESSION_KEYS.heartbeat(name));
-      agents.push(discoveryRecord({
+      try { parsed = JSON.parse(json); } catch { return []; }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+      return [{ name, reg: parsed as Record<string, unknown> }];
+    });
+    if (entries.length === 0) return [];
+    // Prefer session-based presence; fall back to legacy heartbeat. Both are
+    // batched across the whole registry rather than read per agent.
+    const names = entries.map(({ name }) => name);
+    const [presences, heartbeats] = await Promise.all([
+      this.sessionStore.getPresenceMany(names),
+      this.redis.mget(names.map((name) => SESSION_KEYS.heartbeat(name))),
+    ]);
+    return entries.map(({ name, reg }, i) => {
+      const presence = presences[i]!;
+      const legacyHeartbeat = heartbeats[i] ?? null;
+      return discoveryRecord({
         name,
         role: typeof reg.role === "string" ? reg.role : "",
         description: typeof reg.description === "string" ? reg.description : undefined,
@@ -378,9 +439,8 @@ export class RedisClient {
         registered_at: reg.registered_at,
         pid: reg.pid,
         metadata: reg.metadata,
-      }));
-    }
-    return agents;
+      });
+    });
   }
 
   async getQueueStatus(
@@ -394,21 +454,37 @@ export class RedisClient {
     return this.mailbox.depth(name);
   }
 
-  async shutdown(): Promise<void> {
+  /**
+   * Close both connections gracefully, but never wait past `timeoutMs`: a
+   * wedged QUIT (unreachable server, blocked subscriber) falls back to an
+   * immediate disconnect so process exit is never held hostage. Every
+   * in-flight receive's own blocking connection is broken first.
+   */
+  async shutdown(timeoutMs = 2_000): Promise<void> {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.sessionStore.stopLeaseRefresh();
+    this.mailbox.closeReceives();
     if (this.connectionsForcedClosed) return;
-    await this.redis.quit();
-    await this.subscriber.quit();
+    // allSettled: one connection's QUIT failure must not skip the other's.
+    const quit = Promise.allSettled([this.redis.quit(), this.subscriber.quit()]).then(() => false);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), timeoutMs);
+      timer.unref();
+    });
+    const timedOut = await Promise.race([quit, deadline]);
+    clearTimeout(timer);
+    if (timedOut) this.forceDisconnect();
   }
 
-  /** Immediately break both connections when a bounded caller must stop. */
+  /** Immediately break every connection when a bounded caller must stop. */
   forceDisconnect(): void {
     if (this.connectionsForcedClosed) return;
     this.connectionsForcedClosed = true;
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
     this.sessionStore.stopLeaseRefresh();
+    this.mailbox.closeReceives();
     this.redis.disconnect();
     this.subscriber.disconnect();
   }

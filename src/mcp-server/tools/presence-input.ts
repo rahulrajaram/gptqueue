@@ -80,42 +80,38 @@ export async function assemblePresenceInput(
 ): Promise<AssembledPresence> {
   const launch_contract = client.actorDirectory.contractReadiness(record);
 
-  let runtime: RuntimeIncarnation | undefined;
   const presence = await client.sessions.getPresence(record.profile.actor_id);
   if (presence.online && presence.active_sessions.length > 0) {
+    // A live (leased) session is a running runtime incarnation that outranks any
+    // outstanding wake lease, so runtime-attached presence reads the lease only
+    // for observability (classification ignores it via runtime-first precedence)
+    // and the two reads are independent.
     const sessionId = presence.active_sessions[0]!;
-    const workload = await workloadForSession(
-      client.taskClaim,
-      record.profile.actor_id,
-      sessionId
-    );
-    runtime = runtimeFromSession(sessionId, workload);
+    const [workload, lease] = await Promise.all([
+      workloadForSession(client.taskClaim, record.profile.actor_id, sessionId),
+      client.wakeLease.get(record.profile.actor_id),
+    ]);
+    return Object.freeze({
+      launch_contract,
+      runtime: runtimeFromSession(sessionId, workload),
+      wake_lease: lease !== null ? { ...lease } : null,
+    });
   }
 
-  // A live (leased) session is a running runtime incarnation that outranks any
-  // outstanding wake lease, so runtime-attached presence reads the lease only
-  // for observability (classification ignores it via runtime-first precedence).
+  // Reconcile-before-classify INVARIANT: reconcile the outstanding lease
+  // against process liveness first. A dead-pid lease is a failed activation
+  // and is cleared, so the actor classifies from offline and re-wake becomes
+  // possible. A live/un-probed lease is retained so an in-flight start
+  // coalesces. Only after `cleared === false` do we re-read the lease.
   let wake_lease: AssembledWakeLease | null = null;
-  if (runtime === undefined) {
-    // Reconcile-before-classify INVARIANT: reconcile the outstanding lease
-    // against process liveness first. A dead-pid lease is a failed activation
-    // and is cleared, so the actor classifies from offline and re-wake becomes
-    // possible. A live/un-probed lease is retained so an in-flight start
-    // coalesces. Only after `cleared === false` do we re-read the lease.
-    const reconcile = await reconcileWakeLease(client, record.profile.actor_id);
-    if (!reconcile.cleared) {
-      const lease = await client.wakeLease.get(record.profile.actor_id);
-      if (lease !== null) {
-        // Surface the spawn liveness observed during reconciliation.
-        wake_lease = { ...lease, pid_liveness: reconcile.pid_liveness };
-      }
-    }
-  } else {
+  const reconcile = await reconcileWakeLease(client, record.profile.actor_id);
+  if (!reconcile.cleared) {
     const lease = await client.wakeLease.get(record.profile.actor_id);
     if (lease !== null) {
-      wake_lease = { ...lease };
+      // Surface the spawn liveness observed during reconciliation.
+      wake_lease = { ...lease, pid_liveness: reconcile.pid_liveness };
     }
   }
 
-  return Object.freeze({ launch_contract, runtime, wake_lease });
+  return Object.freeze({ launch_contract, runtime: undefined, wake_lease });
 }

@@ -8,13 +8,27 @@ set -euo pipefail
 
 REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
 REDIS_PORT="${REDIS_PORT:-6379}"
+# Database selection: REDIS_URL (as the server uses it) wins; otherwise
+# GPTQ_REDIS_DB with REDIS_HOST/REDIS_PORT.
+REDIS_DB="${GPTQ_REDIS_DB:-0}"
 
 # Agent name may or may not be set
 AGENT_NAME="${GPTQ_AGENT_NAME:-}"
 
 get_queue_length() {
   local key="gptq:q:${1}"
-  redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" LLEN "$key" 2>/dev/null || echo "0"
+  local count
+  if [ -n "${REDIS_URL:-}" ]; then
+    count=$(redis-cli -u "$REDIS_URL" LLEN "$key" 2>/dev/null) || count=""
+  else
+    count=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" LLEN "$key" 2>/dev/null) || count=""
+  fi
+  if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    # Do not trap the agent when Redis is unreachable, but say so.
+    echo "[gptqueue] queue check failed for '${1}'; not blocking stop" >&2
+    count=0
+  fi
+  echo "$count"
 }
 
 case "${1:-}" in

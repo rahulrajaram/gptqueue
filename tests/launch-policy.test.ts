@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
-import { writeFileSync, rmSync, mkdtempSync, symlinkSync } from "fs";
+import { writeFileSync, rmSync, mkdtempSync, symlinkSync, mkdirSync, renameSync, chmodSync } from "fs";
 import { tmpdir } from "os";
 import { basename, join } from "path";
 import { ActorDirectory } from "../src/core/actor-directory.js";
@@ -194,6 +194,12 @@ describe("evaluateLaunchPolicy", () => {
       expect(nodeEval).toMatchObject({ ok: false, error: { code: "launch_command_rejected" } });
       if (!nodeEval.ok) expect(nodeEval.error.message).toMatch(/inline-code/);
 
+      // A glued flag is named in the message, not rendered as "(undefined)".
+      const glued = await evaluateLaunchPolicy({ command: "node", args: ["--eval=process.exit(0)"] });
+      if (glued.ok) throw new Error("glued inline-code flag must be rejected");
+      expect(glued.error.message).toContain("(--eval=process.exit(0))");
+      expect(glued.error.message).not.toContain("undefined");
+
       const pythonC = await evaluateLaunchPolicy({
         command: "python3",
         args: ["-c", "print(1)"],
@@ -299,6 +305,77 @@ describe("evaluateLaunchPolicy", () => {
       expect(res).toMatchObject({ ok: false });
     } finally {
       delete process.env.GPTQUEUE_LAUNCH_ALLOWLIST;
+    }
+  });
+
+  it("defaults to the user config directory, not the working directory", async () => {
+    const config = mkdtempSync(join(tmpdir(), "gptqueue-xdg-"));
+    const saved = process.env.XDG_CONFIG_HOME;
+    delete process.env.GPTQUEUE_LAUNCH_ALLOWLIST;
+    process.env.XDG_CONFIG_HOME = config;
+    try {
+      const missing = await evaluateLaunchPolicy({ command: "node", args: [] });
+      if (missing.ok) throw new Error("expected fail-closed");
+      expect(missing.error.message).toContain(join(config, "gptqueue", "launch-allowlist.json"));
+
+      const s = scaffoldLaunchAllowlist([{ command: "node" }], { path: join(config, "launch-allowlist.json") });
+      mkdirSync(join(config, "gptqueue"));
+      renameSync(s.path, join(config, "gptqueue", "launch-allowlist.json"));
+      expect(await evaluateLaunchPolicy({ command: "node", args: [] })).toEqual({ ok: true });
+      s.cleanup();
+    } finally {
+      if (saved === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = saved;
+      rmSync(config, { recursive: true, force: true });
+    }
+  });
+
+  it("names the new location when only the legacy working-directory allowlist exists", async () => {
+    const work = mkdtempSync(join(tmpdir(), "gptqueue-legacy-"));
+    const config = mkdtempSync(join(tmpdir(), "gptqueue-xdg-"));
+    const [savedCwd, savedXdg] = [process.cwd(), process.env.XDG_CONFIG_HOME];
+    delete process.env.GPTQUEUE_LAUNCH_ALLOWLIST;
+    process.env.XDG_CONFIG_HOME = config;
+    mkdirSync(join(work, ".gptqueue"));
+    writeFileSync(join(work, ".gptqueue", "launch-allowlist.json"), JSON.stringify({ version: 2, commands: [{ command: "node", allowed_args: [[]] }] }));
+    chmodSync(join(work, ".gptqueue", "launch-allowlist.json"), 0o600);
+    process.chdir(work);
+    try {
+      const res = await evaluateLaunchPolicy({ command: "node", args: [] });
+      if (res.ok) throw new Error("legacy allowlist must not be honored");
+      expect(res.error.code).toBe("launch_not_allowlisted");
+      expect(res.error.message).toContain("no longer read");
+      expect(res.error.message).toContain(join(config, "gptqueue", "launch-allowlist.json"));
+    } finally {
+      process.chdir(savedCwd);
+      if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = savedXdg;
+      rmSync(work, { recursive: true, force: true });
+      rmSync(config, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a symlinked or group/world-writable allowlist", async () => {
+    const s = scaffoldLaunchAllowlist([{ command: "node" }]);
+    const link = `${s.path}.link`;
+    try {
+      symlinkSync(s.path, link);
+      process.env.GPTQUEUE_LAUNCH_ALLOWLIST = link;
+      const viaLink = await evaluateLaunchPolicy({ command: "node", args: [] });
+      if (viaLink.ok) throw new Error("symlinked allowlist must be refused");
+      expect(viaLink.error.message).toContain("not a regular file");
+
+      process.env.GPTQUEUE_LAUNCH_ALLOWLIST = s.path;
+      chmodSync(s.path, 0o664);
+      const writable = await evaluateLaunchPolicy({ command: "node", args: [] });
+      if (writable.ok) throw new Error("group-writable allowlist must be refused");
+      expect(writable.error.message).toContain("group- or world-writable");
+
+      chmodSync(s.path, 0o644);
+      expect(await evaluateLaunchPolicy({ command: "node", args: [] })).toEqual({ ok: true });
+    } finally {
+      delete process.env.GPTQUEUE_LAUNCH_ALLOWLIST;
+      s.cleanup();
     }
   });
 

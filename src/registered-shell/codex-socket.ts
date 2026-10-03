@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { VERSION } from "../version.js";
 
 const MAX_MESSAGE = 16 * 1024 * 1024;
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -101,7 +102,7 @@ export class CodexSocketClient {
       socket.on("data", data); socket.once("error", error); socket.once("close", close);
       socket.once("connect", () => socket.write(`GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`));
     });
-    await this.sendRequest("initialize", { clientInfo: { name: "gptqueue", version: "1.0.0" }, capabilities: { experimentalApi: true } }, new AbortController().signal);
+    await this.sendRequest("initialize", { clientInfo: { name: "gptqueue", version: VERSION }, capabilities: { experimentalApi: true } }, new AbortController().signal);
     this.write({ method: "initialized", params: {} });
   }
 

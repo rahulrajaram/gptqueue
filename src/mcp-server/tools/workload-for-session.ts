@@ -26,6 +26,7 @@ export async function workloadForSession(
     const active = await claims.activeClaimFor({
       actor_id: actorId,
       session_id: sessionId,
+      now: new Date().toISOString(),
     });
     return active !== null ? "processing" : "idle";
   } catch {

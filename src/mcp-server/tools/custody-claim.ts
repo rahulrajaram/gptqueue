@@ -58,5 +58,5 @@ export async function custodyClaim(
     now: new Date().toISOString(),
   });
 
-  return custodyOpResult(result, { status: "claimed" });
+  return custodyOpResult(result);
 }

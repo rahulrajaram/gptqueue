@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import * as pty from "node-pty";
+import { agentAttributionEnv } from "./attribution.js";
 import { IdleDetector } from "./idle-detector.js";
 import { RedisWatcher } from "./redis-watcher.js";
+import { terminalPromptBytes } from "./submit.js";
 
 function parseArgs(argv: string[]): { agent: string; cmd: string; args: string[] } {
   let agent = "";
@@ -41,6 +43,7 @@ const ptyProcess = pty.spawn(cmd, args, {
   env: {
     ...process.env,
     GPTQ_AGENT_NAME: agent,
+    ...agentAttributionEnv(agent),
   } as Record<string, string>,
 });
 
@@ -78,8 +81,10 @@ watcher.on("message", (count: number) => {
   pendingInjection = true;
 
   const inject = () => {
-    const prompt = `\nYou have ${count} pending message(s) in your GPTQueue inbox. Call claim_tasks to claim a batch (optional max_batch and ttl_seconds), process the tasks, then acknowledge them with acknowledge_tasks (claim_id).\n`;
-    ptyProcess.write(prompt);
+    const prompt = `You have ${count} pending message(s) in your GPTQueue inbox. Call claim_tasks to claim a batch (optional max_batch and ttl_seconds), process the tasks, then acknowledge them with acknowledge_tasks (claim_id).`;
+    // Bracketed paste + CR submits the prompt in the wrapped TUI; a bare LF
+    // does NOT submit (proven against Claude Code CLI 2.1.283, 2026-09-28).
+    ptyProcess.write(terminalPromptBytes(prompt));
     pendingInjection = false;
   };
 
@@ -90,18 +95,27 @@ watcher.on("message", (count: number) => {
   }
 });
 
+// Stopping the watcher talks to Redis, which may be down; never let that
+// block or skip process exit.
+const stopWatcher = (): Promise<void> =>
+  Promise.race([
+    watcher.stop().catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, 2_000).unref()),
+  ]);
+
 // Handle PTY exit
 ptyProcess.onExit(async ({ exitCode }) => {
   idleDetector.destroy();
-  await watcher.stop();
+  await stopWatcher();
   process.exit(exitCode);
 });
 
-// Graceful shutdown
+// Graceful shutdown: kill the wrapped child first, so a Redis failure while
+// stopping the watcher can never leave it running.
 async function shutdown() {
   idleDetector.destroy();
-  await watcher.stop();
   ptyProcess.kill();
+  await stopWatcher();
   process.exit(0);
 }
 process.on("SIGINT", shutdown);

@@ -1,16 +1,10 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, resolve } from "node:path";
-import { z } from "zod";
+import { resolve } from "node:path";
 
-/** Runtime identity is supplied by the owning host, never inferred from cwd. */
-export const runtimeBindingSchema = z.object({
-  client: z.enum(["codex", "pi"]),
-  runtime_id: z.string().min(1).max(200),
-  epoch: z.string().min(1).max(200),
-  working_directory: z.string().refine(isAbsolute, "An absolute directory is required"),
-}).strict();
+import { runtimeBindingSchema, type RuntimeBinding } from "../core/runtime-binding.js";
 
-export type RuntimeBinding = Readonly<z.infer<typeof runtimeBindingSchema>>;
+// The binding schema lives in core; re-exported for registered-shell importers.
+export { runtimeBindingSchema, type RuntimeBinding };
 /** Internal host identity for adapters that are not exposed through bind_runtime. */
 export type OpenCodeBinding = Readonly<{
   client: "opencode";

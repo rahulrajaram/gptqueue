@@ -10,7 +10,8 @@
  * basename (`/attacker/work/node`) and have it spawned under the server's OS
  * identity. The ratified model is exact argv identity:
  *
- *   1. `.gptqueue/launch-allowlist.json` at the server's working directory
+ *   1. The operator allowlist (default `~/.config/gptqueue/launch-allowlist.json`,
+ *      outside any agent workspace; see `allowlistFilePath`)
  *      governs new `wake_if_offline` registrations (fail-closed: an absent or
  *      unparseable file refuses admission).
  *   2. Command identity is exact: a bare-name entry matches only the identical
@@ -37,8 +38,9 @@
  * spawns and touches no Redis.
  */
 
-import { readFile, stat } from "fs/promises";
-import { basename, isAbsolute, resolve, sep } from "path";
+import { lstat, readFile, stat } from "fs/promises";
+import { homedir } from "os";
+import { basename, isAbsolute, join, resolve, sep } from "path";
 
 /** One command the operator has permitted to be launched. */
 export interface LaunchAllowlistEntry {
@@ -54,7 +56,7 @@ export interface LaunchAllowlistEntry {
   readonly comment?: string;
 }
 
-/** Document format for `.gptqueue/launch-allowlist.json`. */
+/** Document format for the operator launch allowlist. */
 export interface LaunchAllowlistConfig {
   readonly version: number;
   readonly commands: readonly LaunchAllowlistEntry[];
@@ -100,7 +102,7 @@ export type LaunchPolicyDecision =
  * choose an arbitrary program, so they are rejected unconditionally (whether
  * or not the operator allowlisted them).
  */
-export const DANGEROUS_SHELL_BASENAMES: ReadonlySet<string> = new Set([
+const DANGEROUS_SHELL_BASENAMES: ReadonlySet<string> = new Set([
   "sh",
   "bash",
   "zsh",
@@ -120,7 +122,7 @@ export const DANGEROUS_SHELL_BASENAMES: ReadonlySet<string> = new Set([
  * channel. Operators who need scripted behavior point the interpreter at a
  * fixed script FILE instead.
  */
-export const DANGEROUS_INTERPRETER_BASENAMES: ReadonlySet<string> = new Set([
+const DANGEROUS_INTERPRETER_BASENAMES: ReadonlySet<string> = new Set([
   "node",
   "nodejs",
   "deno",
@@ -140,14 +142,14 @@ export const DANGEROUS_INTERPRETER_BASENAMES: ReadonlySet<string> = new Set([
  * element — every invocation executes an argv-supplied string, so no flag
  * predicate can make it safe. Rejected unconditionally, like shells (D1).
  */
-export const DANGEROUS_AWK_BASENAMES: ReadonlySet<string> = new Set([
+const DANGEROUS_AWK_BASENAMES: ReadonlySet<string> = new Set([
   "awk",
   "gawk",
   "mawk",
 ]);
 
 /** Detached inline-code flags that make an interpreter execute an argv string. */
-export const DANGEROUS_INTERPRETER_ARGS: ReadonlySet<string> = new Set([
+const DANGEROUS_INTERPRETER_ARGS: ReadonlySet<string> = new Set([
   "-e",
   "--eval",
   "-c",
@@ -165,15 +167,27 @@ export const DANGEROUS_INTERPRETER_ARGS: ReadonlySet<string> = new Set([
  * previously matched only exact detached tokens, so `--eval=x` and `-cfoo`
  * bypassed the documented unconditional rejection.
  */
-export const isInlineCodeArg = (arg: string): boolean =>
+const isInlineCodeArg = (arg: string): boolean =>
   DANGEROUS_INTERPRETER_ARGS.has(arg) ||
   /^--(eval|print|command)=/.test(arg) ||
   /^-[ecEpr].+/.test(arg);
 
-/** Path of the operator allowlist file, overridable for tests. */
-export const allowlistFilePath = (): string =>
+/**
+ * Path of the operator allowlist file. It defaults to the user config
+ * directory, outside any workspace: agents running as the same user can write
+ * their workspace, and an allowlist they can edit is one they can
+ * self-authorize with. GPTQUEUE_LAUNCH_ALLOWLIST overrides it.
+ */
+const allowlistFilePath = (): string =>
   process.env.GPTQUEUE_LAUNCH_ALLOWLIST?.trim() ||
-  ".gptqueue/launch-allowlist.json";
+  join(
+    process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config"),
+    "gptqueue",
+    "launch-allowlist.json"
+  );
+
+/** Pre-0.1.0 default, inside the server's working directory; no longer read. */
+const LEGACY_ALLOWLIST_PATH = ".gptqueue/launch-allowlist.json";
 
 /**
  * Reduce a command to its basename. Used ONLY by the rejection predicates
@@ -181,7 +195,7 @@ export const allowlistFilePath = (): string =>
  * matching is conservative — it over-rejects aliases, never under-rejects.
  * Admission (`commandMatches`) never aliases by basename.
  */
-export const normalizeCommand = (command: string): string =>
+const normalizeCommand = (command: string): string =>
   basename(command);
 
 /**
@@ -237,7 +251,7 @@ export const launchMatchesConfig = (
  * deliberately no args clause (D9: the previous second disjunct re-tested
  * the same set membership and could never fire).
  */
-export const isDangerousDelegator = (command: string): boolean =>
+const isDangerousDelegator = (command: string): boolean =>
   DANGEROUS_SHELL_BASENAMES.has(normalizeCommand(command).toLowerCase());
 
 /**
@@ -248,7 +262,7 @@ export const isDangerousDelegator = (command: string): boolean =>
  * an arbitrary-code channel even under an exact-template grant, because the
  * executed string is only as trustworthy as whoever authored the registration.
  */
-export const isDangerousInterpreter = (
+const isDangerousInterpreter = (
   command: string,
   args: readonly string[]
 ): boolean => {
@@ -298,14 +312,30 @@ export const launchCwdIsConfined = async (
  * Load and parse the operator allowlist file (fail-closed: absent or
  * unparseable yields a non-loaded result).
  */
-export const loadLaunchAllowlist = async (): Promise<AllowlistLoad> => {
+const loadLaunchAllowlist = async (): Promise<AllowlistLoad> => {
   const path = allowlistFilePath();
   let raw: string;
   try {
+    // lstat, not stat: a symlink could point the allowlist at a writable file.
+    const info = await lstat(path);
+    if (!info.isFile()) {
+      return { kind: "unparseable", reason: `${path} is not a regular file (symlinks are refused)` };
+    }
+    if ((info.mode & 0o022) !== 0) {
+      return { kind: "unparseable", reason: `${path} is group- or world-writable; restrict it (chmod go-w)` };
+    }
     raw = await readFile(path, "utf-8");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { kind: "absent" };
+    if (code === "ENOENT") {
+      if (!process.env.GPTQUEUE_LAUNCH_ALLOWLIST?.trim() && (await lstat(LEGACY_ALLOWLIST_PATH).then(() => true, () => false))) {
+        return {
+          kind: "unparseable",
+          reason: `found ${LEGACY_ALLOWLIST_PATH} in the working directory, which is no longer read because agents can write it; move it to ${path} or set GPTQUEUE_LAUNCH_ALLOWLIST`,
+        };
+      }
+      return { kind: "absent" };
+    }
     return {
       kind: "unparseable",
       reason: `cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`,
@@ -433,9 +463,7 @@ export const evaluateLaunchPolicy = async (
       ok: false,
       error: Object.freeze({
         code: "launch_command_rejected",
-        message: `command '${contract.command}' carries an inline-code flag (${[...contract.args].find((arg) =>
-          DANGEROUS_INTERPRETER_ARGS.has(arg)
-        )}) and is rejected regardless of the launch allowlist; point the interpreter at a fixed script file instead`,
+        message: `command '${contract.command}' carries an inline-code flag (${[...contract.args].find(isInlineCodeArg)}) and is rejected regardless of the launch allowlist; point the interpreter at a fixed script file instead`,
       }),
     });
   }

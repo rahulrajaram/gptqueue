@@ -18,6 +18,11 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { RedisClient } from "../mcp-server/redis-client.js";
 import { GPTQUEUE_INSTRUCTIONS, registerTools } from "./setup-tools.js";
+import { VERSION } from "../version.js";
+import { sessionTag as sessionLogTag } from "../core/session-tag.js";
+
+/** A session id is a bearer credential: logs carry only a short, non-reversible tag. */
+export { sessionLogTag };
 
 const DEFAULT_PORT = 3001;
 
@@ -115,14 +120,64 @@ if (tokenActive) {
 }
 
 // Store transports by session ID
-const transports: Record<string, StreamableHTTPServerTransport> = {};
+// A Map, not an object literal: session ids come from a client header, and a
+// lookup like `constructor` must not resolve to an inherited property.
+const transports = new Map<string, StreamableHTTPServerTransport>();
+
+// ---------------------------------------------------------------------------
+// Session limits
+//
+// Each session owns a RedisClient (two connections plus lease-refresh and
+// heartbeat timers). A client that vanishes without DELETE would hold them,
+// and keep its agent leased online, until the process exits. A session with
+// no open request (an SSE GET stream counts as open) for
+// GPTQUEUE_HTTP_IDLE_TIMEOUT_MS (default 1 hour; 0 disables) is closed; the
+// client's next call gets the spec'd 404 and re-initializes. At most
+// GPTQUEUE_HTTP_MAX_SESSIONS (default 256) sessions exist at once; further
+// initialize requests get 503.
+// ---------------------------------------------------------------------------
+const envInt = (name: string, fallback: number): number => {
+  const parsed = parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};
+const idleTimeoutMs = envInt("GPTQUEUE_HTTP_IDLE_TIMEOUT_MS", 60 * 60 * 1000);
+const maxSessions = envInt("GPTQUEUE_HTTP_MAX_SESSIONS", 256);
+const activity = new Map<string, { lastSeen: number; open: number }>();
+
+/** Mark a request on a session open until its response closes. */
+function trackRequest(sessionId: string, res: { on(event: "close", cb: () => void): unknown }): void {
+  const entry = activity.get(sessionId) ?? { lastSeen: Date.now(), open: 0 };
+  entry.open += 1;
+  entry.lastSeen = Date.now();
+  activity.set(sessionId, entry);
+  res.on("close", () => {
+    entry.open -= 1;
+    entry.lastSeen = Date.now();
+  });
+}
+
+if (idleTimeoutMs > 0) {
+  setInterval(() => {
+    const cutoff = Date.now() - idleTimeoutMs;
+    for (const [sid, entry] of activity) {
+      const transport = transports.get(sid);
+      if (!transport) {
+        activity.delete(sid);
+      } else if (entry.open === 0 && entry.lastSeen < cutoff) {
+        activity.delete(sid);
+        console.log(`[gptqueue-http] closing idle session ${sessionLogTag(sid)}`);
+        transport.close().catch(() => {});
+      }
+    }
+  }, Math.min(Math.max(Math.floor(idleTimeoutMs / 2), 250), 60_000)).unref();
+}
 
 // Create a fresh MCP server + RedisClient per session
 function createSessionServer(): { server: McpServer; redisClient: RedisClient } {
   const redisClient = new RedisClient(null);
   const server = new McpServer({
     name: "gptqueue",
-    version: "1.0.0",
+    version: VERSION,
   }, { instructions: GPTQUEUE_INSTRUCTIONS });
   registerTools(server, redisClient);
   return { server, redisClient };
@@ -132,13 +187,21 @@ function createSessionServer(): { server: McpServer; redisClient: RedisClient } 
 app.post("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
-  if (sessionId && transports[sessionId]) {
+  const existing = sessionId ? transports.get(sessionId) : undefined;
+  if (sessionId && existing) {
     // Existing session
-    await transports[sessionId].handleRequest(req, res, req.body);
+    trackRequest(sessionId, res);
+    await existing.handleRequest(req, res, req.body);
     return;
   }
 
   if (isInitializeRequest(req.body)) {
+    if (transports.size >= maxSessions) {
+      res.status(503).json({
+        error: `session limit reached (${maxSessions}); close idle sessions or raise GPTQUEUE_HTTP_MAX_SESSIONS`,
+      });
+      return;
+    }
     // New (or re-)session: an initialize with a stale/unknown session id
     // (e.g. after a server restart) starts a fresh session; the client
     // adopts the new id from the response header. This makes server
@@ -148,15 +211,15 @@ app.post("/mcp", async (req, res) => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sid) => {
-        transports[sid] = transport;
+        transports.set(sid, transport);
+        activity.set(sid, { lastSeen: Date.now(), open: 0 });
       },
     });
 
     transport.onclose = () => {
       const sid = transport.sessionId;
-      if (sid && transports[sid]) {
-        delete transports[sid];
-      }
+      if (sid) transports.delete(sid);
+      if (sid) activity.delete(sid);
       redisClient.shutdown().catch(() => {});
     };
 
@@ -183,21 +246,23 @@ app.post("/mcp", async (req, res) => {
 // GET /mcp -- SSE stream for server-initiated messages
 app.get("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  if (!sessionId || !transports[sessionId]) {
+  const transport = sessionId ? transports.get(sessionId) : undefined;
+  if (!sessionId || !transport) {
     res.status(404).json({ error: "Session not found" });
     return;
   }
-  await transports[sessionId].handleRequest(req, res);
+  trackRequest(sessionId, res);
+  await transport.handleRequest(req, res);
 });
 
 // DELETE /mcp -- close session
 app.delete("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  if (!sessionId || !transports[sessionId]) {
+  const transport = sessionId ? transports.get(sessionId) : undefined;
+  if (!sessionId || !transport) {
     res.status(404).json({ error: "Session not found" });
     return;
   }
-  const transport = transports[sessionId];
   await transport.handleRequest(req, res);
 });
 
@@ -205,7 +270,7 @@ app.delete("/mcp", async (req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
-    sessions: Object.keys(transports).length,
+    sessions: transports.size,
   });
 });
 
@@ -234,9 +299,9 @@ if (udsSocketPath) {
 
 // Graceful shutdown
 async function shutdown() {
-  for (const [sid, transport] of Object.entries(transports)) {
+  for (const [sid, transport] of transports) {
     await transport.close();
-    delete transports[sid];
+    transports.delete(sid);
   }
   process.exit(0);
 }

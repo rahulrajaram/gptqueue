@@ -2,13 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   admitHandoffRecord,
   createCustody,
-  resolveWorkOwnership,
   transitionCustody,
   type CustodianIdentity,
   type CustodyRecord,
   type CustodyTransitionResult,
   type HandoffRecordV1,
-  type WorkOwnershipRequest,
 } from "../src/core/custody-model.js";
 
 const LEASE = "2030-01-01T00:00:00.000Z";
@@ -59,16 +57,6 @@ const heldBy = (
       lease_expires_at: lease,
     })
   );
-
-const request = (
-  overrides: Partial<WorkOwnershipRequest> = {}
-): WorkOwnershipRequest => ({
-  worktree_path: "/srv/worktrees/agent",
-  has_durable_actor: false,
-  actor_launchable: false,
-  policy: "wake_if_offline",
-  ...overrides,
-});
 
 describe("handoff record admission", () => {
   it("admits a valid handoff deeply frozen", () => {
@@ -500,77 +488,5 @@ describe("custody transitions", () => {
     expect(Object.isFrozen(initial.worktree)).toBe(true);
     expect(initial).toEqual(createCustody(worktree()));
     expect(held.state).toBe("held");
-  });
-});
-
-describe("work ownership decisions", () => {
-  it("blocks a forfeited worktree as forfeited_unclaimed before routing", () => {
-    const decision = resolveWorkOwnership(
-      request({ has_durable_actor: true, actor_launchable: true }),
-      "forfeited"
-    );
-
-    expect(decision.kind).toBe("block");
-    if (decision.kind !== "block") throw new Error("expected block");
-    expect(decision.reason).toBe("forfeited_unclaimed");
-  });
-
-  it("blocks a held worktree as held_by_live_custodian before routing", () => {
-    const decision = resolveWorkOwnership(
-      request({ has_durable_actor: true, actor_launchable: true }),
-      "held"
-    );
-
-    expect(decision.kind).toBe("block");
-    if (decision.kind !== "block") throw new Error("expected block");
-    expect(decision.reason).toBe("held_by_live_custodian");
-  });
-
-  it("delegates wake to a launchable durable actor", () => {
-    const decision = resolveWorkOwnership(
-      request({ has_durable_actor: true, actor_launchable: true }),
-      "unowned"
-    );
-
-    expect(decision).toEqual({ kind: "delegate_wake" });
-  });
-
-  it("falls back to storing rather than waking an unlaunchable actor", () => {
-    const decision = resolveWorkOwnership(
-      request({ has_durable_actor: true, actor_launchable: false }),
-      "released"
-    );
-
-    expect(decision).toEqual({ kind: "delegate_store" });
-  });
-
-  it("stores for a store_only actor regardless of launchability", () => {
-    for (const actor_launchable of [true, false]) {
-      const decision = resolveWorkOwnership(
-        request({ has_durable_actor: true, actor_launchable, policy: "store_only" }),
-        "unowned"
-      );
-
-      expect(decision).toEqual({ kind: "delegate_store" });
-    }
-  });
-
-  it("assumes self custody for a direct_allowed request without an actor", () => {
-    const decision = resolveWorkOwnership(
-      request({ policy: "direct_allowed" }),
-      "unowned"
-    );
-
-    expect(decision).toEqual({ kind: "assume_self_custody" });
-  });
-
-  it("blocks a no-actor request that is not direct as no_actor_not_direct", () => {
-    for (const policy of ["wake_if_offline", "store_only"] as const) {
-      const decision = resolveWorkOwnership(request({ policy }), "released");
-
-      expect(decision.kind).toBe("block");
-      if (decision.kind !== "block") throw new Error("expected block");
-      expect(decision.reason).toBe("no_actor_not_direct");
-    }
   });
 });

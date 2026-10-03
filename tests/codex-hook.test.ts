@@ -1,6 +1,19 @@
 import { spawn } from "node:child_process";
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bindCodexHook } from "../src/registered-shell/codex-hook.js";
+import { createHookLog } from "../src/registered-shell/lifecycle-log.js";
+
+const dirs: string[] = [];
+afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+const readLog = async (dir: string) => {
+  const files = await readdir(dir);
+  expect(files).toHaveLength(1);
+  const text = await readFile(join(dir, files[0]!), "utf8");
+  return { text, records: text.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>) };
+};
 
 const session = "123e4567-e89b-12d3-a456-426614174000";
 const event = (overrides: Record<string, unknown> = {}) => ({ session_id: session, cwd: "/workspace/project", hook_event_name: "SessionStart", ...overrides });
@@ -83,6 +96,68 @@ describe("Codex runtime hook", () => {
     expect(malformed.code).not.toBe(0); expect(malformed.stderr).not.toContain(redactionFixture);
     const oversized = await run("x".repeat(70_000));
     expect(oversized.code).not.toBe(0); expect(oversized.stderr).not.toContain("x".repeat(100));
+    const invalidLogDir = await mkdtemp(join(tmpdir(), "gptqueue-hooklog-")); dirs.push(invalidLogDir);
+    vi.stubEnv("GPTQ_LOG_DIR", invalidLogDir);
+    const invalidJsonLogged = await run("{not-json");
+    expect(invalidJsonLogged.code).not.toBe(0);
+    const records = (await readLog(invalidLogDir)).records;
+    expect(records.filter((record) => record.event === "hook_binding_outcome").at(-1)?.outcome).toBe("invalid_hook_input");
+    expect(JSON.stringify(records)).not.toContain("not-json");
+  });
+
+  it("retains durable attempt and outcome diagnostics for both hook events without leaking payloads", async () => {
+    for (const hookEventName of ["SessionStart", "UserPromptSubmit"] as const) {
+      const dir = await mkdtemp(join(tmpdir(), "gptqueue-hooklog-")); dirs.push(dir);
+      const log = createHookLog("codex", session, hookEventName, { dir });
+      const rpc = call([new Error("connect ECONNREFUSED redis://user:secret@host"), { isError: false, structuredContent: { activation_ready: true } }]);
+      expect(await bindCodexHook(event({ hook_event_name: hookEventName }), rpc as never, { retryMs: 1, timeoutMs: 5_000, log })).toBe(true);
+      await log.close();
+      const { text, records } = await readLog(dir);
+      const attempts = records.filter((record) => record.event === "hook_binding_attempt");
+      const outcomes = records.filter((record) => record.event === "hook_binding_outcome");
+      expect(attempts).toHaveLength(2);
+      expect(attempts.map((record) => record.attempt)).toEqual([1, 2]);
+      expect(outcomes.at(-1)?.outcome).toBe("ready");
+      expect(outcomes.at(-2)?.outcome).toBe("transport_error");
+      for (const record of records) {
+        expect(record.schema_version).toBe(1);
+        expect(record.session_id).toBe(session);
+        expect(record.hook_event).toBe(hookEventName);
+      }
+      expect(text).not.toContain("secret");
+      expect(text).not.toContain("ECONNREFUSED");
+      expect((await stat(join(dir, (await readdir(dir))[0]!))).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("records not_ready timeouts and legacy outcomes durably", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "gptqueue-hooklog-")); dirs.push(dir);
+    const log = createHookLog("codex", session, "SessionStart", { dir });
+    const notReady = call([{ isError: false, structuredContent: { activation_ready: false } }]);
+    expect(await bindCodexHook(event(), notReady as never, { retryMs: 1, timeoutMs: 20, log })).toBe(false);
+    await log.close();
+    expect((await readLog(dir)).records.filter((record) => record.event === "hook_binding_outcome").at(-1)?.outcome).toBe("timeout");
+
+    const legacyDir = await mkdtemp(join(tmpdir(), "gptqueue-hooklog-")); dirs.push(legacyDir);
+    const legacyLog = createHookLog("codex", session, "UserPromptSubmit", { dir: legacyDir });
+    const legacy = call([{ isError: true, content: [{ type: "text", text: "Tool bind_runtime not found" }] }]);
+    expect(await bindCodexHook(event({ hook_event_name: "UserPromptSubmit" }), legacy as never, { log: legacyLog })).toBe(false);
+    await legacyLog.close();
+    const legacyOutcome = (await readLog(legacyDir)).records.filter((record) => record.event === "hook_binding_outcome").at(-1);
+    expect(legacyOutcome?.outcome).toBe("legacy_connection_requires_reconnect");
+    expect(legacyOutcome?.attempt).toBe(1);
+    await log.close();
+  });
+
+  it("records timeout when the deadline elapsed before the abort signal callback", async () => {
+    vi.useFakeTimers();
+    try {
+      const rpc = call([{ isError: false, structuredContent: { activation_ready: false } }]);
+      const pending = bindCodexHook(event(), rpc as never, { retryMs: 100, timeoutMs: 50 });
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(pending).resolves.toBe(false);
+      expect(rpc.calls).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
   });
 
   it("reports a legacy loaded connection without retrying or echoing payloads, with the exact RPC contract", async () => {

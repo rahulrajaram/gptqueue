@@ -14,7 +14,7 @@ export interface InboxDispatcher {
 /** One serial owner per binding. Notifications wake software; idle timers never wake a model. */
 export const startInboxDispatcher = async (
   redis: Redis, agent: string, adapter: RuntimeAdapter,
-  options: Readonly<{ intervalMs?: number; maxAttempts?: number }> = {},
+  options: Readonly<{ intervalMs?: number; maxAttempts?: number; maxBackoffMs?: number }> = {},
 ): Promise<InboxDispatcher> => {
   const stop = new AbortController();
   const state = new ActivationStore(redis, agent);
@@ -22,6 +22,13 @@ export const startInboxDispatcher = async (
   const claims = new TaskClaimStore(redis);
   const interval = options.intervalMs ?? 1_000;
   const maximum = options.maxAttempts ?? 3;
+  const maxBackoff = Math.max(options.maxBackoffMs ?? 10_000, interval);
+  // A busy or unavailable runtime is retried with exponential backoff, not on every tick or inbox event.
+  let backoff = 0;
+  let retryAt = 0;
+  // One deferral trace per (operation, reason) streak, so a long busy or
+  // unavailable period is provable without per-tick spam.
+  let lastDeferred: Readonly<{ operation_id: string; code: string }> | undefined;
   await state.attach(adapter.binding);
   const trace = (stage: InboxTraceStage, record?: ActivationRecord, code?: string, turnId?: string) =>
     events.trace(agent, { stage, timestamp: new Date().toISOString(),
@@ -36,11 +43,17 @@ export const startInboxDispatcher = async (
 
   const reconcile = async (): Promise<void> => {
     if (!await state.refresh()) { stop.abort(); return; }
-    await claims.recoverExpired({ actor_id: agent, now: new Date().toISOString() });
+    const recovered = await claims.recoverExpired({ actor_id: agent, now: new Date().toISOString() });
+    if (!recovered.ok) throw new Error(recovered.error.message);
     const pending = await events.pending(agent);
     let record = await state.current();
     // Claimed messages are durable in the claim store; do not inject another turn while owned.
-    if (!pending.length || (record && !record.message_ids.some((id) => pending.some((message) => message.id === id)))) {
+    // Clear a record none of whose messages is pending any more, and an
+    // exhausted record once new work it does not cover arrives: new work
+    // re-arms activation instead of starving behind a message that failed.
+    const stale = record !== null && !record.message_ids.some((id) => pending.some((message) => message.id === id));
+    const superseded = record?.state === "exhausted" && pending.some((message) => !record!.message_ids.includes(message.id));
+    if (!pending.length || stale || superseded) {
       if (!await state.save(null)) { stop.abort(); return; }
       record = null;
     }
@@ -49,7 +62,7 @@ export const startInboxDispatcher = async (
       record = createRecord(pending.map((message) => message.id), 1);
       if (!await state.save(record)) { stop.abort(); return; }
     }
-    if (record.state === "exhausted") return;
+    if (record.state === "exhausted" || Date.now() < retryAt) return;
     const recovery = record.state !== "pending";
     if (!recovery) {
       if (!await state.save({ ...record, state: "submitting" })) { stop.abort(); return; }
@@ -59,12 +72,16 @@ export const startInboxDispatcher = async (
     const outcome = await adapter.activate({ operation_id: record.operation_id,
       prompt: inboxPrompt(agent, record.operation_id), recover_only: recovery }, stop.signal);
     if (stop.signal.aborted || !await state.refresh()) return;
+    const deferred = outcome.status === "busy" || outcome.status === "unavailable";
+    backoff = deferred ? Math.min(Math.max(backoff * 2, interval), maxBackoff) : 0;
+    retryAt = deferred ? Date.now() + backoff : 0;
     switch (outcome.status) {
       case "started":
       case "queued":
         await state.save({ ...record, state: "accepted" });
         if (record.state !== "accepted") await trace(outcome.status === "started" ? "turn_started" : "activation_queued", record,
           undefined, outcome.status === "started" ? outcome.turn_id : undefined);
+        lastDeferred = undefined;
         return;
       case "completed":
         // A turn ended without consuming all notified work; bounded fresh attempts prevent loops.
@@ -74,10 +91,18 @@ export const startInboxDispatcher = async (
         if (record.attempt >= maximum) await trace("activation_failed", record, "activation_attempts_exhausted");
         return;
       case "busy":
-      case "unavailable":
+      case "unavailable": {
+        // busy vs unavailable is retained as distinct durable codes so either
+        // can be proven from the trace after the fact.
+        const code = outcome.status === "busy" ? "runtime_busy" : "runtime_unavailable";
+        if (lastDeferred?.operation_id !== record.operation_id || lastDeferred.code !== code) {
+          lastDeferred = { operation_id: record.operation_id, code };
+          await trace("activation_deferred", record, code);
+        }
         // A previously uncertain submission remains uncertain until native evidence resolves it.
         await state.save({ ...record, state: recovery ? record.state : "pending" });
         return;
+      }
       case "ambiguous":
         await state.save({ ...record, state: "ambiguous" });
         if (record.state !== "ambiguous") await trace("activation_failed", record, "native_delivery_ambiguous");
@@ -91,11 +116,12 @@ export const startInboxDispatcher = async (
 
   const closed = (async () => {
     let cursor = "0-0";
+    const waiter = events.createWaiter();
     try {
       while (!stop.signal.aborted) {
         try {
           await reconcile();
-          if (!stop.signal.aborted) cursor = await events.wait(agent, cursor, stop.signal, interval) ?? cursor;
+          if (!stop.signal.aborted) cursor = await waiter.wait(agent, cursor, stop.signal, interval) ?? cursor;
         } catch {
           if (stop.signal.aborted) break;
           await trace("activation_failed", undefined, "dispatcher_reconcile_failed").catch(() => undefined);
@@ -103,6 +129,7 @@ export const startInboxDispatcher = async (
         }
       }
     } finally {
+      waiter.close();
       await state.detach().catch(() => undefined);
       await adapter.close().catch(() => undefined);
       await trace("runtime_unbound").catch(() => undefined);

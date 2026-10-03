@@ -171,17 +171,11 @@ describe("get_agent_details exact native probe rejection (F3)", () => {
     expect(result.readiness_evidence).toBe("exact_native_probe");
   });
 
-  it("classifies an RPC error as probe_unavailable with activation_ready null", async () => {
+  // A probe timeout aborts the same request and lands in the same catch, so
+  // this covers it too (the 10 s deadline itself is not simulated).
+  it("classifies a failed probe (RPC error or timeout abort) as probe_unavailable with activation_ready null", async () => {
     await seedTarget();
     probe.nextResponse = new Error("socket failed");
-    const result = await probeDetails();
-    expect(result.activation_ready).toBeNull();
-    expect(result.readiness_evidence).toBe("probe_unavailable");
-  });
-
-  it("classifies a probe timeout as probe_unavailable with activation_ready null", async () => {
-    await seedTarget();
-    probe.nextResponse = new Error("timeout");
     const result = await probeDetails();
     expect(result.activation_ready).toBeNull();
     expect(result.readiness_evidence).toBe("probe_unavailable");

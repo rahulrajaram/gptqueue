@@ -13,9 +13,9 @@
  */
 
 import { Redis } from "ioredis";
+import { z } from "zod";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { CUSTODY_KEYS } from "./keys.js";
 import {
   admitHandoffRecord,
@@ -27,9 +27,8 @@ import {
   type CustodyRecord,
   type WorktreeIdentity,
 } from "./custody-model.js";
+import { LUA_DIR, describeStored, type StoredRead as StoredReadOf } from "./stored-read.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
 
 /** Sentinel passed to the Lua script for a field that is expected to be absent. */
 const ABSENT = "ABSENT";
@@ -94,13 +93,44 @@ const isValidInventory = (inventory: unknown): boolean =>
     (entry) => typeof entry === "string" && entry.length > 0
   );
 
-/** Save a short, bounded excerpt of a raw stored value for diagnostics. */
-const excerptOf = (raw: string): string =>
-  raw.length <= 80 ? raw : `${raw.slice(0, 80)}...`;
+type StoredRead = StoredReadOf<CustodyRecord>;
 
-type StoredRead =
-  | { readonly kind: "record"; readonly record: CustodyRecord | null }
-  | { readonly kind: "corrupt"; readonly excerpt: string };
+/**
+ * A stored handoff must pass the same admission as on release. Transitions
+ * re-freeze it by spreading both arrays, and admission alone tolerates an
+ * absent hazards list, so that list is required here.
+ */
+const isStoredHandoff = (handoff: unknown): boolean =>
+  typeof handoff === "object" &&
+  handoff !== null &&
+  Array.isArray((handoff as { hazards?: unknown }).hazards) &&
+  admitHandoffRecord(handoff).ok;
+
+/**
+ * Read admission for a stored custody record: every field the domain code
+ * dereferences must be present, so a schema-incomplete value is reported as
+ * store_corrupt instead of throwing later. Extra fields are tolerated. A held
+ * record names its custodian and lease; a released record carries the
+ * handoff it was released with, and any record carrying a handoff (held and
+ * forfeited records keep their predecessor's) carries a well-formed one.
+ */
+const storedCustodySchema = z
+  .object({
+    state: z.enum(["unowned", "held", "released", "forfeited"]),
+    worktree: z.object({
+      worktree_path: z.string().min(1),
+      repo_head: z.string(),
+      tree_fingerprint: z.string(),
+    }).passthrough(),
+    custodian: z.object({ actor_name: z.string(), session_id: z.string() }).passthrough().optional(),
+    lease_expires_at: z.string().optional(),
+    handoff: z.unknown().optional(),
+  })
+  .passthrough()
+  .refine((record) => record.state !== "held" || record.custodian !== undefined, { path: ["custodian"] })
+  .refine((record) => record.state !== "held" || record.lease_expires_at !== undefined, { path: ["lease_expires_at"] })
+  .refine((record) => record.state !== "released" || record.handoff !== undefined, { path: ["handoff"] })
+  .refine((record) => record.handoff === undefined || isStoredHandoff(record.handoff), { path: ["handoff"] });
 
 export class CustodyStore {
   private readonly redis: Redis;
@@ -139,7 +169,7 @@ export class CustodyStore {
     // before falling through to a derived domain error.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const stored = await this.readRecord(input.worktree_path);
-      if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
+      if (stored.kind === "corrupt") return this.corrupt(stored.diagnostic);
 
       let record = stored.kind === "record" ? stored.record : null;
       if (record === null) {
@@ -215,7 +245,7 @@ export class CustodyStore {
 
     // Retries exhausted: derive the domain error from the current stored state.
     const stored = await this.readRecord(input.worktree_path);
-    if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
+    if (stored.kind === "corrupt") return this.corrupt(stored.diagnostic);
     const current = stored.kind === "record" ? stored.record : null;
     if (current && current.state === "held") {
       return fail(
@@ -247,7 +277,7 @@ export class CustodyStore {
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const stored = await this.readRecord(input.worktree_path);
-      if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
+      if (stored.kind === "corrupt") return this.corrupt(stored.diagnostic);
       let record = stored.kind === "record" ? stored.record : null;
       if (record !== null) {
         // Self-heal (M4): a release of an EXPIRED hold is not a success on a
@@ -284,7 +314,7 @@ export class CustodyStore {
 
     // Retries exhausted: derive the domain error from the current stored state.
     const stored = await this.readRecord(input.worktree_path);
-    if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
+    if (stored.kind === "corrupt") return this.corrupt(stored.diagnostic);
     const current = stored.kind === "record" ? stored.record : null;
     if (!current || current.state !== "held") {
       return fail("not_held", "cannot release a worktree that is not held");
@@ -310,7 +340,7 @@ export class CustodyStore {
   ): Promise<CustodyStatusResult | CustodyListResult> {
     if (input.worktree_path !== undefined) {
       const stored = await this.readRecord(input.worktree_path);
-      if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
+      if (stored.kind === "corrupt") return this.corrupt(stored.diagnostic);
       const record = stored.kind === "record" ? stored.record : null;
       if (record === null) return { ok: true, record: null };
       return { ok: true, record: await this.lazyExpire(record, input.now) };
@@ -320,7 +350,7 @@ export class CustodyStore {
     const records: CustodyRecord[] = [];
     for (const [path, raw] of Object.entries(all)) {
       const parsed = this.parseStored(raw, path);
-      if (parsed.kind === "corrupt") return this.corrupt(parsed.excerpt);
+      if (parsed.kind === "corrupt") return this.corrupt(parsed.diagnostic);
       // hgetall only yields present fields, so a stored record is never null here.
       if (parsed.record === null) continue;
       records.push(await this.lazyExpire(parsed.record, input.now));
@@ -362,25 +392,23 @@ export class CustodyStore {
   }
 
   private parseStored(raw: string, path: string): StoredRead {
+    let parsed: unknown;
     try {
-      const parsed: unknown = JSON.parse(raw);
-      if (
-        typeof parsed === "object" &&
-        parsed !== null &&
-        typeof (parsed as { state?: unknown }).state === "string"
-      ) {
-        return { kind: "record", record: parsed as CustodyRecord };
-      }
+      parsed = JSON.parse(raw);
     } catch {
-      // fall through to corrupt below
+      return { kind: "corrupt", diagnostic: `${path}: ${describeStored(raw, "JSON")}` };
     }
-    return { kind: "corrupt", excerpt: `${path}=${excerptOf(raw)}` };
+    const admission = storedCustodySchema.safeParse(parsed);
+    if (admission.success) return { kind: "record", record: parsed as CustodyRecord };
+    // The first failing field's path names where, never what, it stored.
+    const failing = admission.error.issues[0]?.path.map(String).join(".") || "(root)";
+    return { kind: "corrupt", diagnostic: `${path}: ${describeStored(raw, failing)}` };
   }
 
-  private corrupt(excerpt: string): CustodyOpResult {
+  private corrupt(diagnostic: string): CustodyOpResult {
     return fail(
       "store_corrupt",
-      `stored custody record is corrupt (${excerpt}); refusing to operate on it`
+      `stored custody record is corrupt (${diagnostic}); refusing to operate on it`
     );
   }
 

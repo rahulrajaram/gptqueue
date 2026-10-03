@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPiExtension, GPTQUEUE_TOOLS, RUNTIME_TOOL_NAMES, type PiAPI, type SessionClient } from "../src/registered-shell/pi-extension.js";
+import { createPiExtension, GPTQUEUE_TOOLS, SHELL_TOOLS, type PiAPI, type SessionClient } from "../src/registered-shell/pi-extension.js";
 
-const catalog = { tools: [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES].map((name) => ({ name, inputSchema: { type: "object" } })) };
+const catalog = { tools: [...GPTQUEUE_TOOLS, ...SHELL_TOOLS].map((name) => ({ name, inputSchema: { type: "object" } })) };
 const makeClient = () => {
   let handler: any;
   const client: SessionClient & { handler?: any } = {
@@ -17,7 +17,7 @@ const makeClient = () => {
 const fakePi = () => {
   const handlers = new Map<string, any>(); const entries: any[] = []; let current = { cwd: "/tmp/project", sessionManager: { getSessionId: () => "session-1", getEntries: () => entries } };
   const pi = {
-    registerTool: vi.fn(), on: vi.fn((name, handler) => handlers.set(name, handler)), getActiveTools: vi.fn(() => [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES]), setActiveTools: vi.fn(),
+    registerTool: vi.fn(), on: vi.fn((name, handler) => handlers.set(name, handler)), getActiveTools: vi.fn(() => [...GPTQUEUE_TOOLS, ...SHELL_TOOLS]), setActiveTools: vi.fn(),
     sendMessage: vi.fn(), appendEntry: vi.fn(), getContext: () => current,
   } satisfies PiAPI;
   return { pi, handlers, context: () => current, entries, switchSession: (id: string, cwd = current.cwd) => { current = { ...current, cwd, sessionManager: { ...current.sessionManager, getSessionId: () => id } }; }, setCwd: (cwd: string) => { current = { ...current, cwd }; } };
@@ -33,7 +33,7 @@ describe("registered Pi activation lifecycle", () => {
     await fake.handlers.get("session_start")({}, fake.context());
     expect(calls).toHaveLength(1);
     expect(calls[0]?.[1]).toMatchObject({ cwd: "/tmp/project", sessionManager: expect.any(Object) });
-    expect(fake.pi.registerTool.mock.calls.map(([definition]) => definition.name)).toEqual([...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES]);
+    expect(fake.pi.registerTool.mock.calls.map(([definition]) => definition.name)).toEqual([...GPTQUEUE_TOOLS, ...SHELL_TOOLS]);
   });
 
   it("creates a fresh sidecar client for a switched session and passes its new cwd", async () => {
@@ -45,7 +45,7 @@ describe("registered Pi activation lifecycle", () => {
     fake.switchSession("session-2", "/tmp/other-project");
     await fake.handlers.get("session_start")({}, fake.context());
     expect(first.close).toHaveBeenCalledTimes(1);
-    expect(fake.pi.registerTool).toHaveBeenCalledTimes(GPTQUEUE_TOOLS.length + RUNTIME_TOOL_NAMES.length);
+    expect(fake.pi.registerTool).toHaveBeenCalledTimes(GPTQUEUE_TOOLS.length + SHELL_TOOLS.length);
     expect(contexts).toHaveLength(2);
     expect(contexts[1]).toMatchObject({ cwd: "/tmp/other-project", sessionManager: expect.any(Object) });
     const bind = (second.callTool as any).mock.calls.find((call: any[]) => call[0]?.name === "bind_runtime");
