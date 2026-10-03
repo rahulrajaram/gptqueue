@@ -4,10 +4,11 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { Availability, Participant, RouteAdapter, RouteSpec } from "./qualification-types.js";
 import { startSdkParticipant } from "./qualification-pi.js";
+import { nodePrefixPath } from "./local-tools.js";
 
 export const piSdkQualificationRoute = "pi-sdk" as const;
 const repo = resolve(import.meta.dirname, "../..");
-const installed = "/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist";
+const installed = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist");
 type SdkOptions = Parameters<typeof startSdkParticipant>[0];
 type LaunchInput = Parameters<RouteAdapter["launch"]>[0];
 

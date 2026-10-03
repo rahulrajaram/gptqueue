@@ -68,7 +68,8 @@ correlation ids in payloads.
   launch never loses accepted work.
 - One wake lease per actor: concurrent sends coalesce onto a single launch.
 - Launch contracts are governed by the operator allowlist
-  (`.gptqueue/launch-allowlist.json`, v2 exact argv templates); dispatch
+  (`~/.config/gptqueue/launch-allowlist.json` or `GPTQUEUE_LAUNCH_ALLOWLIST`,
+  v2 exact argv templates); dispatch
   re-checks it fail-closed. Shells and interpreter inline-code flags are
   rejected regardless of the allowlist.
 - A launched runtime proves itself by registering under the actor's name —
@@ -105,12 +106,12 @@ db0 unconditionally. Vitest requires db15 before collecting tests. Never flush d
 
 ### Test runner environment boundary
 
-When running through Overwatch, put the Redis URL inside the executed command:
+Run vitest directly with an explicit Redis URL in the same command:
 
 ```sh
-overwatch run --profile npm_test --stream -- /usr/bin/env REDIS_URL=redis://127.0.0.1:6379/15 /absolute/path/to/node node_modules/vitest/vitest.mjs run
+REDIS_URL=redis://127.0.0.1:6379/15 node node_modules/vitest/vitest.mjs run
 ```
 
-Do not rely on the daemon inheriting environment variables from the caller.
+Do not rely on the shell inheriting environment variables from elsewhere;
 Vitest enforces db15 before test collection, and cleanup checks the actual
 Redis connection database. Local cleanup helpers must use the shared guard.

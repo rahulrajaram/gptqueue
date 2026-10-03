@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { readCodexAppserverHistory } from "./codex-appserver-history.js";
+import { homePath } from "./local-tools.js";
 
 describe("Codex app-server acceptance history", () => {
   it("falls back to the exact rollout and retains MCP arguments and results", async () => {
@@ -76,7 +77,7 @@ describe("Codex app-server acceptance history", () => {
   });
 
   it("reads the retained failed cross-model rollout with exact session metadata", async () => {
-    const path = "/home/rahul/.codex/archived_sessions/rollout-2026-09-12T17-34-52-01a0978b-6f90-7d80-90d2-ead886e09c5b.jsonl";
+    const path = homePath(".codex/archived_sessions/rollout-2026-09-12T17-34-52-01a0978b-6f90-7d80-90d2-ead886e09c5b.jsonl");
     if (!existsSync(path)) return;
     const threadId = "01a0978b-6f90-7d80-90d2-ead886e09c5b";
     const cwd = "/tmp/gptqueue-qualification-cross-model-qSJ5sY/codex/49022be8dfbc13d2/codex-appserver/sender/87dc614676c2a976";
@@ -95,7 +96,7 @@ describe("Codex app-server acceptance history", () => {
   });
 
   it("reads the retained successful Codex app-server rollout with native MCP payloads", async () => {
-    const path = "/home/rahul/.codex/archived_sessions/rollout-2026-09-12T16-59-21-01a0976a-e880-7270-b0ee-2b5c19d1f949.jsonl";
+    const path = homePath(".codex/archived_sessions/rollout-2026-09-12T16-59-21-01a0976a-e880-7270-b0ee-2b5c19d1f949.jsonl");
     if (!existsSync(path)) return;
     const threadId = "01a0976a-e880-7270-b0ee-2b5c19d1f949";
     const cwd = "/tmp/gptqueue-qualification-codex-appserver-fE7BTC/56cf98d932ca9244/codex-appserver/sender/70fed238cff30280";

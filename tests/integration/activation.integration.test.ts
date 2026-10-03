@@ -22,6 +22,7 @@ import { connectAgent, type Agent } from "../helpers/mcp-agent.js";
 import { WakeLeaseStore } from "../../src/core/wake-lease.js";
 import { reconcileWakeLease } from "../../src/mcp-server/tools/reconcile-wake-lease.js";
 import { SESSION_KEYS, WAKE_LEASE_KEYS, ACTOR_KEYS } from "../../src/core/keys.js";
+import { sessionTag } from "../../src/core/session-tag.js";
 
 // Per-file timeout override (does not touch the global vitest config). Several
 // wake/lease tests intentionally wait out short process lifetimes and TTL
@@ -359,10 +360,12 @@ describe("actor presence states (via actor_status)", () => {
 
     const status = await owner.call("actor_status", { actor_id: actorId });
     expect(status.data.presence).toBe("idle");
+    // actor_status is public: runtime ids carry the session's tag, never the bearer id.
     expect(status.data.runtime).toMatchObject({
-      session_id: owner.sessionId,
+      session_id: sessionTag(owner.sessionId),
       workload: "idle",
     });
+    expect(JSON.stringify(status.data)).not.toContain(owner.sessionId);
   });
 
   it("active: live session + outstanding unacked claim -> processing", async () => {
@@ -389,7 +392,7 @@ describe("actor presence states (via actor_status)", () => {
     const during = await owner.call("actor_status", { actor_id: actorId });
     expect(during.data.presence).toBe("active");
     expect(during.data.runtime).toMatchObject({
-      session_id: runtime.sessionId,
+      session_id: sessionTag(runtime.sessionId),
       workload: "processing",
     });
 
@@ -422,7 +425,7 @@ describe("actor presence states (via actor_status)", () => {
     const status = await owner.call("actor_status", { actor_id: actorId });
     expect(status.data.presence).toBe("idle"); // NOT starting
     expect(status.data.wake_lease).not.toBeNull(); // still observable, just not driving
-    expect(status.data.runtime.session_id).toBe(runtime.sessionId);
+    expect(status.data.runtime.session_id).toBe(sessionTag(runtime.sessionId));
   });
 });
 
@@ -667,7 +670,9 @@ describe("worktree custody vs actor presence (orthogonal planes)", () => {
     const custody = await runtime.call("custody_status", { worktree_path: ws });
     expect(custody.data.status).toBe("ok");
     expect(custody.data.record.state).toBe("held");
-    expect(custody.data.record.custodian.session_id).toBe(runtime.sessionId);
+    // custody_status is public: it carries the session's tag, never the bearer id.
+    expect(custody.data.record.custodian.session_id).toBe(sessionTag(runtime.sessionId));
+    expect(JSON.stringify(custody.data)).not.toContain(runtime.sessionId);
   });
 });
 

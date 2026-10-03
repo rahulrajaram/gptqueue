@@ -47,7 +47,8 @@ const invalidIdentity = (identity: OpenCodeSessionIdentity): Error =>
     `OpenCode session identity requires a non-empty sessionID and directory (sessionID=${JSON.stringify(identity.sessionID)})`
   );
 
-const validateIdentity = (
+/** The one OpenCode identity check; the backend uses it too. Returns a frozen copy. */
+export const validateIdentity = (
   identity: OpenCodeSessionIdentity
 ): OpenCodeSessionIdentity => {
   if (

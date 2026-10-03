@@ -8,6 +8,7 @@ import { readFileSync } from "fs";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { TaskClaimStore } from "../src/core/task-claim-store.js";
 import {
+  ACTOR_KEYS,
   CLAIM_KEYS,
   DLQ_KEYS,
   SESSION_KEYS,
@@ -92,6 +93,58 @@ describe("TaskClaimStore", () => {
     ...overrides,
   });
 
+  it("purgeActor removes one actor's claims, DLQ, streams and counters, and no one else's", async () => {
+    const globby = "purge*actor";
+    const other = "purge-other";
+    for (const who of [globby, other]) {
+      // Recovery only keeps counters for envelopes with a decodable id, and
+      // the purge deletes counters by those exact ids.
+      await pushTasks(redis, who, [JSON.stringify({ id: `${who}-m1` })]);
+      expectOk(await store.claim(claimReq({ actor_id: who })));
+      await redis.rpush(DLQ_KEYS.list(who), JSON.stringify({ id: `${who}-dead` }));
+      await redis.xadd(`gptq:inbox-events:${who}`, "*", "type", "task");
+      await redis.xadd(`gptq:inbox-trace:${who}`, "*", "stage", "task_claimed");
+      await redis.set(CLAIM_KEYS.recoverCount(who, `${who}-m1`), "2");
+    }
+    const otherClaims = await redis.zrange(CLAIM_KEYS.index(other), 0, -1);
+
+    expect(await store.purgeActor(globby)).toBe(1);
+
+    expect(await redis.exists(
+      CLAIM_KEYS.index(globby), DLQ_KEYS.list(globby), `gptq:inbox-events:${globby}`,
+      `gptq:inbox-trace:${globby}`, CLAIM_KEYS.recoverCount(globby, `${globby}-m1`)
+    )).toBe(0);
+    expect(await redis.hlen(CLAIM_KEYS.claims)).toBe(1);
+    // The "*" in the purged name must not glob-match the other actor's state.
+    expect(await redis.hget(CLAIM_KEYS.claims, otherClaims[0]!)).not.toBeNull();
+    expect(await redis.exists(
+      CLAIM_KEYS.index(other), DLQ_KEYS.list(other), `gptq:inbox-events:${other}`,
+      `gptq:inbox-trace:${other}`, CLAIM_KEYS.recoverCount(other, `${other}-m1`)
+    )).toBe(5);
+  });
+
+  // RF7: counter keys are gptq:rc:<actor>:<message_id> and plain names may
+  // contain ':', so a prefix scan for "a" also matches agent "a:b". The purge
+  // must delete only the purged actor's own counters.
+  it("purgeActor leaves the recovery counters of an agent whose name extends the purged one with ':' (RF7)", async () => {
+    const purged = "rf7-agent";
+    const extended = "rf7-agent:sub";
+    for (const who of [purged, extended]) {
+      await pushTasks(redis, who, [JSON.stringify({ id: "m-1" })]);
+      expectOk(await store.claim(claimReq({ actor_id: who })));
+      await redis.set(CLAIM_KEYS.recoverCount(who, "m-1"), "2");
+      await redis.rpush(DLQ_KEYS.list(who), JSON.stringify({ id: "m-2" }));
+      await redis.set(CLAIM_KEYS.recoverCount(who, "m-2"), "1");
+    }
+
+    expect(await store.purgeActor(purged)).toBe(1);
+
+    expect(await redis.exists(CLAIM_KEYS.recoverCount(purged, "m-1"), CLAIM_KEYS.recoverCount(purged, "m-2"))).toBe(0);
+    expect(await redis.get(CLAIM_KEYS.recoverCount(extended, "m-1"))).toBe("2");
+    expect(await redis.get(CLAIM_KEYS.recoverCount(extended, "m-2"))).toBe("1");
+    expect(await redis.zcard(CLAIM_KEYS.index(extended))).toBe(1);
+  });
+
   it("returns claim:null when the inbox is empty", async () => {
     const res = await store.claim(claimReq());
     expectOk(res);
@@ -140,11 +193,15 @@ describe("TaskClaimStore", () => {
     const res = await store.claim(claimReq());
     const ok = expectOk(res);
 
-    const own = await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime" });
+    const own = await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime", now: T0 });
     expect(own?.claim_id).toBe(ok.claim!.claim_id);
 
+    // The core never reads the wall clock: an injected time past expiry sees nothing.
+    const later = new Date(Date.parse(T0) + 3_600_000).toISOString();
+    expect(await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime", now: later })).toBeNull();
+
     // A different session never sees this runtime's claim.
-    const wrong = await store.activeClaimFor({ actor_id: actorId, session_id: "session-other" });
+    const wrong = await store.activeClaimFor({ actor_id: actorId, session_id: "session-other", now: T0 });
     expect(wrong).toBeNull();
   });
 
@@ -152,7 +209,7 @@ describe("TaskClaimStore", () => {
     await redis.zadd(CLAIM_KEYS.index(actorId), Date.now(), "junk-claim");
     await redis.hset(CLAIM_KEYS.claims, "junk-claim", "not-json{{{");
     expect(
-      await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime" })
+      await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime", now: T0 })
     ).toBeNull();
   });
 
@@ -195,7 +252,7 @@ describe("TaskClaimStore", () => {
     if (!again.ok) expect(again.error.code).toBe("unknown_claim");
   });
 
-  it("a foreign session acknowledge is not_claim_owner naming the owning session", async () => {
+  it("a foreign session acknowledge is not_claim_owner without revealing the owning session", async () => {
     await pushTasks(redis, actorId, ["x1"]);
     const claimed = expectOk(await store.claim(claimReq()));
     const claimId = claimed.claim!.claim_id;
@@ -204,7 +261,7 @@ describe("TaskClaimStore", () => {
     expect(foreign.ok).toBe(false);
     if (!foreign.ok) {
       expect(foreign.error.code).toBe("not_claim_owner");
-      expect(foreign.error.message).toContain("session-runtime");
+      expect(foreign.error.message).not.toContain("session-runtime");
     }
     // The claim is untouched by a failed foreign ack.
     expect(await redis.hget(CLAIM_KEYS.claims, claimId)).not.toBeNull();
@@ -348,7 +405,7 @@ describe("TaskClaimStore", () => {
       expect(stored.expires_at).toBe(ok.expires_at);
     });
 
-    it("a foreign session renewal is not_claim_owner naming the owning session", async () => {
+    it("a foreign session renewal is not_claim_owner without revealing the owning session", async () => {
       await pushTasks(redis, actorId, ["x1"]);
       const claimed = expectOk(await store.claim(claimReq()));
       const claimId = claimed.claim!.claim_id;
@@ -359,7 +416,7 @@ describe("TaskClaimStore", () => {
       expect(foreign.ok).toBe(false);
       if (!foreign.ok) {
         expect(foreign.error.code).toBe("not_claim_owner");
-        expect(foreign.error.message).toContain("session-runtime");
+        expect(foreign.error.message).not.toContain("session-runtime");
       }
       // A failed foreign renewal leaves the claim untouched.
       const stored = JSON.parse(
@@ -724,6 +781,33 @@ describe("claim_tasks concurrency enforcement (directory max_concurrency)", () =
     }
   });
 
+  it("an unreadable directory record fails closed instead of claiming without its ceiling", async () => {
+    await registerConcActor(1);
+    const runtime = new RedisClient(null, TEST_REDIS_URL);
+    try {
+      const reg = await registerAgent(runtime, registerAgentSchema.parse({ name: actorId, role: "both", description: "runtime" }));
+      const session_id = (reg.structuredContent as { session_id: string }).session_id;
+      await pushTasks(redis, actorId, ["c1", "c2"]);
+      const first = await claimTasks(runtime, claimTasksSchema.parse({ session_id, max_batch: 1, ttl_seconds: 300 }));
+      expect(first.structuredContent).toMatchObject({ status: "ok", claimed: true });
+
+      // The stored profile loses a required field: admission now reads it as
+      // store_corrupt, so its max_concurrency ceiling is unavailable.
+      const stored = JSON.parse((await redis.hget(ACTOR_KEYS.profiles, actorId))!);
+      delete stored.profile.alias;
+      await redis.hset(ACTOR_KEYS.profiles, actorId, JSON.stringify(stored));
+
+      const second = await claimTasks(runtime, claimTasksSchema.parse({ session_id, max_batch: 1, ttl_seconds: 300 }));
+      expect(second.isError).toBe(true);
+      expect(second.structuredContent).toMatchObject({ status: "error", error: { code: "store_corrupt" } });
+      // Nothing beyond the ceiling was claimed: the second task is still queued.
+      expect(await redis.zcard(CLAIM_KEYS.index(actorId))).toBe(1);
+      expect(await redis.llen(SESSION_KEYS.queue(actorId))).toBe(1);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
   it("plain agent (no directory record) claims without any ceiling", async () => {
     const plain = new RedisClient(null, TEST_REDIS_URL);
     try {
@@ -1042,6 +1126,130 @@ describe("dead-letter queue (tranche 2)", () => {
     expect(r).toBe(1);
     expect(d).toBe(0);
     expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(0);
+  });
+
+  it("requeue moves only the matching envelope and skips undecodable or non-string ids", async () => {
+    const target = JSON.stringify({ id: "m-target", type: "task", payload: {} });
+    const others = ["not json", JSON.stringify({ id: 7 }), JSON.stringify("m-target"), JSON.stringify({ id: "m-other" })];
+    await redis.rpush(DLQ_KEYS.list(actorId), others[0]!, target, ...others.slice(1));
+    await redis.set(CLAIM_KEYS.recoverCount(actorId, "m-target"), "3");
+
+    const numeric = await store.requeue({ actor_id: actorId, message_id: "7" });
+    expect(numeric.ok).toBe(false);
+    expect(expectOk(await store.requeue({ actor_id: actorId, message_id: "m-target" })).requeued).toBe(1);
+
+    expect(await redis.lrange(DLQ_KEYS.list(actorId), 0, -1)).toEqual(others);
+    expect(await redis.lrange(SESSION_KEYS.queue(actorId), 0, -1)).toEqual([target]);
+    expect(await redis.get(CLAIM_KEYS.recoverCount(actorId, "m-target"))).toBeNull();
+  });
+
+  it("requeue onto a wrong-typed inbox fails without losing the DLQ entry or its counter", async () => {
+    const target = JSON.stringify({ id: "m-wrongtype", type: "task", payload: {} });
+    await redis.rpush(DLQ_KEYS.list(actorId), target);
+    await redis.set(CLAIM_KEYS.recoverCount(actorId, "m-wrongtype"), "4");
+    // The inbox key holds a string, so RPUSH raises WRONGTYPE.
+    await redis.set(SESSION_KEYS.queue(actorId), "not-a-list");
+
+    const outcome = await store
+      .requeue({ actor_id: actorId, message_id: "m-wrongtype" })
+      .then((r) => r.ok, () => false);
+    expect(outcome).toBe(false);
+
+    expect(await redis.lrange(DLQ_KEYS.list(actorId), 0, -1)).toEqual([target]);
+    expect(await redis.get(CLAIM_KEYS.recoverCount(actorId, "m-wrongtype"))).toBe("4");
+    expect(await redis.get(SESSION_KEYS.queue(actorId))).toBe("not-a-list");
+  });
+
+  // FIX1: recovery used to delete the claim before its destination writes,
+  // so a wrong-typed destination lost the claim's tasks. It now validates
+  // every destination first and changes nothing when one is wrong.
+  const expectClaimKept = async (claimId: string, task: string) => {
+    const kept = await redis.hget(CLAIM_KEYS.claims, claimId);
+    expect(kept).not.toBeNull();
+    expect(JSON.parse(kept!).tasks).toEqual([task]);
+    expect(await redis.zscore(CLAIM_KEYS.index(actorId), claimId)).not.toBeNull();
+  };
+
+  it("recovery onto a wrong-typed inbox is a typed store_corrupt that keeps the claim", async () => {
+    const task = msgTask("m-inbox");
+    await pushTasks(redis, actorId, [task]);
+    const claimed = expectOk(await store.claim(claimDLQ()));
+    await redis.set(SESSION_KEYS.queue(actorId), "not-a-list");
+
+    const outcome = await store.recoverExpired({ actor_id: actorId, now: "2030-01-01T00:00:02.000Z" });
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected a typed failure");
+    expect(outcome.error.code).toBe("store_corrupt");
+    await expectClaimKept(claimed.claim!.claim_id, task);
+    expect(await redis.get(SESSION_KEYS.queue(actorId))).toBe("not-a-list");
+    expect(await redis.exists(CLAIM_KEYS.recoverCount(actorId, "m-inbox"))).toBe(0);
+  });
+
+  it("recovery into a wrong-typed DLQ changes nothing and keeps the claim", async () => {
+    const task = msgTask("m-dlq");
+    await pushTasks(redis, actorId, [task]);
+    const claimed = expectOk(await store.claim(claimDLQ()));
+    await redis.set(DLQ_KEYS.list(actorId), "not-a-list");
+
+    // Cap 0: this recovery would dead-letter the task.
+    const result = await evalRecovery("2030-01-01T00:00:02.000Z", 0, 1000).then(
+      (r) => r,
+      (e: Error) => e
+    );
+
+    expect(result).toEqual([-1, "dlq"]);
+    await expectClaimKept(claimed.claim!.claim_id, task);
+    expect(await redis.get(DLQ_KEYS.list(actorId))).toBe("not-a-list");
+    expect(await redis.exists(CLAIM_KEYS.recoverCount(actorId, "m-dlq"))).toBe(0);
+  });
+
+  // L1: INCR accepts only a canonical int64 below its maximum, so anything
+  // else (or a value one INCR would overflow) is refused up front too.
+  const corruptCounters = [
+    "list",
+    "not-a-number",
+    "9223372036854775807", // int64 max: INCR overflows
+    "9223372036854775808", // out of int64 range
+    "1000000000000000000", // 19 digits
+    "+5",
+    "05",
+    " 5",
+    "-0",
+  ] as const;
+
+  it("recovery with a wrong-typed, non-canonical or overflowing counter changes nothing and keeps the claim", async () => {
+    for (const corrupt of corruptCounters) {
+      await flushTestKeys(redis);
+      const id = `m-counter-${corruptCounters.indexOf(corrupt)}`;
+      const task = msgTask(id);
+      await pushTasks(redis, actorId, [task]);
+      const claimed = expectOk(await store.claim(claimDLQ()));
+      const counter = CLAIM_KEYS.recoverCount(actorId, id);
+      if (corrupt === "list") await redis.rpush(counter, "x");
+      else await redis.set(counter, corrupt);
+
+      const result = await evalRecovery("2030-01-01T00:00:02.000Z", 5, 1000).then(
+        (r) => r,
+        (e: Error) => e
+      );
+
+      expect(result, `counter ${JSON.stringify(corrupt)}`).toEqual([-1, "counter"]);
+      await expectClaimKept(claimed.claim!.claim_id, task);
+      expect(await inboxDepth(redis, actorId)).toBe(0);
+    }
+  });
+
+  it("recovery still accepts canonical counters up to 18 digits, including negatives", async () => {
+    for (const value of ["0", "-3", "999999999999999998"]) {
+      await flushTestKeys(redis);
+      await pushTasks(redis, actorId, [msgTask("m-ok")]);
+      expectOk(await store.claim(claimDLQ()));
+      await redis.set(CLAIM_KEYS.recoverCount(actorId, "m-ok"), value);
+      // Cap 5: small values re-queue; the 18-digit value exceeds it and dead-letters.
+      const [recovered, deadlettered] = await evalRecovery("2030-01-01T00:00:02.000Z", 5, 1000);
+      expect(recovered + deadlettered, `counter ${value}`).toBe(1);
+    }
   });
 
   it("requeue of a missing message is a typed dlq_entry_not_found", async () => {

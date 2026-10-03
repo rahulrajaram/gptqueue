@@ -6,7 +6,10 @@ import { flushTestKeys } from "./helpers/redis-test-utils.js";
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
 
-describe("Cross-process registration bug (NXT-002)", () => {
+// Contract (NXT-002 resolution): registration is session-scoped. A fresh
+// process sees registered agents but cannot act as one until it presents
+// the session_id (reconnectSession / session-scoped tools) or re-registers.
+describe("cross-process identity is session-scoped (NXT-002)", () => {
   let cleanup: Redis;
 
   beforeEach(async () => {
@@ -19,7 +22,7 @@ describe("Cross-process registration bug (NXT-002)", () => {
     await cleanup.quit();
   });
 
-  it("process B cannot operate on agent registered by process A", async () => {
+  it("a fresh process sees the agent but must present its session to act as it", async () => {
     // Process A registers the agent
     const processA = new RedisClient(null, TEST_REDIS_URL);
     await processA.register("both", "shared-agent", "registered by A");
@@ -35,14 +38,13 @@ describe("Cross-process registration bug (NXT-002)", () => {
     const agentsFromB = await processB.listAgents();
     expect(agentsFromB.find((a) => a.name === "shared-agent")).toBeDefined();
 
-    // BUG: Process B cannot send or receive because _agentName is null
+    // Without the session it has no identity of its own to act as.
     expect(processB.registered).toBe(false);
     expect(() => processB.requireRegistered()).toThrow(
       "Agent not registered"
     );
 
-    // Process B cannot receive messages meant for shared-agent
-    // even though the agent is demonstrably registered in Redis
+    // Messages for shared-agent are not readable by an unauthenticated process.
     await processA.sendMessage({
       id: "cross-1",
       from: "shared-agent",
@@ -52,19 +54,16 @@ describe("Cross-process registration bug (NXT-002)", () => {
       payload: { content: "self-ping" },
     });
 
-    // Process B should be able to receive this -- but it cannot
-    // because requireRegistered() checks in-memory _agentName, not Redis
     expect(() => processB.requireRegistered()).toThrow();
 
     await processA.shutdown();
     await processB.shutdown();
   });
 
-  it("re-registration in process B works but is a workaround, not a fix", async () => {
+  it("re-registering under the same name in process B also gives access", async () => {
     const processA = new RedisClient(null, TEST_REDIS_URL);
     await processA.register("both", "workaround-agent", "registered by A");
 
-    // Process B must re-register to work -- this is the workaround
     const processB = new RedisClient(null, TEST_REDIS_URL);
     await processB.register("both", "workaround-agent", "re-registered by B");
 
@@ -82,8 +81,7 @@ describe("Cross-process registration bug (NXT-002)", () => {
     const depth = await processB.getQueueDepth();
     expect(depth).toBe(1);
 
-    // Now B can receive -- but this required a full re-registration
-    // which overwrites metadata and restarts heartbeat
+    // Re-registration replaces metadata and starts a new session.
     const msg = await processB.receiveMessage(2);
     expect(msg).not.toBeNull();
     expect(msg!.payload.content).toBe("message from A");

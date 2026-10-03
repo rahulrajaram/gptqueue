@@ -15,8 +15,7 @@
 
 import { Redis } from "ioredis";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { ACTOR_KEYS } from "./keys.js";
 import {
   admitActorProfile,
@@ -24,9 +23,8 @@ import {
   type LaunchContractReadiness,
 } from "./actor-presence.js";
 import { evaluateLaunchPolicy } from "./launch-policy.js";
+import { LUA_DIR, describeStored, type StoredRead as StoredReadOf } from "./stored-read.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LUA_DIR = join(__dirname, "..", "mcp-server", "lua");
 
 /**
  * How a runtime is launched for this actor. The command is spawned WITHOUT a
@@ -104,6 +102,45 @@ const isValidLaunchContract = (
   return launch !== null && isWellFormedLaunch(launch);
 };
 
+/**
+ * Read admission for a stored launch: null, or a contract whose command, args
+ * and cwd have the types that readiness and dispatch dereference. Whether a
+ * null or empty-command launch is runnable is the policy's question, answered
+ * by contractReadiness(); a legacy wake_if_offline record without one stays
+ * admissible and classifies as unavailable.
+ */
+const isStoredLaunch = (launch: unknown): launch is RuntimeLaunchContract | null => {
+  if (launch === null) return true;
+  if (typeof launch !== "object" || Array.isArray(launch)) return false;
+  const { command, args, cwd } = launch as Record<string, unknown>;
+  return (
+    typeof command === "string" &&
+    Array.isArray(args) &&
+    args.every((arg) => typeof arg === "string") &&
+    (cwd === undefined || typeof cwd === "string")
+  );
+};
+
+/**
+ * The first part of a parsed stored record that fails read admission, or null
+ * when the record is admissible. Names a field, never its content.
+ */
+const storedActorFailure = (parsed: unknown): string | null => {
+  if (typeof parsed !== "object" || parsed === null) return "(root)";
+  const { profile, registered_by, launch } = parsed as Record<string, unknown>;
+  if (typeof profile !== "object" || profile === null) return "profile";
+  if (typeof registered_by !== "string") return "registered_by";
+  if (!isStoredLaunch(launch)) return "launch";
+  // The stored profile must pass the same admission as a new one; a
+  // malformed shape may throw inside it.
+  try {
+    const admission = admitActorProfile(profile as DurableActorProfile);
+    return admission.ok ? null : `profile (${admission.error.code})`;
+  } catch {
+    return "profile";
+  }
+};
+
 /** Freeze a launch contract (and its args) for publication in a record. */
 const freezeLaunch = (
   launch: RuntimeLaunchContract | null
@@ -116,13 +153,7 @@ const freezeLaunch = (
         ...(launch.cwd === undefined ? {} : { cwd: launch.cwd }),
       });
 
-/** Save a short, bounded excerpt of a raw stored value for diagnostics. */
-const excerptOf = (raw: string): string =>
-  raw.length <= 80 ? raw : `${raw.slice(0, 80)}...`;
-
-type StoredRead =
-  | { readonly kind: "record"; readonly record: ActorDirectoryRecord | null }
-  | { readonly kind: "corrupt"; readonly excerpt: string };
+type StoredRead = StoredReadOf<ActorDirectoryRecord>;
 
 export class ActorDirectory {
   private readonly redis: Redis;
@@ -187,13 +218,13 @@ export class ActorDirectory {
     // before falling through to a derived domain error.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const stored = await this.readRecord(profile.actor_id);
-      if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
+      if (stored.kind === "corrupt") return this.corrupt(stored.diagnostic);
       const existing = stored.kind === "record" ? stored.record : null;
 
       if (existing !== null && existing.registered_by !== input.registered_by) {
         return fail(
           "actor_owned_elsewhere",
-          `actor '${profile.actor_id}' is owned by session '${existing.registered_by}'`
+          `actor '${profile.actor_id}' is owned by another session`
         );
       }
 
@@ -208,12 +239,12 @@ export class ActorDirectory {
 
     // Retries exhausted: derive the domain error from the current stored state.
     const stored = await this.readRecord(profile.actor_id);
-    if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
+    if (stored.kind === "corrupt") return this.corrupt(stored.diagnostic);
     const current = stored.kind === "record" ? stored.record : null;
     if (current !== null && current.registered_by !== input.registered_by) {
       return fail(
         "actor_owned_elsewhere",
-        `actor '${profile.actor_id}' is owned by session '${current.registered_by}'`
+        `actor '${profile.actor_id}' is owned by another session`
       );
     }
     return fail(
@@ -225,7 +256,7 @@ export class ActorDirectory {
   /** Read one actor's directory record (null when not registered). */
   async get(actorId: string): Promise<ActorGetResult> {
     const stored = await this.readRecord(actorId);
-    if (stored.kind === "corrupt") return this.corrupt(stored.excerpt);
+    if (stored.kind === "corrupt") return this.corrupt(stored.diagnostic);
     return {
       ok: true,
       record: stored.kind === "record" ? stored.record : null,
@@ -238,7 +269,7 @@ export class ActorDirectory {
     const records: ActorDirectoryRecord[] = [];
     for (const [actorId, raw] of Object.entries(all)) {
       const parsed = this.parseStored(raw, actorId);
-      if (parsed.kind === "corrupt") return this.corrupt(parsed.excerpt);
+      if (parsed.kind === "corrupt") return this.corrupt(parsed.diagnostic);
       // hgetall only yields present fields, so a stored record is never null here.
       if (parsed.record === null) continue;
       records.push(parsed.record);
@@ -262,24 +293,19 @@ export class ActorDirectory {
   }
 
   private parseStored(raw: string, actorId: string): StoredRead {
+    let parsed: unknown;
     try {
-      const parsed: unknown = JSON.parse(raw);
-      if (
-        typeof parsed === "object" &&
-        parsed !== null &&
-        typeof (parsed as { profile?: unknown }).profile === "object" &&
-        (parsed as { profile: unknown }).profile !== null &&
-        typeof (parsed as { registered_by?: unknown }).registered_by === "string"
-      ) {
-        return { kind: "record", record: parsed as ActorDirectoryRecord };
-      }
+      parsed = JSON.parse(raw);
     } catch {
-      // fall through to corrupt below
+      return { kind: "corrupt", diagnostic: `${actorId}: ${describeStored(raw, "JSON")}` };
     }
-    return { kind: "corrupt", excerpt: `${actorId}=${excerptOf(raw)}` };
+    const failing = storedActorFailure(parsed);
+    return failing === null
+      ? { kind: "record", record: parsed as ActorDirectoryRecord }
+      : { kind: "corrupt", diagnostic: `${actorId}: ${describeStored(raw, failing)}` };
   }
 
-  private corrupt(excerpt: string): Readonly<{
+  private corrupt(diagnostic: string): Readonly<{
     ok: false;
     error: ActorDirectoryError;
   }> {
@@ -287,7 +313,7 @@ export class ActorDirectory {
       ok: false,
       error: Object.freeze({
         code: "store_corrupt" as const,
-        message: `stored actor directory record is corrupt (${excerpt}); refusing to operate on it`,
+        message: `stored actor directory record is corrupt (${diagnostic}); refusing to operate on it`,
       }),
     });
   }

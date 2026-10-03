@@ -13,6 +13,7 @@ import { assertIdleObservation, assertSetupTurnCompleted } from "./qualification
 import { collectIdleReplyContinuation } from "./qualification-idle-reply.js";
 import { sanitizeEvidence } from "./public-evidence.js";
 import type { GenericCallRecord, GenericParticipant } from "./qualification-types.js";
+import { CODEX_BIN } from "./local-tools.js";
 
 const resultEnabled = process.env.GPTQUEUE_QUALIFICATION_IDLE_RESULT === "1";
 const errorEnabled = process.env.GPTQUEUE_QUALIFICATION_IDLE_ERROR === "1";
@@ -47,7 +48,7 @@ const sourceHashes = async (): Promise<Json> => {
   const trees = await Promise.all(["src", "dist", "tests/acceptance"].map(async prefix => (await readdir(join(repo, prefix), { recursive: true })).filter(path => /\.(?:ts|js|json)$/u.test(path)).map(path => `${prefix}/${path}`)));
   const labels = [...new Set([...sourceLabels, ...trees.flat()])].sort();
   const files: Record<string, string> = Object.fromEntries(labels.map(file => [file, join(repo, file)]));
-  files.node_executable = process.execPath; files.codex_executable = process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex";
+  files.node_executable = process.execPath; files.codex_executable = process.env.CODEX_BIN ?? CODEX_BIN;
   return Object.fromEntries(await Promise.all(Object.entries(files).map(async ([label, path]) => [label, await digestFile(path)])));
 };
 
@@ -69,14 +70,14 @@ describe("native Codex idle correlated reply qualification", () => {
       receipt.runner_pid = process.pid; receipt.started_at = new Date().toISOString(); receipt.source_hashes_before = await sourceHashes(); const sourceRevision = hash(Buffer.from(JSON.stringify(receipt.source_hashes_before)));
       receipt.row_id = `codex-appserver:automatic:idle-${replyType}`; receipt.constraints = "automatic/private-MCP-only; not initiative or installation-wide activation"; console.info(`[qualification-idle-reply] receipt=${join(artifactDir, "receipt.json")} run_id=${runId} runner_pid=${process.pid}`); await persist("started", { pid: process.pid });
       redis = await startOwnedRedis(); redisTrace = new Redis(redis.url); workspace = await mkdtemp(join(tmpdir(), "gptqueue-idle-reply-native-")); receipt.redis = { port: Number(new URL(redis.url).port), database: 15, owned_process: true };
-      codex = createCodexAdapters({ workspaceRoot: workspace, codexBin: process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex", model: "gpt-5.6-luna" }); generic = createGenericAdapters({ repo });
+      codex = createCodexAdapters({ workspaceRoot: workspace, codexBin: process.env.CODEX_BIN ?? CODEX_BIN, model: "gpt-5.6-luna" }); generic = createGenericAdapters({ repo });
       const nativeAdapter = codex.adapters.find(({ spec }) => spec.id === "codex-appserver"), genericAdapter = generic.adapters.find(({ spec }) => spec.id === "generic-stdio");
       if (!nativeAdapter || !genericAdapter) throw new Error("required adapters unavailable");
       const signal = AbortSignal.timeout(420_000);
       if ((await nativeAdapter.preflight(signal)).kind !== "available" || (await genericAdapter.preflight(signal)).kind !== "available") throw new Error("required adapter unavailable");
       peer = await genericAdapter.launch({ role: "sender", pairId: runId, nonce: `peer-${runId}`, redisUrl: redis.url }, signal) as GenericParticipant;
       model = await nativeAdapter.launch({ role: "receiver", pairId: runId, nonce: `model-${runId}`, redisUrl: redis.url }, signal) as CodexParticipant;
-      receipt.identities = { model: model.identity, peer: peer.identity }; receipt.model_provenance = model.provenance; receipt.executable_paths = { node: process.execPath, codex: process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex" }; await persist("launched", receipt.identities);
+      receipt.identities = { model: model.identity, peer: peer.identity }; receipt.model_provenance = model.provenance; receipt.executable_paths = { node: process.execPath, codex: process.env.CODEX_BIN ?? CODEX_BIN }; await persist("launched", receipt.identities);
       const controllerEvents: Array<{ kind: string; at: number; sequence: number; prompt?: string }> = []; let eventSequence = 0;
       const controllerPrompt = async (prompt: string): Promise<unknown> => { const event = { kind: "controller_prompt", at: Date.now(), sequence: ++eventSequence, prompt }; controllerEvents.push(event); await persist("controller-prompt", event); return model!.prompt(prompt, signal); };
       await peer.call("list_agents", {}, signal);

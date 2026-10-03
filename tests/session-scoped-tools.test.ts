@@ -1,3 +1,4 @@
+import { ACTOR_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
@@ -119,6 +120,24 @@ describe("Session-scoped tools across fresh clients", () => {
     expect(await receiver.getQueueDepth()).toBe(1);
 
     await sender.shutdown();
+    await receiver.shutdown();
+  });
+
+  it("fails closed on a corrupt directory record instead of popping the inbox", async () => {
+    const actorName = "corrupt-dir-receiver";
+    const receiver = new RedisClient(null, TEST_REDIS_URL);
+    await receiver.register("consumer", actorName, "record will be corrupt");
+    const raw = receiver.adapterConnection;
+    await raw.hset(ACTOR_KEYS.profiles, actorName, JSON.stringify({ profile: { actor_id: actorName }, registered_by: "someone" }));
+    await raw.rpush(SESSION_KEYS.queue(actorName), JSON.stringify({ id: "keep-me", from: "x", to: actorName, type: "task", timestamp: new Date().toISOString(), payload: { content: "c" } }));
+
+    const result = await receiveMessage(receiver, receiveMessageSchema.parse({ timeout: 1 }));
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ status: "error", error: { code: "store_corrupt" } });
+    expect(await raw.llen(SESSION_KEYS.queue(actorName))).toBe(1);
+
+    await raw.hdel(ACTOR_KEYS.profiles, actorName);
+    await receiver.unregister();
     await receiver.shutdown();
   });
 

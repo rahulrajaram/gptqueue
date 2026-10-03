@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { collectGenericExchange, collectNativeExchange, extractGenericTraces, extractNativeTraces, extractOpenCodeAcpTraces, extractOpenCodeTraces, type GenericActorHistory } from "./qualification-evidence.js";
 import type { GenericCallRecord, ParticipantIdentity, RawEvidenceRef } from "./qualification-types.js";
+import { requireRetained } from "./retained-evidence.js";
 
 const sender: ParticipantIdentity = { participantId: "a", route: "generic-stdio", hostRuntimeId: "runtime-a", agent: "a", cwdHash: "c-a", profileHash: "p-a", epochHash: "e-a" };
 const receiver: ParticipantIdentity = { participantId: "b", route: "generic-stdio", hostRuntimeId: "runtime-b", agent: "b", cwdHash: "c-b", profileHash: "p-b", epochHash: "e-b" };
@@ -33,8 +34,9 @@ const collectedInput = () => {
 };
 
 describe("qualification evidence collector", () => {
-  it("accepts retained sanitized generic history as an offline source fixture", () => {
+  it("accepts retained sanitized generic history as an offline source fixture", (ctx) => {
     const path = join(process.cwd(), ".gptqueue/repair-qualification/20260912/generic-qualification/52c5a060-62d3-4675-af88-d8194b7ac381/history.json");
+    requireRetained(ctx, path);
     const serialized = readFileSync(path, "utf8");
     const fixture = JSON.parse(serialized) as readonly Readonly<{ participant: ParticipantIdentity; calls: readonly GenericCallRecord[] }>[];
     const participant = fixture[0];
@@ -127,8 +129,9 @@ describe("qualification evidence collector", () => {
     expect(() => extractNativeTraces(history, actor, raw)).toThrow(/binding/);
   });
 
-  it("reads the actual retained headless control exchange without inventing activation readiness", () => {
+  it("reads the actual retained headless control exchange without inventing activation readiness", (ctx) => {
     const path = join(process.cwd(), ".gptqueue/repair-qualification/20260912/codex-headless/2ee00dd7-702c-45c9-a5c9-ff7022ecfef9/receipt-sanitized.json");
+    requireRetained(ctx, path);
     const receipt = JSON.parse(readFileSync(path, "utf8")) as { identity: ParticipantIdentity; phases: { label: string; value: unknown }[] };
     const traces = extractNativeTraces(receipt.phases.find(phase => phase.label === "final-history")!.value, receipt.identity, raw);
     expect(traces.map(trace => trace.name)).toEqual(["get_runtime_status", "receive_message", "send_message"]);
@@ -137,8 +140,9 @@ describe("qualification evidence collector", () => {
     expect(traces[2]?.input).toMatchObject({ type: "result", in_reply_to: "a93dc981-ede7-4d81-b4b7-16b56342e5ba", content: "HEADLESS_CONTROL_READY" });
   });
 
-  it("normalizes retained Codex and Pi native histories with exact runtime binding", () => {
+  it("normalizes retained Codex and Pi native histories with exact runtime binding", (ctx) => {
     const codexPath = join(process.cwd(), ".gptqueue/repair-qualification/20260912/qualification-codex-appserver/3dcef4d3-5220-43f2-8c11-c9b5b836540f/history-sender-sanitized.json");
+    requireRetained(ctx, codexPath, join(process.cwd(), ".gptqueue/repair-qualification/20260912/qualification-pi-rpc/feb7ee51-3bd8-4a03-9b44-e25a7940f35a/history-sender-sanitized.json"));
     const codexHistory = JSON.parse(readFileSync(codexPath, "utf8")) as unknown;
     const codexActor: ParticipantIdentity = { ...sender, agent: "gptqueue-shell-codex-70fed238cff30280-76bea006-dac0-4c63-b2d0-8bb4409baeb7", hostRuntimeId: "01a0976a-e880-7270-b0ee-2b5c19d1f949" };
     const codexTraces = extractNativeTraces(codexHistory, codexActor, raw);
@@ -294,8 +298,9 @@ describe("qualification evidence collector", () => {
     expect(() => collectNativeExchange({ sender: { actor: sender, traces: failedRuntime }, receiver: { actor: receiver, traces: [] }, nonce: "n", requestContent: "qualification n: calculate 2+3", expectedReplyContent: "answer n: 5" })).toThrow(/actor\/runtime binding/);
   });
 
-  it("re-adjudicates the retained recovered exchange after a failed wrong-recipient attempt", () => {
+  it("re-adjudicates the retained recovered exchange after a failed wrong-recipient attempt", (ctx) => {
     const base = join(process.cwd(), ".gptqueue/repair-qualification/20260912/qualification-cross-model/8a903b8f-0638-46d6-b44a-269dfccad35a");
+    requireRetained(ctx, join(base, "history-sender-failure-sanitized.json"), join(base, "history-receiver-failure-sanitized.json"));
     const codexHistory = JSON.parse(readFileSync(join(base, "history-sender-failure-sanitized.json"), "utf8")) as unknown;
     const piHistory = JSON.parse(readFileSync(join(base, "history-receiver-failure-sanitized.json"), "utf8")) as unknown;
     const codexActor: ParticipantIdentity = { ...sender, route: "codex-appserver", participantId: "cross-codex", agent: "gptqueue-shell-codex-77a8d8056fe5fb7b-fd934557-0b01-4c10-9592-290bddc88bce", hostRuntimeId: "01a09799-fd52-7370-b67f-8379aea29dd3" };
@@ -315,8 +320,9 @@ describe("qualification evidence collector", () => {
     expect(() => collectNativeExchange({ sender: { actor: codexActor, traces: senderTraces }, receiver: { actor: wrongActor, traces: receiverTraces }, nonce, requestContent, expectedReplyContent })).toThrow(/actor\/runtime binding/);
   });
 
-  it("normalizes retained OpenCode SDK parent and child streams without crossing the fork boundary", () => {
+  it("normalizes retained OpenCode SDK parent and child streams without crossing the fork boundary", (ctx) => {
     const path = join(process.cwd(), ".gptqueue/repair-qualification/20260912/opencode-repair/1134a06c-8ad6-49ec-8797-195c8e1a1d67/receipt-sanitized.json");
+    requireRetained(ctx, path);
     const receipt = JSON.parse(readFileSync(path, "utf8")) as Readonly<{ native_tool_history: Readonly<{ parent: readonly unknown[]; child: readonly unknown[] }> }>;
     const parentActor: ParticipantIdentity = { ...sender, route: "opencode-run", participantId: "opencode-parent", agent: "gptqueue-opencode-ses_f68db9944ffeMp3B2x61QcfhAH", hostRuntimeId: "ses_f68db9944ffeMp3B2x61QcfhAH" };
     const childActor: ParticipantIdentity = { ...receiver, route: "opencode-native-task", participantId: "opencode-child", agent: "gptqueue-opencode-ses_f68db6a35ffegDFtJfLBOMahE2", hostRuntimeId: "ses_f68db6a35ffegDFtJfLBOMahE2" };
@@ -333,8 +339,9 @@ describe("qualification evidence collector", () => {
     expect(combinedForChild.some((trace) => trace.name === "get_runtime_status" && trace.runtimeBound === true)).toBe(true);
   });
 
-  it("normalizes retained OpenCode ACP tool update notifications", () => {
+  it("normalizes retained OpenCode ACP tool update notifications", (ctx) => {
     const path = join(process.cwd(), ".gptqueue/repair-qualification/20260912/opencode-repair/opencode-acp-conformance-2026-09-12T21-22-29-442Z-1b57818b-c19d-4705-8332-0e253f86686e/receipt.json");
+    requireRetained(ctx, path);
     const receipt = JSON.parse(readFileSync(path, "utf8")) as Readonly<{ evidence: Readonly<{ history: readonly unknown[] }>; identity: ParticipantIdentity }>;
     const traces = extractOpenCodeAcpTraces(receipt.evidence.history, receipt.identity, raw);
     expect(traces).toHaveLength(1);

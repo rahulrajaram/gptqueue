@@ -11,9 +11,10 @@ import * as pty from 'node-pty';
 import { CodexSocketClient } from '../../src/registered-shell/codex-socket.js';
 import { startThread, readThread, toolCalls } from './codex-support.js';
 import { appConfig, repo } from "./codex-support.js";
+import { CODEX_BIN } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_ACCEPTANCE_CODEX_VARIANTS === "1";
-const codex = process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex";
+const codex = process.env.CODEX_BIN ?? CODEX_BIN;
 const timeout = 180_000;
 vi.setConfig({ testTimeout: timeout * 5, hookTimeout: 30_000 });
 

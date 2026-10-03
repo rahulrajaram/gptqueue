@@ -8,8 +8,10 @@ import { SESSION_KEYS } from "../core/keys.js";
  *
  * Emits "message" with the queue depth whenever a new message arrives.
  *
- * Requires Redis to have keyspace notifications enabled for list events:
- *   CONFIG SET notify-keyspace-events Kl
+ * Requires keyspace notifications for list events (flags `K` and `l`). The
+ * watcher adds any missing flags to the server's existing
+ * `notify-keyspace-events` value instead of replacing it, since other clients
+ * may depend on the flags already set.
  *
  * Falls back to LLEN polling if keyspace notifications are unavailable.
  */
@@ -33,11 +35,23 @@ export class RedisWatcher extends EventEmitter {
 
     // Try to enable keyspace notifications and use pub/sub
     try {
-      await this.redis.config("SET", "notify-keyspace-events", "Kl");
+      await this.ensureListKeyspaceEvents();
       await this.startKeyspaceWatch(queueKey);
     } catch {
       // Keyspace notifications unavailable (e.g., managed Redis), fall back to polling
-      await this.startPolling(queueKey);
+      void this.startPolling(queueKey);
+    }
+  }
+
+  /** Add the `K` and `l` flags to the server's current notify-keyspace-events. */
+  private async ensureListKeyspaceEvents(): Promise<void> {
+    const [, current = ""] = (await this.redis.config("GET", "notify-keyspace-events")) as string[];
+    // `A` is an alias for every event class, including `l`.
+    const missing = ["K", "l"].filter(
+      (flag) => !current.includes(flag) && !(flag === "l" && current.includes("A"))
+    );
+    if (missing.length > 0) {
+      await this.redis.config("SET", "notify-keyspace-events", current + missing.join(""));
     }
   }
 
@@ -45,9 +59,8 @@ export class RedisWatcher extends EventEmitter {
   private async startKeyspaceWatch(queueKey: string): Promise<void> {
     this.subscriber = new Redis(this.redisUrl, { maxRetriesPerRequest: null });
 
-    // Subscribe to list events on the queue key
-    const db = 0;
-    const channel = `__keyspace@${db}__:${queueKey}`;
+    // Keyspace channels are per database; use the one the URL selected.
+    const channel = `__keyspace@${this.redis.options.db ?? 0}__:${queueKey}`;
 
     this.subscriber.on("message", async (_ch: string, event: string) => {
       if (!this.running) return;

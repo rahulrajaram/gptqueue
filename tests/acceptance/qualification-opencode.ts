@@ -7,6 +7,7 @@ import {
   newConfigHome,
   newWorkDir,
   opencodeBin,
+  opencodePrerequisites,
 } from "./opencode-support.js";
 import {
   repairConfig,
@@ -1160,9 +1161,10 @@ const launchNativeTask = async (
 
 const preflight = async (route: RouteId, signal: AbortSignal): Promise<Availability> => {
   throwIfAborted(signal);
-  if (!existsSync(opencodeBin)) return { kind: "blocked_prerequisite", detail: `OpenCode binary unavailable: ${opencodeBin}` };
-  if (!existsSync(modelsPath)) return { kind: "blocked_prerequisite", detail: `OpenCode model catalog unavailable: ${modelsPath}` };
-  if (!existsSync(repairPluginPath)) return { kind: "blocked_prerequisite", detail: `Built GPTQueue plugin unavailable: ${repairPluginPath}` };
+  const prerequisites = opencodePrerequisites(existsSync, { binary: opencodeBin, models: modelsPath, plugin: repairPluginPath });
+  if (prerequisites.kind === "unavailable") return { kind: "blocked_prerequisite", detail: prerequisites.detail };
+  // A missing build is a failure of this checkout, never a skippable prerequisite.
+  if (prerequisites.kind === "build_missing") throw new Error(prerequisites.detail);
   if (route === "opencode-interactive") return { kind: "setup_gap", detail: "PTY participant control and native history correlation are not implemented" };
   return { kind: "available" };
 };

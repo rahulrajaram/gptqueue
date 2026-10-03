@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
-import { ensureSessionBinding } from "./session-binding.js";
+import { bindSession } from "./session-binding.js";
 import { toolResult } from "../tool-result.js";
 
 export const receiveMessageSchema = z.object({
@@ -16,7 +16,7 @@ export const receiveMessageSchema = z.object({
     .min(0)
     .max(60)
     .default(5)
-    .describe("Blocking timeout in whole seconds (default 5; range 0-60)"),
+    .describe("Blocking timeout in whole seconds (default 5; range 0-60; 0 waits until a message arrives)"),
 });
 
 /**
@@ -45,12 +45,20 @@ export async function receiveMessage(
   params: z.infer<typeof receiveMessageSchema>,
   signal?: AbortSignal
 ) {
-  await ensureSessionBinding(client, params.session_id);
+  await bindSession(client, params.session_id);
   const name = client.requireRegistered();
 
   // Gate: a durable actor owns a directory record and must claim at-least-once.
   const dir = await client.actorDirectory.get(name);
-  if (dir.ok && dir.record !== null) {
+  if (!dir.ok) {
+    // Fail closed: an unreadable record may belong to a durable actor, and a
+    // destructive pop would break its at-least-once delivery.
+    return toolResult(
+      { status: "error", error: { code: dir.error.code, message: dir.error.message } },
+      true
+    );
+  }
+  if (dir.record !== null) {
     return durableActorClaimRequired(name);
   }
 

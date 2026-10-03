@@ -344,6 +344,46 @@ describe("CustodyStore", () => {
     expect(res.error.message).toContain(PATH);
   });
 
+  it("returns store_corrupt for valid JSON that is missing required fields", async () => {
+    for (const bad of [
+      { state: "held", lease_expires_at: "2020-01-01T00:00:00Z" }, // no worktree
+      { state: "bogus", worktree: { worktree_path: PATH, repo_head: "h", tree_fingerprint: "f" } },
+      { state: "held", worktree: { worktree_path: PATH, repo_head: "h", tree_fingerprint: "f" } }, // held without custodian/lease
+    ]) {
+      await redis.hset(CUSTODY_KEYS.records, PATH, JSON.stringify(bad));
+      const res = await store.claim(claim());
+      if (res.ok) throw new Error(`expected store_corrupt for ${JSON.stringify(bad)}`);
+      expect(res.error.code).toBe("store_corrupt");
+    }
+  });
+
+  it("returns store_corrupt for a stored handoff the domain code cannot consume", async () => {
+    const worktree = { worktree_path: PATH, repo_head: "abc123", tree_fingerprint: "fp-1" };
+    const { hazards: _hazards, ...withoutHazards } = handoff();
+    for (const bad of [
+      { state: "released", worktree, handoff: {} }, // review finding RF9
+      { state: "released", worktree, handoff: withoutHazards },
+      { state: "released", worktree, handoff: { ...handoff(), untracked_inventory: "a.txt" } },
+      { state: "released", worktree, handoff: { ...handoff(), schema_version: 2 } },
+      { state: "released", worktree, handoff: null },
+      { state: "released", worktree }, // a released record always carries its handoff
+      { state: "forfeited", worktree, handoff: {} }, // carried-forward handoffs are consumed too
+    ]) {
+      await redis.hset(CUSTODY_KEYS.records, PATH, JSON.stringify(bad));
+      const res = await store
+        .claim(claim({ inventory: ["a.txt"] }))
+        .catch((error: unknown) => ({ thrown: String(error) }));
+      expect(res, JSON.stringify(bad)).toMatchObject({ ok: false, error: { code: "store_corrupt" } });
+    }
+  });
+
+  it("still re-claims a released record whose stored handoff is valid", async () => {
+    const worktree = { worktree_path: PATH, repo_head: "abc123", tree_fingerprint: "fp-1" };
+    await redis.hset(CUSTODY_KEYS.records, PATH, JSON.stringify({ state: "released", worktree, handoff: handoff() }));
+    const res = expectOk(await store.claim(claim({ session_id: "session-b" })));
+    expect(res.record).toMatchObject({ state: "held", mode: "graceful_handoff", handoff: handoff() });
+  });
+
   it("enforces the conditional-write precondition in the Lua script", async () => {
     const held = {
       state: "held",

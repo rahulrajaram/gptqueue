@@ -7,9 +7,10 @@ import { pathToFileURL } from 'node:url';
 import { Redis } from 'ioredis';
 import { root, runRoot, redisUrl, publicEvidence, startPiPeer, until } from './pi-support.js';
 import { reportsTotal, reportsCount } from './answer.js';
+import { nodePrefixPath } from "./local-tools.js";
 
 type Json = Record<string, any>;
-const cli = '/home/rahul/nodeenv2251-311/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js';
+const cli = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
 for (const trial of [1, 2, 3]) it.skipIf(process.env.GPTQUEUE_PI_HEADLESS_INITIATIVE !== '1')(
   `Pi print mode independently seeks complementary information: trial ${trial}`, async () => {
     const run = randomUUID(), directory = join(runRoot, 'pi-headless-initiative', run), cwd = join(directory, 'coordinator');

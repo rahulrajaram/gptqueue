@@ -1,11 +1,13 @@
-node_modules/
+node_modules
 dist/
 *.tsbuildinfo
 .DS_Store
 .gptqueue/
-# Tool-state files (invisible in normal git via global ignore; MetaBuilder
-# sanitizes HOME/GIT_CONFIG so they must be repo-ignored for clean bindings).
+# Local tool state and agent notes stay out of version control.
 AGENTS.md
 NEXT_SHELL_PROMPT.md
-.haake-data/
-.yarli/
+# Hidden local data directories (e.g. .coordinator-data/).
+*-data/
+
+# Test harnesses stay local; CI fails if any harness path is tracked.
+harness/

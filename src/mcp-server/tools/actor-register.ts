@@ -14,7 +14,7 @@ export const actorRegisterSchema = z.object({
   alias: z
     .string()
     .min(1)
-    .describe("Human-facing address such as `metabuilder`"),
+    .describe("Human-facing address such as `coordinator-agent`"),
   activation_policy_mode: z
     .enum(["wake_if_offline", "store_only"])
     .describe(

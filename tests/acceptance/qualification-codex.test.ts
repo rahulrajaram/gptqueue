@@ -95,12 +95,12 @@ describe("Codex qualification adapters", () => {
   });
   it("omits unrelated disabled MCP placeholders from ignored-user-config headless config", () => {
     const config = codexHeadlessEffectiveConfig({
-      "mcp_servers.haake-memory.enabled": false,
-      "mcp_servers.haake-memory.required": false,
+      "mcp_servers.unrelated-memory.enabled": false,
+      "mcp_servers.unrelated-memory.required": false,
       "mcp_servers.gptqueue-shared.enabled": false,
     }, "redis://127.0.0.1:43123/15");
-    expect(config["mcp_servers.haake-memory.enabled"]).toBeUndefined();
-    expect(config["mcp_servers.haake-memory.required"]).toBeUndefined();
+    expect(config["mcp_servers.unrelated-memory.enabled"]).toBeUndefined();
+    expect(config["mcp_servers.unrelated-memory.required"]).toBeUndefined();
     expect(config["mcp_servers.gptqueue-shared.enabled"]).toBe(true);
     expect(config["mcp_servers.gptqueue-shared.args"]).toEqual(expect.arrayContaining(["--redis-url", "redis://127.0.0.1:43123/15"]));
   });

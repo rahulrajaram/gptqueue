@@ -108,22 +108,6 @@ export type CustodyTransitionResult =
       error: Readonly<{ code: CustodyErrorCode; message: string }>;
     }>;
 
-export interface WorkOwnershipRequest {
-  readonly worktree_path: string;
-  readonly has_durable_actor: boolean; // a durable actor registered for this worktree?
-  readonly actor_launchable: boolean; // if it has an actor: its launch contract is runnable
-  readonly policy: "wake_if_offline" | "store_only" | "direct_allowed";
-}
-
-export type WorkOwnershipDecision =
-  | Readonly<{ kind: "delegate_wake" }>
-  | Readonly<{ kind: "delegate_store" }>
-  | Readonly<{ kind: "assume_self_custody" }>
-  | Readonly<{
-      kind: "block";
-      reason: "forfeited_unclaimed" | "held_by_live_custodian" | "no_actor_not_direct";
-    }>;
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
@@ -444,57 +428,4 @@ export const transitionCustody = (
     default:
       return assertNever(event);
   }
-};
-
-/**
- * Decide how routed work should be handled given custody state. Forfeited and
- * held checks precede all policy routing: custody gates work distribution.
- */
-/**
- * REFERENCE DISCLOSURE: `resolveWorkOwnership` is an UNWIRED DECISION ORACLE.
- * This one function — unlike the rest of this module, which IS wired to
- * production via src/core/custody-store.ts (transitionCustody +
- * admitHandoffRecord) — is a pure, test-only decision model. It maps custody
- * state plus an ownership request to a routing decision, but NO production
- * code calls it: real ownership routing lives in the tool adapters
- * (actor-status.ts, send-message.ts, custody-*.ts) and the worktree custody
- * store. The ENFORCEMENT GAP — that workable/unowned-routed work can silently
- * fall back to a different path instead of this oracle's decision — is tracked
- * separately; tests/reference-boundary.test.ts keeps this disclosure present
- * so the claim cannot silently regress.
- */
-export const resolveWorkOwnership = (
-  request: WorkOwnershipRequest,
-  custodyState: CustodyState
-): WorkOwnershipDecision => {
-  switch (custodyState) {
-    case "forfeited":
-      return Object.freeze({ kind: "block", reason: "forfeited_unclaimed" });
-    case "held":
-      return Object.freeze({ kind: "block", reason: "held_by_live_custodian" });
-    case "unowned":
-    case "released":
-      break;
-    default:
-      return assertNever(custodyState);
-  }
-  const delegate = (
-    kind: "delegate_wake" | "delegate_store"
-  ): WorkOwnershipDecision => Object.freeze({ kind });
-  if (request.has_durable_actor) {
-    switch (request.policy) {
-      case "wake_if_offline":
-      case "direct_allowed":
-        return request.actor_launchable
-          ? delegate("delegate_wake")
-          : delegate("delegate_store"); // never wake an unlaunchable actor
-      case "store_only":
-        return delegate("delegate_store");
-      default:
-        return assertNever(request.policy);
-    }
-  }
-  return request.policy === "direct_allowed"
-    ? Object.freeze({ kind: "assume_self_custody" })
-    : Object.freeze({ kind: "block", reason: "no_actor_not_direct" });
 };

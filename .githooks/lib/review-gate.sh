@@ -13,7 +13,7 @@ if [ "${_COMMITHOOKS_REVIEW_GATE_LOADED:-}" = "1" ]; then
 fi
 _COMMITHOOKS_REVIEW_GATE_LOADED=1
 
-COMMITHOOKS_REVIEW_RUNS_DIR="${CODE_REVIEW_RUNS_DIR:-$HOME/Documents/codereview/review-pipeline/runs}"
+COMMITHOOKS_REVIEW_RUNS_DIR="${CODE_REVIEW_RUNS_DIR:-$HOME/.cache/gptqueue/code-review/runs}"
 
 # Classify a changed path: 0 = source surface (requires review),
 # 1 = docs/notes only (allowed with notice).
@@ -44,7 +44,7 @@ commithooks_check_review_freshness() {
 
   local reviewed_tree
   if ! reviewed_tree="$(commithooks_resolve_reviewed_tree)"; then
-    echo "[pre-push] WARNING: no code-review runs found in $COMMITHOOKS_REVIEW_RUNS_DIR — review gate DISABLED (fail-open)." >&2
+    echo "[pre-push] WARNING: no reviewed runs found in $COMMITHOOKS_REVIEW_RUNS_DIR — run an independent code review; review gate DISABLED (fail-open)." >&2
     return 0
   fi
   if [ -z "$reviewed_tree" ]; then
@@ -88,7 +88,7 @@ commithooks_check_review_freshness() {
     echo "  Pushed tree:   $pushed_tree (from $lref @ $lsha)" >&2
     echo "  Unreviewed source delta:" >&2
     git diff --stat "$reviewed_tree" "$pushed_tree" | sed 's/^/    /' >&2
-    echo "  Convene the code-review harness (docs/CODE_REVIEW_HARNESS.md) on this state," >&2
+    echo "  Run an independent code review on this state and record its digest," >&2
     echo "  or use the escape hatch below for a deliberate exception." >&2
   done
 

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { createCodexAdapters, type CodexParticipant } from "./qualification-codex.js";
 import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
 import { sanitizeEvidence } from "./public-evidence.js";
+import { CODEX_BIN } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_QUALIFICATION_CODEX_APPSERVER === "1";
 const repo = resolve(import.meta.dirname, "../..");
@@ -54,7 +55,7 @@ describe.skipIf(!enabled)("Codex qualification owned app-server", () => {
     await mkdir(phasesDir, { recursive: true, mode: 0o700 });
     const receipt: Json = {
       schema_version: 1, run_id: runId, route: "codex-appserver", execution: { status: "running" }, passed: false,
-      started_at: new Date().toISOString(), command: [process.env.CODEX_BIN ?? "/home/rahul/.local/bin/codex", "app-server", "--listen", "unix://<owned>"],
+      started_at: new Date().toISOString(), command: [process.env.CODEX_BIN ?? CODEX_BIN, "app-server", "--listen", "unix://<owned>"],
       model: "gpt-5.6-luna", source_hashes: {}, identities: {}, phases: [], cleanup: [],
     };
     const persist = async (label: string, value: unknown): Promise<void> => {

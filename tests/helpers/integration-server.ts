@@ -17,7 +17,7 @@
  */
 
 import { execSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Redis } from "ioredis";
@@ -57,6 +57,10 @@ writeFileSync(
     2
   )
 );
+// Explicitly owner-only: on group-writable-by-default temp
+// filesystems (e.g. virtiofs CI runners) the launch policy correctly
+// rejects group/world-writable allowlists; tests must not weaken it.
+chmodSync(allowlistPath, 0o600);
 
 // ---- Constants (kept together so the isolation story is auditable) -------
 export const INTEGRATION_PORT = 8199;

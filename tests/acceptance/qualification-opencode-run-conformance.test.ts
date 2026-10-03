@@ -8,6 +8,7 @@ import { isModelParticipant } from "./qualification-types.js";
 import { opencodeRouteAdapter, forkSessionLineage } from "./qualification-opencode.js";
 import { modelsPath, opencodeBin } from "./opencode-support.js";
 import { startOwnedRedis } from "./owned-redis.js";
+import { homePath } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_OPENCODE_RUN_ROUTES_CONFORMANCE === "1";
 const overallTimeoutMs = 350_000;
@@ -30,8 +31,8 @@ const execFileAsync = promisify(execFile);
 const dependencyPaths = [
   opencodeBin,
   modelsPath,
-  "/home/rahul/.opencode/package.json",
-  "/home/rahul/.opencode/package-lock.json",
+  homePath(".opencode/package.json"),
+  homePath(".opencode/package-lock.json"),
   "package.json",
   "package-lock.json",
 ] as const;

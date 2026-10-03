@@ -1,8 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
-import { SESSION_KEYS } from "../core/keys.js";
-
-const CLAIM_KEY_PREFIX = "gptq:experimental-wrapper-claim:";
+import { CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS } from "../core/keys.js";
+import { purgeActorClaimsLua } from "../core/task-claim-store.js";
 
 const ACQUIRE_CLAIM_SCRIPT = `
 if redis.call("EXISTS", KEYS[2]) == 1 then
@@ -11,7 +10,13 @@ end
 if ARGV[3] == "fresh" and redis.call("HEXISTS", KEYS[1], ARGV[1]) == 1 then
   return -1
 end
-if redis.call("SCARD", KEYS[3]) > 0 or redis.call("EXISTS", KEYS[4]) == 1 then
+-- Only a leased session is active; expired members linger until the next registration prunes them.
+for _, sid in ipairs(redis.call("SMEMBERS", KEYS[3])) do
+  if redis.call("EXISTS", "gptq:lease:" .. sid) == 1 then
+    return -2
+  end
+end
+if redis.call("EXISTS", KEYS[4]) == 1 then
   return -2
 end
 if redis.call("SET", KEYS[2], ARGV[2], "NX") then
@@ -40,7 +45,10 @@ end
 return 1
 `;
 
+// RF5: the claim purge runs inside this script, so a registration of the
+// name that follows the retirement can never have its claims purged.
 const UNREGISTER_EXCLUSIVE_SESSION_SCRIPT = `
+${purgeActorClaimsLua}
 if redis.call("GET", KEYS[1]) ~= ARGV[1] then
   return 0
 end
@@ -59,6 +67,7 @@ if not exclusive then
 end
 
 redis.call("HDEL", KEYS[5], ARGV[3])
+purge_actor_claims(KEYS[9], KEYS[10], KEYS[11], KEYS[12], KEYS[13], ARGV[3])
 redis.call("DEL", KEYS[6], KEYS[7], KEYS[8])
 return 1
 `;
@@ -76,8 +85,7 @@ export interface WrapperIdentityClaim {
   readonly abandon: () => void;
 }
 
-const claimKeyFor = (agent: string): string =>
-  `${CLAIM_KEY_PREFIX}${createHash("sha256").update(agent).digest("hex")}`;
+const claimKeyFor = SESSION_KEYS.wrapperClaim;
 
 const closeRedis = async (redis: Redis): Promise<void> => {
   try {
@@ -166,7 +174,7 @@ export async function acquireWrapperIdentityClaim(
     const outcome = Number(
       await redis.eval(
         UNREGISTER_EXCLUSIVE_SESSION_SCRIPT,
-        8,
+        13,
         claimKey,
         SESSION_KEYS.agentSessions(agent),
         SESSION_KEYS.session(sessionId),
@@ -175,6 +183,11 @@ export async function acquireWrapperIdentityClaim(
         SESSION_KEYS.queue(agent),
         SESSION_KEYS.mailboxMeta(agent),
         SESSION_KEYS.heartbeat(agent),
+        CLAIM_KEYS.claims,
+        CLAIM_KEYS.index(agent),
+        DLQ_KEYS.list(agent),
+        SESSION_KEYS.inboxEvents(agent),
+        SESSION_KEYS.inboxTrace(agent),
         token,
         sessionId,
         agent
@@ -182,6 +195,8 @@ export async function acquireWrapperIdentityClaim(
     );
     switch (outcome) {
       case 1:
+        // The Lua script removed the identity and, in the same step, the
+        // claim state a later registration of this name would inherit.
         return "unregistered";
       case 2:
         return "session_closed_only";

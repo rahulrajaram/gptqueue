@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { appConfig } from './codex-support.js';
 import { startPiPeer, runRoot, publicEvidence } from './pi-support.js';
 import { reportsCount, reportsTotal } from './answer.js';
+import { CODEX_BIN } from "./local-tools.js";
 
 type Json = Record<string, any>;
 for (const trial of [1, 2, 3]) it.skipIf(process.env.GPTQUEUE_CODEX_INITIATIVE !== '1')(
@@ -27,7 +28,7 @@ for (const trial of [1, 2, 3]) it.skipIf(process.env.GPTQUEUE_CODEX_INITIATIVE !
         name === 'model_reasoning_effort' || name.startsWith('mcp_servers.gptqueue-shared.'))),
         developer_instructions: 'The available MCP tools are the only permitted tools for this isolated exercise. Do not use shell, filesystem, web, or native collaboration tools.' };
       const overrides = Object.entries(config).flatMap(([name, value]) => ['-c', `${name}=${JSON.stringify(value)}`]);
-      const child = spawn('/home/rahul/.local/bin/codex', ['exec', '--ignore-user-config', '--json', '--ephemeral', '--skip-git-repo-check',
+      const child = spawn(CODEX_BIN, ['exec', '--ignore-user-config', '--json', '--ephemeral', '--skip-git-repo-check',
         '--approve-for-me', '--model', 'gpt-5.6-luna', '-C', cwd, ...overrides, prompt],
       { cwd, env: { ...process.env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       child.stdout.on('data', data => { stdout = (stdout + String(data)).slice(-2_000_000); });

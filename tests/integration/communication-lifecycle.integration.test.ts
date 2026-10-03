@@ -1,9 +1,9 @@
 /**
  * Focused communication-lifecycle integration suite.
  *
- * Drives the same deterministic scenario engine the MetaBuilder
+ * Drives the same deterministic scenario engine the private
  * communication-lifecycle-v1 harness cites as evidence actions
- * (harness/lifecycle/run-scenario.mjs) and asserts the summarized
+ * scenario runner) and asserts the summarized
  * invariants: H1-H4 topology, H5 idempotency, H6/H7 continuity,
  * H8 cleanup, H9 backpressure — three consecutive bounded rounds each.
  *
@@ -11,10 +11,14 @@
  * `redis-server` on a private Unix socket under /tmp (never db0, never the
  * live server) and a `dist/transports/http.js` child listening on its own
  * Unix socket. No TCP, no live server contact.
+ *
+ * The scenario runner is local-only and may be absent; the suite skips
+ * (with the runner path reported here) wherever it is not present.
  */
 
 import { describe, it, expect } from "vitest";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -23,6 +27,7 @@ const execFileAsync = promisify(execFile);
 // receives; the default vitest timeout is far too tight for them.
 const SCENARIO_TIMEOUT = 600_000;
 
+// Local-only scenario runner; kept out of version control by policy.
 const RUNNER = "harness/lifecycle/run-scenario.mjs";
 
 async function runScenario(scenario: string, rounds = 3) {
@@ -41,7 +46,7 @@ async function runScenario(scenario: string, rounds = 3) {
   };
 }
 
-describe("communication lifecycle (H1-H9, deterministic UDS fixtures)", () => {
+describe.skipIf(!existsSync(RUNNER))("communication lifecycle (H1-H9, deterministic UDS fixtures)", () => {
   it(
     "topology: registration, readiness, 1→1, 1→N fan-out, and the 3×2 matrix deliver exactly across three consecutive rounds",
     async () => {

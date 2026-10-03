@@ -5,7 +5,7 @@
  * leave stale configuration behind and never depend on a checked-in
  * `.gptqueue/launch-allowlist.json`.
  */
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { mkdtempSync, writeFileSync, rmSync, chmodSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -40,6 +40,10 @@ export function scaffoldLaunchAllowlist(
     })),
   };
   writeFileSync(path, JSON.stringify(config, null, 2));
+  // Some CI temp filesystems (e.g. virtiofs) create files group-writable,
+  // which the launch policy correctly rejects. Test fixtures must be
+  // explicitly owner-only; the policy stays strict.
+  chmodSync(path, 0o600);
   return {
     path,
     set: () => {

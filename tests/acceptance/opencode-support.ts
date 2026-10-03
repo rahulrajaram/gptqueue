@@ -5,16 +5,41 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { homePath } from "./local-tools.js";
 
 export const repo = process.cwd();
-export const opencodeBin = process.env.OPENCODE_BIN ?? "/home/rahul/.opencode/bin/opencode";
+export const opencodeBin = process.env.OPENCODE_BIN ?? homePath(".opencode/bin/opencode");
 export const model = "zai-coding-plan/glm-5.3";
 export const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 export const mcpEntry = join(repo, "dist/mcp-server/index.js");
 export const timeoutMs = Math.min(300_000, Math.max(60_000, Number(process.env.GPTQUEUE_OPENCODE_TIMEOUT_MS ?? 240_000)));
-export const modelsPath = "/home/rahul/.cache/opencode/models.json";
+export const modelsPath = homePath(".cache/opencode/models.json");
 
 export type Json = Record<string, unknown>;
+
+export const builtPluginPath = join(repo, "dist/registered-shell/opencode-plugin.js");
+
+/**
+ * OpenCode qualification prerequisites. Only absent EXTERNAL dependencies (the
+ * OpenCode binary or its model catalog) are `unavailable` and may skip; a
+ * missing built GPTQueue plugin with OpenCode present is `build_missing`, a
+ * build failure that must fail the test rather than skip it.
+ */
+export type OpencodePrerequisites =
+  | Readonly<{ kind: "ready" }>
+  | Readonly<{ kind: "unavailable"; detail: string }>
+  | Readonly<{ kind: "build_missing"; detail: string }>;
+
+export const opencodePrerequisites = (
+  exists: (path: string) => boolean = existsSync,
+  paths: Readonly<{ binary: string; models: string; plugin: string }> = { binary: opencodeBin, models: modelsPath, plugin: builtPluginPath },
+): OpencodePrerequisites => {
+  if (!exists(paths.binary)) return { kind: "unavailable", detail: `OpenCode binary unavailable: ${paths.binary}` };
+  if (!exists(paths.models)) return { kind: "unavailable", detail: `OpenCode model catalog unavailable: ${paths.models}` };
+  if (!exists(paths.plugin)) return { kind: "build_missing", detail: `Built GPTQueue plugin unavailable: ${paths.plugin} (run npm run build)` };
+  return { kind: "ready" };
+};
+
 
 /** Config overlay: no project/global config, external plugins, or auth copy. */
 export const makeConfig = () => ({

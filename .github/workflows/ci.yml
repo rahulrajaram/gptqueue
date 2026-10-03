@@ -20,6 +20,14 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      - name: Refuse tracked harness files
+        run: |
+          if [ -n "$(git ls-files -- harness)" ]; then
+            echo "harness/ must stay out of version control:" >&2
+            git ls-files -- harness >&2
+            exit 1
+          fi
+
       - name: Install dependencies
         run: npm install --ignore-scripts
 
@@ -37,18 +45,16 @@ jobs:
     strategy:
       matrix:
         node-version: [20, 22]
-    services:
-      redis:
-        image: redis:7
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
+
+      # The packaged server backs the tests on 6379, and its binary is what
+      # the lifecycle harness and owned-Redis fixtures spawn directly.
+      - name: Install Redis
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-server
+          timeout 30 sh -c 'until redis-cli ping; do sleep 1; done'
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -58,6 +64,10 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts
 
+      # --ignore-scripts skips node-pty's native build, which the PTY tests load.
+      - name: Build node-pty
+        run: npm rebuild node-pty
+
       - name: Build
         run: npm run build
 
@@ -65,3 +75,6 @@ jobs:
         run: npm test
         env:
           REDIS_URL: redis://127.0.0.1:6379/15
+
+      - name: Run Python installer tests
+        run: npm run test:py

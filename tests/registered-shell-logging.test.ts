@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Redis } from "ioredis";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { startRegisteredShell, type RegisteredShellHandle } from "../src/registered-shell/server.js";
+import { defaultLogDir } from "../src/registered-shell/lifecycle-log.js";
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 const dirs: string[] = [];
@@ -48,6 +49,14 @@ afterEach(async () => {
 });
 
 describe("registered shell lifecycle logging", () => {
+  it("ignores relative and empty GPTQ_LOG_DIR values and uses the portable fallback", () => {
+    vi.stubEnv("GPTQ_LOG_DIR", "relative/logs");
+    vi.stubEnv("XDG_STATE_HOME", "relative/state");
+    expect(defaultLogDir()).toMatch(/^\//u);
+    vi.stubEnv("GPTQ_LOG_DIR", "");
+    expect(defaultLogDir()).toMatch(/^\//u);
+  });
+
   it("records registration before MCP initialization and handshake after connect", async () => {
     const dir = await mkdtemp(join(tmpdir(), "gptqueue-log-")); dirs.push(dir); vi.stubEnv("GPTQ_LOG_DIR", dir);
     const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();

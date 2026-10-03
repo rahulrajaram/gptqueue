@@ -25,7 +25,7 @@ export interface ActivationPolicy {
  */
 export interface DurableActorProfile {
   readonly actor_id: string;
-  /** Human-facing address such as `metabuilder`. */
+  /** Human-facing address such as `coordinator-agent`. */
   readonly alias: string;
   /** Structured routing claims; opaque descriptive strings in this slice. */
   readonly capabilities: readonly string[];

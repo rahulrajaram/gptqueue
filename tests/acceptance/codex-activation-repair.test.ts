@@ -12,10 +12,11 @@ import { CodexSocketClient } from "../../src/registered-shell/codex-socket.js";
 import { bindCodexHook } from "../../src/registered-shell/codex-hook.js";
 import { CodexThreadReader } from "../../src/registered-shell/codex-history.js";
 import { startOwnedRedis } from "./owned-redis.js";
+import { CODEX_BIN, homePath, nodePrefixPath } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_CODEX_ACTIVATION_REPAIR === "1";
-const node = "/home/rahul/nodeenv2251-311/bin/node";
-const codex = "/home/rahul/.local/bin/codex";
+const node = nodePrefixPath("bin/node");
+const codex = CODEX_BIN;
 const artifactRoot = join(repo, ".gptqueue/repair-qualification/20260912/codex-activation");
 const stage = { setup: 45_000, participant: 150_000, exchange: 180_000, cleanup: 30_000 } as const;
 const timeout = stage.setup + stage.participant * 2 + stage.exchange + stage.cleanup + 30_000;
@@ -86,7 +87,7 @@ it.skipIf(!enabled)("binds owned Codex threads and activates an idle arithmetic 
     await writeFile(join(directory, "receipt.json"), JSON.stringify(sanitizeEvidence(receipt), null, 2) + "\n", { mode: 0o600 });
   };
   try {
-    const installedHookPath = "/home/rahul/.codex/hooks.json";
+    const installedHookPath = homePath(".codex/hooks.json");
     try {
       const installedHooks = JSON.parse(await readFile(installedHookPath, "utf8")) as Record<string, any>;
       receipt.installed_hook = { path: installedHookPath, events: Object.fromEntries(Object.entries(installedHooks.hooks ?? {}).map(([event, groups]) => [event, (groups as any[]).flatMap(group => group.hooks ?? []).map(hook => ({ type: hook.type, command: hook.command }))])) };

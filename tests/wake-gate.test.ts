@@ -1,12 +1,11 @@
 import { describe, it, expect } from "vitest";
 import type { ActorDirectoryRecord } from "../src/core/actor-directory.js";
 import {
-  gateWakeEligibility,
+  wakeEligible,
   wakeDecisionForPresence,
   type WakePresenceDecision,
 } from "../src/mcp-server/tools/send-message.js";
 import type { RuntimePresenceState } from "../src/core/actor-presence.js";
-import type { ActorGetResult } from "../src/core/actor-directory.js";
 
 /**
  * Focused unit tests for the decomposed maybeWake functions. These exercise the
@@ -38,39 +37,18 @@ function makeRecord(
   };
 }
 
-type DirectoryOnlyClient = Parameters<typeof gateWakeEligibility>[0];
-
-function clientWithDirResult(
-  result: ActorGetResult
-): DirectoryOnlyClient {
-  return { actorDirectory: { get: async () => result } } as DirectoryOnlyClient;
-}
-
-describe("gateWakeEligibility (wake gate rejection path)", () => {
-  it("returns undefined on a corrupt/unreadable directory", async () => {
-    const client = clientWithDirResult({
-      ok: false,
-      error: { code: "store_corrupt", message: "boom" },
-    });
-    await expect(gateWakeEligibility(client, "x")).resolves.toBeUndefined();
+describe("wakeEligible (wake policy gate)", () => {
+  it("returns undefined when there is no directory record (plain agent)", () => {
+    expect(wakeEligible(null)).toBeUndefined();
   });
 
-  it("returns undefined when there is no directory record (plain agent)", async () => {
-    const client = clientWithDirResult({ ok: true, record: null });
-    await expect(gateWakeEligibility(client, "plain")).resolves.toBeUndefined();
+  it("returns undefined for a store_only durable actor", () => {
+    expect(wakeEligible(makeRecord("store_only"))).toBeUndefined();
   });
 
-  it("returns undefined for a store_only durable actor", async () => {
-    const client = clientWithDirResult({ ok: true, record: makeRecord("store_only") });
-    await expect(gateWakeEligibility(client, "storeonly")).resolves.toBeUndefined();
-  });
-
-  it("returns the record for a wake_if_offline durable actor", async () => {
+  it("returns the record for a wake_if_offline durable actor", () => {
     const record = makeRecord("wake_if_offline", "wakee");
-    const client = clientWithDirResult({ ok: true, record });
-    await expect(gateWakeEligibility(client, "wakee")).resolves.toEqual({
-      record,
-    });
+    expect(wakeEligible(record)).toEqual({ record });
   });
 });
 
