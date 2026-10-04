@@ -9,7 +9,7 @@
  * Each signal is a Lua statement operating on `agent` (an ARGV agent name)
  * and `wrapper` (the hashed wrapper-claim key passed as a KEY). A signal
  * reports occupied by returning true; the final entry returns the boolean
- * result of the claims-index cardinality check. The generated fragment is
+ * result of the unexpired claims-index check. The generated fragment is
  * interpolated into both scripts so the guard set can never diverge again.
  */
 export interface OccupancySignal {
@@ -37,7 +37,10 @@ export const OCCUPANCY_SIGNALS: ReadonlyArray<OccupancySignal> = [
   },
   {
     name: "claims_index",
-    lua: "return redis.call('ZCARD','gptq:claims-index:'..agent) > 0",
+    // Expired claims retain their payloads for normal lazy recovery. They
+    // no longer represent an owner, so must not prevent native reconnect.
+    // Read Redis's clock inside the atomic guard, including for operator apply.
+    lua: "local time = redis.call('TIME')\n  local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)\n  return redis.call('ZCOUNT','gptq:claims-index:'..agent,'('..now,'+inf') > 0",
   },
 ];
 

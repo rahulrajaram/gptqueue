@@ -69,7 +69,7 @@ export const applyContinuity = async (redis: Redis, plan: ContinuityPlan): Promi
     if ARGV[4] ~= '' and (redis.call('HGET', KEYS[2], ARGV[4]) or '') ~= ARGV[5] then return -3 end
     if occupied(ARGV[2], KEYS[3]) then return -4 end
     if ARGV[4] ~= '' and ARGV[4] ~= ARGV[2] then
-      if occupied(ARGV[4], KEYS[4]) or redis.call('LLEN','gptq:q:'..ARGV[4]) > 0 or redis.call('EXISTS','gptq:outbound-activity:'..ARGV[4]) == 1 then return -5 end
+      if occupied(ARGV[4], KEYS[4]) or redis.call('ZCARD','gptq:claims-index:'..ARGV[4]) > 0 or redis.call('LLEN','gptq:q:'..ARGV[4]) > 0 or redis.call('EXISTS','gptq:outbound-activity:'..ARGV[4]) == 1 then return -5 end
     end
     redis.call('SET',KEYS[1],ARGV[6])
     redis.call('XADD',KEYS[5],'MAXLEN','~',1000,'*','event','operator_continuity','target',ARGV[2],'source',ARGV[4],'runtime_id',ARGV[7])

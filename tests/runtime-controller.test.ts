@@ -4,6 +4,7 @@ import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { createRuntimeController } from "../src/registered-shell/runtime-controller.js";
 import type { RuntimeAdapter, RuntimeBinding } from "../src/registered-shell/runtime.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
+import { TaskClaimStore } from "../src/core/task-claim-store.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 const WORKDIR = "/tmp/runtime-controller-test";
@@ -53,6 +54,46 @@ describe("runtime controller (bind_runtime)", () => {
     await controller.bind(binding());
     expect(await controller.bind(binding({ epoch: "e2" }))).toMatchObject({ runtime: { epoch: "e2" } });
     expect(adapters).toHaveLength(2);
+  });
+
+  it("resumes an offline mailbox with expired claims and preserves their recovery", async () => {
+    const { client: original, controller: previous } = await setup();
+    const nativeBinding = binding();
+    const canonical = original.agentName!;
+    await previous.bind(nativeBinding);
+    await previous.close();
+    const envelope = {
+      id: randomUUID(), from: "synthetic-peer", to: canonical,
+      timestamp: new Date().toISOString(), type: "task" as const,
+      payload: { content: "unfinished task", in_reply_to: randomUUID() },
+    };
+    await original.sendMessage(envelope);
+    const claims = new TaskClaimStore(original.adapterConnection);
+    const claimed = await claims.claim({
+      actor_id: canonical, session_id: original.sessionId!, max_batch: 1,
+      ttl_seconds: 1, now: new Date(Date.now() - 60_000).toISOString(),
+    });
+    expect(claimed.ok && claimed.claim?.tasks).toEqual([JSON.stringify(envelope)]);
+    await original.closeCurrentSession();
+
+    const resumed = new RedisClient(null, TEST_REDIS_URL);
+    await resumed.register("both", `rc-resumed-${randomUUID()}`);
+    cleanup.push(async () => { await resumed.unregister(); await resumed.shutdown(); });
+    const current = createRuntimeController(resumed,
+      { client: "codex", working_directory: WORKDIR }, async (identity) => ({
+        binding: identity, activate: async () => ({ status: "queued" }),
+        close: async () => undefined,
+      }));
+    cleanup.push(() => current.close());
+    expect(await current.bind(nativeBinding)).toMatchObject({
+      agent: canonical, activation_ready: true, runtime: nativeBinding,
+    });
+    expect(resumed.agentName).toBe(canonical);
+    const recovered = await new TaskClaimStore(resumed.adapterConnection).claim({
+      actor_id: canonical, session_id: resumed.sessionId!, max_batch: 1,
+      ttl_seconds: 60, now: new Date().toISOString(),
+    });
+    expect(recovered.ok && recovered.claim?.tasks).toEqual([JSON.stringify(envelope)]);
   });
 
   it("refuses a different runtime, a mismatched or malformed binding, and binds after close", async () => {

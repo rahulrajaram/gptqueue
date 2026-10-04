@@ -7,7 +7,7 @@ import { OCCUPANCY_SIGNALS } from "../src/core/occupancy-guard.js";
 import { restoreRuntimeMailbox } from "../src/registered-shell/runtime-mailbox.js";
 import type { RuntimeBinding } from "../src/registered-shell/runtime.js";
 import { flushTestKeys, assertNotLiveDb } from "./helpers/redis-test-utils.js";
-import { SESSION_KEYS } from "../src/core/keys.js";
+import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 assertNotLiveDb(redisUrl, "mailbox continuity tests");
@@ -62,6 +62,29 @@ describe("mailbox continuity operator API", () => {
     const plan = await prepareContinuity(redis, b, canonical);
     await redis.rpush(SESSION_KEYS.queue(plan.source!), JSON.stringify({ id: "x" }));
     await expect(applyContinuity(redis, plan)).rejects.toThrow();
+  });
+
+  it("allows expired target claims without deleting their recoverable payload", async () => {
+    const { redis, canonical, b } = await setup();
+    const claimId = randomUUID();
+    const payload = JSON.stringify({ id: randomUUID(), to: canonical, payload: { content: "unfinished" } });
+    const expiry = Date.now() - 60_000;
+    const claim = JSON.stringify({ claim_id: claimId, actor_id: canonical, session_id: randomUUID(),
+      claimed_at: new Date(expiry - 1000).toISOString(), expires_at: new Date(expiry).toISOString(), tasks: [payload] });
+    await redis.hset(CLAIM_KEYS.claims, claimId, claim);
+    await redis.zadd(CLAIM_KEYS.index(canonical), expiry, claimId);
+    const plan = await prepareContinuity(redis, b, canonical);
+    expect(await applyContinuity(redis, plan)).toBe("applied");
+    expect(await redis.hget(CLAIM_KEYS.claims, claimId)).toBe(claim);
+    expect(await redis.zrange(CLAIM_KEYS.index(canonical), 0, -1)).toEqual([claimId]);
+  });
+
+  it("refuses to abandon expired claims at a replaced source mailbox", async () => {
+    const { redis, canonical, provisional, b } = await setup();
+    await redis.zadd(CLAIM_KEYS.index(provisional), Date.now() - 60_000, randomUUID());
+    const plan = await prepareContinuity(redis, b, canonical);
+    await expect(applyContinuity(redis, plan)).rejects.toThrow();
+    expect(JSON.parse((await redis.get(plan.mappingKey))!).agent).toBe(provisional);
   });
 
   it("refuses missing provenance instead of discovering by cwd", async () => {
@@ -183,7 +206,7 @@ describe("mailbox continuity operator API", () => {
       await redis.sadd(SESSION_KEYS.agentSessions(target), sid);
       await redis.set(SESSION_KEYS.lease(sid), "alive", "EX", 30);
     },
-    claims_index: (redis, target) => redis.zadd(`gptq:claims-index:${target}`, 1, "stale-claim"),
+    claims_index: (redis, target) => redis.zadd(`gptq:claims-index:${target}`, Date.now() + 60_000, "active-claim"),
   };
 
   it("the injector map covers every signal in the shared guard table (D5)", () => {
