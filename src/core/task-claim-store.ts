@@ -93,7 +93,12 @@ export type DeadLetterEntry = Readonly<{
 }>;
 
 export type DeadLetterEntriesResult =
-  | Readonly<{ ok: true; entries: readonly DeadLetterEntry[] }>
+  | Readonly<{
+      ok: true;
+      entries: readonly DeadLetterEntry[];
+      /** Entries ever discarded by the DLQ length bound for this actor. */
+      dropped: number;
+    }>
   | Readonly<{ ok: false; error: TaskClaimStoreError }>;
 
 export type RequeueInput = Readonly<{
@@ -155,6 +160,22 @@ export interface ActiveClaimInput {
 }
 
 
+/**
+ * Which clock decides claim stamps and expiry. "redis" (the default, and the
+ * only production setting) uses Redis server TIME inside each script, so every
+ * process agrees and a fast local clock cannot recover a live claim early; the
+ * `now` inputs are then accepted for API compatibility but ignored by the
+ * scripts. "caller" honors the supplied `now` and exists only so unit tests can
+ * drive a simulated clock deterministically.
+ */
+export type ClaimClock = "redis" | "caller";
+
+const claimsLib: string = readFileSync(join(LUA_DIR, "claims-lib.lua"), "utf-8");
+
+/** A claim script with the shared claims-lib.lua functions composed in front. */
+export const claimLuaScript = (file: string): string =>
+  `${claimsLib}\n${readFileSync(join(LUA_DIR, file), "utf-8")}`;
+
 export class TaskClaimStore {
   private readonly redis: Redis;
   private readonly recoverScript: string;
@@ -164,19 +185,16 @@ export class TaskClaimStore {
   private readonly requeueScript: string;
   private readonly purgeScript: string;
 
-  constructor(redis: Redis) {
+  private readonly clock: ClaimClock;
+
+  constructor(redis: Redis, options: Readonly<{ clock?: ClaimClock }> = {}) {
     this.redis = redis;
-    this.recoverScript = readFileSync(
-      join(LUA_DIR, "claims-recover.lua"),
-      "utf-8"
-    );
-    this.batchClaimScript = readFileSync(
-      join(LUA_DIR, "claims-batch-claim.lua"),
-      "utf-8"
-    );
+    this.clock = options.clock ?? "redis";
+    this.recoverScript = claimLuaScript("claims-recover.lua");
+    this.batchClaimScript = claimLuaScript("claims-batch-claim.lua");
     this.ackScript = readFileSync(join(LUA_DIR, "claims-ack.lua"), "utf-8");
-    this.renewScript = readFileSync(join(LUA_DIR, "claims-renew.lua"), "utf-8");
-    this.requeueScript = readFileSync(join(LUA_DIR, "claims-requeue.lua"), "utf-8");
+    this.renewScript = claimLuaScript("claims-renew.lua");
+    this.requeueScript = claimLuaScript("claims-requeue.lua");
     this.purgeScript = `${purgeActorClaimsLua}
 return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`;
   }
@@ -215,15 +233,17 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
    * tasks have a durable destination (FIX1).
    */
   async recoverExpired(input: RecoverInput): Promise<RecoverResult> {
-    const nowMs = Date.parse(input.now);
     const [recovered, deadlettered] = (await this.redis.eval(
       this.recoverScript,
-      4,
+      7,
       CLAIM_KEYS.index(input.actor_id),
       CLAIM_KEYS.claims,
       SESSION_KEYS.queue(input.actor_id),
       DLQ_KEYS.list(input.actor_id),
-      nowMs,
+      SESSION_KEYS.inboxEvents(input.actor_id),
+      SESSION_KEYS.mailboxMeta(input.actor_id),
+      DLQ_KEYS.dropped(input.actor_id),
+      this.nowArg(input.now),
       DLQ_PROVISIONAL.RECOVER_CAP,
       DLQ_PROVISIONAL.DLQ_MAX_LENGTH,
       DLQ_PROVISIONAL.RECOVER_COUNTER_TTL_SECONDS
@@ -250,7 +270,18 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
     const limit = input.limit ?? DLQ_PROVISIONAL.DLQ_MAX_LENGTH;
     const clamped = Math.max(1, Math.floor(limit));
     const list = DLQ_KEYS.list(input.actor_id);
-    const raw = await this.redis.lrange(list, 0, clamped - 1);
+    const [raw, droppedRaw] = await Promise.all([
+      this.redis.lrange(list, 0, clamped - 1),
+      this.redis.get(DLQ_KEYS.dropped(input.actor_id)),
+    ]);
+    const dropped = droppedRaw === null ? 0 : Number(droppedRaw);
+    // A malformed or out-of-range drop counter is corruption, not "0 dropped".
+    if (droppedRaw !== null && (!/^(0|[1-9]\d*)$/.test(droppedRaw) || !Number.isSafeInteger(dropped))) {
+      return fail(
+        "store_corrupt",
+        `DLQ drop counter for actor '${input.actor_id}' is corrupt (${describeStored(droppedRaw, "count")}); refusing to report it`
+      );
+    }
     const entries = raw.map((payload) => {
       let message_id: string | null = null;
       let deadlettered_at: string | null = null;
@@ -266,7 +297,7 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
       }
       return Object.freeze({ message_id, payload, deadlettered_at });
     });
-    return { ok: true, entries };
+    return { ok: true, entries, dropped };
   }
 
   /**
@@ -280,10 +311,12 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
   async requeue(input: RequeueInput): Promise<RequeueResult> {
     const moved = await this.redis.eval(
       this.requeueScript,
-      3,
+      5,
       DLQ_KEYS.list(input.actor_id),
       SESSION_KEYS.queue(input.actor_id),
       CLAIM_KEYS.recoverCount(input.actor_id, input.message_id),
+      SESSION_KEYS.inboxEvents(input.actor_id),
+      SESSION_KEYS.mailboxMeta(input.actor_id),
       input.message_id
     );
     if (moved !== 1) {
@@ -335,10 +368,6 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
     if (!recovery.ok) return recovery;
 
     const claimId = randomUUID();
-    const expiresAt = new Date(
-      Date.parse(input.now) + input.ttl_seconds * 1000
-    ).toISOString();
-    const expiresAtMs = Date.parse(expiresAt);
 
     const raw = (await this.redis.eval(
       this.batchClaimScript,
@@ -349,9 +378,9 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
       claimId,
       input.actor_id,
       input.session_id,
-      input.now,
-      expiresAt,
-      expiresAtMs,
+      this.nowArg(input.now),
+      input.ttl_seconds * 1000,
+      "",
       input.max_batch,
       // 0 is the "unlimited" sentinel consumed by the script (undefined => the
       // historical plain-agent behavior).
@@ -448,7 +477,7 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
       input.claim_id,
       input.actor_id,
       input.session_id,
-      Date.parse(input.now),
+      this.nowArg(input.now),
       input.ttl_seconds,
       input.budget_seconds
     )) as [number, string];
@@ -518,6 +547,11 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
       );
     }
     return { ok: true, claim };
+  }
+
+  /** The `now` script argument: '' selects Redis server TIME (see ClaimClock). */
+  private nowArg(now: string): number | string {
+    return this.clock === "caller" ? Date.parse(now) : "";
   }
 
   /** Parse and deeply freeze a stored claim; null when malformed. */

@@ -14,9 +14,11 @@
 -- ARGV[1] = claim_id (caller-supplied uuid)
 -- ARGV[2] = actor_id
 -- ARGV[3] = session_id (owning runtime session)
--- ARGV[4] = claimed_at (ISO)
--- ARGV[5] = expires_at (ISO)
--- ARGV[6] = expires_at epoch ms (zset score)
+-- ARGV[4] = now epoch ms from a caller-simulated clock, or '' (the default)
+--           to stamp the claim on Redis server TIME (claims-lib.lua, composed
+--           in front), so every process agrees on when a claim expires
+-- ARGV[5] = ttl ms; expires_at = now + ttl (also the zset score)
+-- ARGV[6] = unused (kept so the ARGV positions below stay stable)
 -- ARGV[7] = max_batch (int, already validated by the caller)
 -- ARGV[8] = max_concurrent_claims (int >= 1) when the caller enforces an
 --           outstanding-claims ceiling, or 0 as the "unlimited" sentinel.
@@ -55,14 +57,16 @@ if #tasks == 0 then
   return { 0, '' }
 end
 
+local nowMs = tonumber(ARGV[4]) or server_ms()
+local expiresMs = nowMs + tonumber(ARGV[5])
 local claim = {
   claim_id = ARGV[1],
   actor_id = ARGV[2],
   session_id = ARGV[3],
-  claimed_at = ARGV[4],
-  expires_at = ARGV[5],
+  claimed_at = iso_from_ms(nowMs),
+  expires_at = iso_from_ms(expiresMs),
   tasks = tasks,
 }
 redis.call('HSET', claims, ARGV[1], cjson.encode(claim))
-redis.call('ZADD', index, tonumber(ARGV[6]), ARGV[1])
+redis.call('ZADD', index, expiresMs, ARGV[1])
 return { 1, cjson.encode(claim) }

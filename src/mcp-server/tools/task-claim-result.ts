@@ -63,6 +63,8 @@ export function dlqStatusResult(result: DeadLetterEntriesResult) {
     status: "ok",
     entries: result.entries,
     count: result.entries.length,
+    // Entries the DLQ length bound has discarded for this agent, ever (DL-7).
+    dropped: result.dropped,
   });
 }
 

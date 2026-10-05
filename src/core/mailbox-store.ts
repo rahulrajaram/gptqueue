@@ -89,13 +89,19 @@ export class MailboxStore {
     return false;
   }
 
-  /** Push once for a caller key, returning the original id on retries. */
+  /**
+   * Push once per (sender, recipient, caller key), returning the original id
+   * on retries. Reusing a key for a different recipient is a different send.
+   * Legacy sender-only keys written before this scoping are not consulted:
+   * honoring one could drop a send to a new recipient, while ignoring one can
+   * at worst duplicate a retry that straddles the upgrade (at-least-once).
+   */
   async sendIdempotent(
     message: QueueMessage,
     sender: string,
     idempotencyKey: string
   ): Promise<{ status: "sent" | "duplicate" | "full"; messageId: string }> {
-    const dedupeKey = `${SESSION_KEYS.idempotency(sender)}:${encodeURIComponent(idempotencyKey)}`;
+    const dedupeKey = SESSION_KEYS.idempotencyFor(sender, message.to, idempotencyKey);
     const queueKey = SESSION_KEYS.queue(message.to);
     const metaKey = SESSION_KEYS.mailboxMeta(message.to);
     const serialized = JSON.stringify(message);

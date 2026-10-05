@@ -4,9 +4,8 @@ import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
 import { WAKE_EXIT_SCRIPT } from "./helpers/wake-launch.js";
 import { Redis } from "ioredis";
 import { spawn } from "child_process";
-import { readFileSync } from "fs";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
-import { TaskClaimStore } from "../src/core/task-claim-store.js";
+import { TaskClaimStore, claimLuaScript } from "../src/core/task-claim-store.js";
 import {
   ACTOR_KEYS,
   CLAIM_KEYS,
@@ -76,7 +75,7 @@ describe("TaskClaimStore", () => {
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
     await flushTestKeys(redis);
-    store = new TaskClaimStore(redis);
+    store = new TaskClaimStore(redis, { clock: "caller" });
   });
 
   afterEach(async () => {
@@ -991,10 +990,7 @@ describe("dead-letter queue (tranche 2)", () => {
 
   // The recovery Lua constants (DLQ_PROVISIONAL) are frozen imports, so tests
   // that need a smaller cap / bound invoke the raw script with a small ARGV.
-  const dlqLua = readFileSync(
-    new URL("../src/mcp-server/lua/claims-recover.lua", import.meta.url),
-    "utf-8"
-  );
+  const dlqLua = claimLuaScript("claims-recover.lua");
 
   // Directly eval the recovery script with an arbitrary cap / DLQ bound.
   const evalRecovery = async (
@@ -1005,11 +1001,14 @@ describe("dead-letter queue (tranche 2)", () => {
   ): Promise<[number, number]> =>
     (await redis.eval(
       dlqLua,
-      4,
+      7,
       CLAIM_KEYS.index(actorId),
       CLAIM_KEYS.claims,
       SESSION_KEYS.queue(actorId),
       DLQ_KEYS.list(actorId),
+      SESSION_KEYS.inboxEvents(actorId),
+      SESSION_KEYS.mailboxMeta(actorId),
+      DLQ_KEYS.dropped(actorId),
       Date.parse(nowISO),
       cap,
       maxLength,
@@ -1052,7 +1051,7 @@ describe("dead-letter queue (tranche 2)", () => {
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
     await flushTestKeys(redis);
-    store = new TaskClaimStore(redis);
+    store = new TaskClaimStore(redis, { clock: "caller" });
   });
 
   afterEach(async () => {

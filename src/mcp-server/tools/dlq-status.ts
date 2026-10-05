@@ -27,6 +27,8 @@ export const dlqStatusSchema = z.object({
  * RECOVER_CAP times (a provisional policy constant) without a successful
  * acknowledge. Each entry carries the raw payload plus the decoded message
  * id and timestamp. Empty DLQ is an explicit empty list, not an error.
+ * `dropped` counts entries the DLQ length bound has discarded (oldest first),
+ * so a trimmed DLQ is never silently incomplete.
  */
 export async function dlqStatus(
   client: RedisClient,

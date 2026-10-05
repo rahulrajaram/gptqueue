@@ -68,7 +68,8 @@ describe("runtime controller (bind_runtime)", () => {
       payload: { content: "unfinished task", in_reply_to: randomUUID() },
     };
     await original.sendMessage(envelope);
-    const claims = new TaskClaimStore(original.adapterConnection);
+    // The claim is backdated so it is already expired: a simulated clock.
+    const claims = new TaskClaimStore(original.adapterConnection, { clock: "caller" });
     const claimed = await claims.claim({
       actor_id: canonical, session_id: original.sessionId!, max_batch: 1,
       ttl_seconds: 1, now: new Date(Date.now() - 60_000).toISOString(),

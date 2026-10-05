@@ -256,6 +256,9 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
   const claimOne = async (sessionId: string, ttlSeconds: number, now: Date) => {
     const claimed = await client.taskClaim.claim({ actor_id: "old-name", session_id: sessionId, max_batch: 1, ttl_seconds: ttlSeconds, now: now.toISOString() });
     if (!claimed.ok || claimed.claim === null) throw new Error("expected a claim");
+    // Expiry is decided on the Redis server clock, which ignores the passed
+    // `now`; backdate the index score so the claim expires as `now` intends.
+    await redis.zadd(CLAIM_KEYS.index("old-name"), "XX", now.getTime() + ttlSeconds * 1000, claimed.claim.claim_id);
     return claimed.claim;
   };
 

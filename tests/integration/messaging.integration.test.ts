@@ -8,14 +8,13 @@ import {
   afterEach,
   vi,
 } from "vitest";
-import { readFileSync } from "node:fs";
 import type { Redis } from "ioredis";
 import {
   setupIntegrationServer,
   type IntegrationServer,
 } from "../helpers/integration-server.js";
 import { connectAgent, type Agent } from "../helpers/mcp-agent.js";
-import { TaskClaimStore } from "../../src/core/task-claim-store.js";
+import { TaskClaimStore, claimLuaScript } from "../../src/core/task-claim-store.js";
 import {
   CLAIM_KEYS,
   SESSION_KEYS,
@@ -391,7 +390,7 @@ describe("claim renewal", () => {
   });
 
   it("budget exhaustion is refused with budget_exceeded (direct TaskClaimStore.renew path)", async () => {
-    const store = new TaskClaimStore(ctx.redis);
+    const store = new TaskClaimStore(ctx.redis, { clock: "caller" });
     const actor = uniq("budget-act");
     const T0 = "2030-01-01T00:00:00.000Z";
     await ctx.redis.rpush(
@@ -466,18 +465,18 @@ describe("recovery & redelivery", () => {
 describe("dead-letter queue recovery quarantine", () => {
   // Direct Lua eval of the recovery script with an arbitrary small cap, so this
   // test can drive a message to the DLQ without waiting out 5 real 1s leases.
-  const dlqLua = readFileSync(
-    new URL("../../src/mcp-server/lua/claims-recover.lua", import.meta.url),
-    "utf-8"
-  );
+  const dlqLua = claimLuaScript("claims-recover.lua");
   const evalRecovery = async (actor: string, cap: number, nowMs: number): Promise<[number, number]> =>
     (await ctx.redis.eval(
       dlqLua,
-      4,
+      7,
       CLAIM_KEYS.index(actor),
       CLAIM_KEYS.claims,
       SESSION_KEYS.queue(actor),
       DLQ_KEYS.list(actor),
+      SESSION_KEYS.inboxEvents(actor),
+      SESSION_KEYS.mailboxMeta(actor),
+      DLQ_KEYS.dropped(actor),
       nowMs,
       cap,
       1000,

@@ -54,6 +54,15 @@ export const SESSION_KEYS = {
   /** Retry-deduplication namespace; individual keys expire after 24 hours. */
   idempotency: (sender: string) => `gptq:idempotency:${sender}`,
 
+  /**
+   * One retry-deduplication key, scoped to (sender, recipient, caller key).
+   * Both variable parts are URI-encoded, so neither contains ':' and the
+   * `:to=` segment can never collide with a legacy sender-only key
+   * (`gptq:idempotency:<sender>:<encoded key>`), which is no longer read.
+   */
+  idempotencyFor: (sender: string, recipient: string, key: string) =>
+    `gptq:idempotency:${sender}:to=${encodeURIComponent(recipient)}:${encodeURIComponent(key)}`,
+
   /** Header-only wake events for an agent's inbox (stream). */
   inboxEvents: (agent: string) => `gptq:inbox-events:${agent}`,
 
@@ -131,6 +140,12 @@ export const CLAIM_KEYS = {
 export const DLQ_KEYS = {
   /** Per-actor list of dead-lettered raw task payloads; length bounded by DLQ_PROVISIONAL.DLQ_MAX_LENGTH. */
   list: (actorId: string) => `gptq:dlq:${actorId}`,
+  /**
+   * Per-actor count (string, INCRBY'd in claims-recover.lua) of DLQ entries
+   * the DLQ_MAX_LENGTH trim has discarded, reported by dlq_status so drops are
+   * never silent. claims-purge.lua deletes it by the same literal prefix.
+   */
+  dropped: (actorId: string) => `gptq:dlq-dropped:${actorId}`,
 } as const;
 
 /**

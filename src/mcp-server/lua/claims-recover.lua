@@ -32,18 +32,38 @@
 -- KEYS[2] = claims hash (gptq:claims)
 -- KEYS[3] = inbox list (gptq:q:<actor_id>)
 -- KEYS[4] = DLQ list (gptq:dlq:<actor_id>)
--- ARGV[1] = now epoch ms cutoff; claims with score < now are expired
+-- KEYS[5] = inbox event stream (gptq:inbox-events:<actor_id>)
+-- KEYS[6] = mailbox metadata hash (gptq:meta:<actor_id>)
+-- KEYS[7] = DLQ drop counter (gptq:dlq-dropped:<actor_id>)
+-- ARGV[1] = now epoch ms cutoff from a caller-simulated clock, or '' (the
+--           default) to use Redis server TIME; claims with score < now are
+--           expired. Expiry is decided on the server clock so a process whose
+--           wall clock runs fast cannot recover a live claim early.
 -- ARGV[2] = recover_cap (int >= 1): a message recovered more than cap times is dead-lettered
 -- ARGV[3] = dlq_max_length (int >= 1): LTRIM bound on the DLQ list (keep newest)
 -- ARGV[4] = counter_ttl_seconds (int >= 1): EX placed on a fresh recovery counter
 --
--- Returns { recovered_tasks, deadlettered_tasks }, or { -1, 'inbox' | 'dlq' |
--- 'counter' } when that destination holds the wrong type.
+-- Wake and size (DL-2): a re-queued task emits the same inbox event a fresh
+-- send would (wake_plan in claims-lib.lua), so an idle runtime blocked in
+-- XREAD wakes at once instead of waiting for a rescan. Recovery is NOT bounded
+-- by the send admission bound: accepted work is never dropped. The overshoot
+-- is made visible instead: current_size in the mailbox metadata is set to the
+-- inbox's true length after the push.
+--
+-- DLQ drops (DL-7): when the LTRIM bound discards the oldest DLQ entries, the
+-- number discarded is added to KEYS[7], which dlq_status reports.
+--
+-- Returns { recovered_tasks, deadlettered_tasks, dlq_dropped }, or { -1,
+-- 'inbox' | 'dlq' | 'counter' | 'events' | 'meta' | 'outstanding' |
+-- 'dropped' } when that key holds the wrong type.
 local index = KEYS[1]
 local claims = KEYS[2]
 local inbox = KEYS[3]
 local dlq = KEYS[4]
-local now = tonumber(ARGV[1])
+local events = KEYS[5]
+local meta = KEYS[6]
+local dropped = KEYS[7]
+local now = tonumber(ARGV[1]) or server_ms()
 local recoverCap = tonumber(ARGV[2])
 local dlqMaxLength = tonumber(ARGV[3])
 local counterTtl = tonumber(ARGV[4])
@@ -52,7 +72,7 @@ local counterTtl = tonumber(ARGV[4])
 -- cutoff excludes a claim whose score exactly equals the present instant.
 local expired = redis.call('ZRANGEBYSCORE', index, '-inf', now - 1)
 if #expired == 0 then
-  return { 0, 0 }
+  return { 0, 0, 0 }
 end
 
 local function holds(key, kind)
@@ -97,7 +117,9 @@ for _, claimId in ipairs(expired) do
           local current = redis.call('GET', counterKey)
           if current and not incrementable(current) then return { -1, 'counter' } end
         end
-        entry.tasks[#entry.tasks + 1] = { task = task, counterKey = counterKey }
+        local wake = wake_plan(task)
+        if wake == false then return { -1, 'outstanding' } end
+        entry.tasks[#entry.tasks + 1] = { task = task, counterKey = counterKey, wake = wake }
       end
     end
   end
@@ -105,10 +127,21 @@ for _, claimId in ipairs(expired) do
 end
 if not holds(inbox, 'list') then return { -1, 'inbox' } end
 if not holds(dlq, 'list') then return { -1, 'dlq' } end
+if not holds(events, 'stream') then return { -1, 'events' } end
+if not holds(meta, 'hash') then return { -1, 'meta' } end
+if not holds(dropped, 'string') then return { -1, 'dropped' } end
+local droppedSoFar = redis.call('GET', dropped)
+if droppedSoFar and not incrementable(droppedSoFar) then return { -1, 'dropped' } end
 
 -- Pass 2: every write below targets a validated key.
 local recovered = 0
 local deadlettered = 0
+local dlqDropped = 0
+local function requeue(item)
+  redis.call('RPUSH', inbox, item.task)
+  if item.wake then wake_emit(events, item.wake) end
+  recovered = recovered + 1
+end
 for _, entry in ipairs(plan) do
   -- Remove the claim regardless of readability so the index/hash cannot leak
   -- entries; only recoverable tasks are re-queued.
@@ -120,23 +153,28 @@ for _, entry in ipairs(plan) do
     if not counterKey then
       -- Legacy / undecodable envelope, or a corrupt claim record without an
       -- actor id: no per-message counter can be tracked. Re-queue directly.
-      redis.call('RPUSH', inbox, task)
-      recovered = recovered + 1
+      requeue(item)
     else
       local count = redis.call('INCR', counterKey)
       if count == 1 then
         redis.call('EXPIRE', counterKey, counterTtl)
       end
       if count > recoverCap then
-        redis.call('LPUSH', dlq, task)
-        redis.call('LTRIM', dlq, 0, dlqMaxLength - 1)
+        local length = redis.call('LPUSH', dlq, task)
+        if length > dlqMaxLength then
+          redis.call('LTRIM', dlq, 0, dlqMaxLength - 1)
+          dlqDropped = dlqDropped + (length - dlqMaxLength)
+        end
         redis.call('DEL', counterKey)
         deadlettered = deadlettered + 1
       else
-        redis.call('RPUSH', inbox, task)
-        recovered = recovered + 1
+        requeue(item)
       end
     end
   end
 end
-return { recovered, deadlettered }
+if recovered > 0 then
+  redis.call('HSET', meta, 'current_size', redis.call('LLEN', inbox))
+end
+if dlqDropped > 0 then redis.call('INCRBY', dropped, dlqDropped) end
+return { recovered, deadlettered, dlqDropped }

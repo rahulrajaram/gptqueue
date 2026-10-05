@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { Redis } from "ioredis";
 import { InboxEvents } from "../src/core/inbox-events.js";
+import { SESSION_KEYS } from "../src/core/keys.js";
 import { MailboxStore } from "../src/core/mailbox-store.js";
 import type { QueueMessage } from "../src/mcp-server/types.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
@@ -71,7 +72,7 @@ describe("InboxEvents", () => {
   it("preflights the idempotent event stream before mutation", async () => {
     await redis.hset("gptq:meta:b", "max_size", 10); await redis.set("gptq:inbox-events:b", "wrong-type");
     await expect(store.sendIdempotent(message({ id: "bad-idem" }), "a", "bad-stream")).rejects.toThrow();
-    expect(await redis.llen("gptq:q:b")).toBe(0); expect(await redis.get("gptq:idempotency:a:bad-stream")).toBeNull();
+    expect(await redis.llen("gptq:q:b")).toBe(0); expect(await redis.get(SESSION_KEYS.idempotencyFor("a", "b", "bad-stream"))).toBeNull();
   });
 
   it("makes trace failure best effort and emits only a generic diagnostic", async () => {
