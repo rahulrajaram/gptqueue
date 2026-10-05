@@ -205,8 +205,13 @@ export class RedisClient {
     role: string,
     name: string,
     description?: string,
-    metadata?: AgentDiscoveryMetadata
+    metadata?: AgentDiscoveryMetadata,
+    options: { readonly shared?: boolean } = {}
   ): Promise<{ name: string; session_id: string }> {
+    // D2: names are exclusive unless this registrant opts into sharing,
+    // explicitly or through GPTQ_AGENT_SHARED=1 for processes that cannot
+    // pass the flag.
+    const shared = options.shared ?? process.env.GPTQ_AGENT_SHARED === "1";
     const oldName = this._agentName;
     const oldSessionId = this._sessionId;
     const renaming =
@@ -236,7 +241,9 @@ export class RedisClient {
       session = await this.sessionStore.createSession(
         name,
         role as "publisher" | "consumer" | "both",
-        description
+        description,
+        undefined,
+        { shared, selfSessionId: this._sessionId }
       );
     } catch (error) {
       // D4: the old identity keeps serving — restore the heartbeat the

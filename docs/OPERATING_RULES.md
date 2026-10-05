@@ -17,8 +17,10 @@ retry (bounded to 24 hours). It does not make your handler idempotent.
 
 ## 2. Two consumption paths exist; do not mix them on one inbox
 
-- `receive_message` — destructive BLPOP, at-most-once, for plain agents
-  (notifications where losing one message is acceptable).
+- `receive_message` — **deprecated** (decision D3). Destructive BLPOP,
+  at-most-once: a message popped by a session that then fails is lost. It
+  still works for plain agents, but every runtime should consume with
+  `claim_tasks`/`acknowledge_tasks` instead.
 - `claim_tasks`/`acknowledge_tasks` — at-least-once, for durable actors.
 
 Durable actors (agents with an actor-directory record) are rejected from
@@ -115,3 +117,16 @@ REDIS_URL=redis://127.0.0.1:6379/15 node node_modules/vitest/vitest.mjs run
 Do not rely on the shell inheriting environment variables from elsewhere;
 Vitest enforces db15 before test collection, and cleanup checks the actual
 Redis connection database. Local cleanup helpers must use the shared guard.
+
+## Agent name ownership (decision D2)
+
+Agent names are exclusive by default. `register_agent` (and a rename onto
+another name) fails with error code `AGENT_NAME_HELD`, details `name` and
+`holder_session_id`, while a live session holds the name. A session is live
+while its lease is unexpired and, when it recorded a pid on this host, that
+pid is alive. A dead holder is taken over atomically and audited to the
+`gptq:identity-audit` stream; its mailbox, claims and history are kept.
+Sharing is opt-in: pass `shared: true` on every registrant (a shared holder
+never admits a non-shared claimant, or the reverse), or set
+`GPTQ_AGENT_SHARED=1` as the default for processes that cannot pass the
+flag. Reconnecting by `session_id` is unaffected.

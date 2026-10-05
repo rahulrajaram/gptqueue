@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { receiveMessageSchema } from "../src/mcp-server/tools/receive-message.js";
 import { sendMessageSchema } from "../src/mcp-server/tools/send-message.js";
 import { stableToolError } from "../src/mcp-server/tool-result.js";
-import { GPTQUEUE_INSTRUCTIONS } from "../src/transports/setup-tools.js";
+import { GPTQUEUE_INSTRUCTIONS, RECEIVE_MESSAGE_DESCRIPTION, REGISTER_AGENT_DESCRIPTION } from "../src/transports/setup-tools.js";
 import { custodyClaimSchema } from "../src/mcp-server/tools/custody-claim.js";
 import { custodyReleaseSchema } from "../src/mcp-server/tools/custody-release.js";
 import { custodyStatusSchema } from "../src/mcp-server/tools/custody-status.js";
@@ -183,5 +183,12 @@ describe("MCP contract hardening", () => {
     expect(
       custodyStatusSchema.safeParse({ worktree_path: "" }).success
     ).toBe(false);
+  });
+
+  it("marks receive_message deprecated as at-most-once (D3)", () => {
+    expect(RECEIVE_MESSAGE_DESCRIPTION).toContain("DEPRECATED: at-most-once");
+    expect(RECEIVE_MESSAGE_DESCRIPTION).toContain("claim_tasks and acknowledge_tasks");
+    expect(GPTQUEUE_INSTRUCTIONS).toContain("receive_message is deprecated");
+    expect(REGISTER_AGENT_DESCRIPTION).toContain("AGENT_NAME_HELD");
   });
 });

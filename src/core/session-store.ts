@@ -5,10 +5,13 @@
  * Does NOT own queue/mailbox operations (see MailboxStore).
  */
 
+import { readlinkSync } from "node:fs";
+import { hostname } from "node:os";
 import { Redis, type ChainableCommander } from "ioredis";
 import { v4 as uuidv4 } from "uuid";
 import { SESSION_KEYS, SESSION_DEFAULTS } from "./keys.js";
 import type { SessionRecord, LeaseState, AgentPresence } from "./types.js";
+import { GptQueueError } from "../mcp-server/errors.js";
 
 /** KEYS order shared by the registry rollback scripts below. */
 const REGISTRY_ROLLBACK_KEYS = [
@@ -43,6 +46,87 @@ for _, sid in ipairs(redis.call('SMEMBERS', KEYS[1])) do
 end
 return pruned
 `;
+
+/**
+ * Exclusive name claim (D2, ID-1, ID-5). Atomically decides whether a new
+ * session may hold an agent name and, if so, creates it. Every member of the
+ * name's session set is classified:
+ *   - no lease: expired; removed (taken over);
+ *   - ARGV[5] (the caller's own current session): ignored;
+ *   - listed in ARGV[6] (a holder JavaScript saw with a dead pid on this
+ *     host): removed (taken over);
+ *   - otherwise live: admitted only when both it and the claimant opted into
+ *     sharing; any other live holder refuses the claim with its session id.
+ * Two claimants racing for one dead holder both list it, but the first
+ * script's new session is live and unlisted for the second, so exactly one
+ * wins. Takeover removes only the old session record, lease and membership;
+ * the mailbox, claims and history are untouched. Each takeover is audited.
+ * KEYS: 1 agent sessions, 2 new session, 3 new lease, 4 identity audit.
+ * ARGV: 1 name, 2 new sid, 3 shared '1'|'0', 4 lease ttl, 5 self sid,
+ *   6 dead sids (space separated), 7.. HSET field/value pairs for the record.
+ * Returns {'ok', taken-over...} or {'held', holder sid}.
+ */
+const CLAIM_NAME_SCRIPT = `
+local dead = {}
+for sid in string.gmatch(ARGV[6], '%S+') do dead[sid] = true end
+local removals = {}
+for _, sid in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+  if redis.call('EXISTS', 'gptq:lease:' .. sid) == 0 then
+    table.insert(removals, {sid, 'lease_expired'})
+  elseif sid == ARGV[5] then
+    -- the caller's own session never blocks its re-registration
+  elseif dead[sid] then
+    table.insert(removals, {sid, 'holder_pid_dead'})
+  elseif not (ARGV[3] == '1' and redis.call('HGET', 'gptq:session:' .. sid, 'shared') == '1') then
+    return {'held', sid}
+  end
+end
+local taken = {'ok'}
+for _, r in ipairs(removals) do
+  redis.call('SREM', KEYS[1], r[1])
+  redis.call('DEL', 'gptq:session:' .. r[1], 'gptq:lease:' .. r[1])
+  redis.call('XADD', KEYS[4], 'MAXLEN', '~', 1000, '*', 'event', 'name_takeover',
+    'name', ARGV[1], 'old_session_id', r[1], 'new_session_id', ARGV[2], 'reason', r[2])
+  table.insert(taken, r[1])
+end
+local fields = {}
+for i = 7, #ARGV do table.insert(fields, ARGV[i]) end
+redis.call('HSET', KEYS[2], unpack(fields))
+redis.call('SET', KEYS[3], 'alive', 'EX', ARGV[4])
+redis.call('SADD', KEYS[1], ARGV[2])
+return taken
+`;
+
+/** Whether a local pid is alive. EPERM means it exists under another user. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * This process's PID-namespace identity (e.g. "pid:[4026531836]"), or null
+ * when unreadable. A matching hostname alone does not prove a shared PID
+ * namespace (containers), so pid liveness is only trusted when both match.
+ */
+export function pidNamespaceId(): string | null {
+  try {
+    return readlinkSync("/proc/self/ns/pid");
+  } catch {
+    return null;
+  }
+}
+
+/** Options for an exclusive name claim. */
+export interface ClaimOptions {
+  /** Opt into sharing the name with other sessions that also opted in. */
+  readonly shared?: boolean;
+  /** The caller's own current session, which never blocks its re-registration. */
+  readonly selfSessionId?: string | null;
+}
 
 /*
  * Registry rollback bookkeeping (R2). Registry values stay exactly what
@@ -136,13 +220,15 @@ export class SessionStore {
     agentName: string,
     role: "publisher" | "consumer" | "both",
     description?: string,
-    transport?: string
+    transport?: string,
+    options: ClaimOptions = {}
   ): Promise<CreatedSession> {
     const sessionId = uuidv4();
     const now = new Date().toISOString();
 
-    // Registration is the write path that bounds an agent's session set.
-    await this.pruneExpiredSessions(agentName);
+    // Expired members are removed (and audited) by the claim script itself,
+    // so no separate prune runs here: an unaudited prune would hide the
+    // takeover of an expired holder.
 
     const record: SessionRecord = {
       session_id: sessionId,
@@ -154,23 +240,45 @@ export class SessionStore {
       transport,
     };
 
-    // Record, initial lease, and set membership land together so a concurrent
-    // prune can never see this session as a leaseless (expired) member.
-    await this.redis
-      .multi()
-      .hset(
-        SESSION_KEYS.session(sessionId),
-        "session_id", sessionId,
-        "agent_name", agentName,
-        "role", role,
-        "description", description ?? "",
-        "created_at", now,
-        "last_seen", now,
-        "transport", transport ?? ""
-      )
-      .set(SESSION_KEYS.lease(sessionId), "alive", "EX", SESSION_DEFAULTS.LEASE_TTL_SECONDS)
-      .sadd(SESSION_KEYS.agentSessions(agentName), sessionId)
-      .exec();
+    // Record, initial lease, and set membership land together (so a
+    // concurrent prune never sees a leaseless member) and only after the
+    // exclusive name check passes, in one script (D2).
+    const host = hostname();
+    const pidns = pidNamespaceId();
+    const deadHolders = await this.deadLocalHolders(agentName, host, pidns);
+    const claim = (await this.redis.eval(
+      CLAIM_NAME_SCRIPT,
+      4,
+      SESSION_KEYS.agentSessions(agentName),
+      SESSION_KEYS.session(sessionId),
+      SESSION_KEYS.lease(sessionId),
+      SESSION_KEYS.identityAudit,
+      agentName,
+      sessionId,
+      options.shared ? "1" : "0",
+      SESSION_DEFAULTS.LEASE_TTL_SECONDS,
+      options.selfSessionId ?? "",
+      deadHolders.join(" "),
+      "session_id", sessionId,
+      "agent_name", agentName,
+      "role", role,
+      "description", description ?? "",
+      "created_at", now,
+      "last_seen", now,
+      "transport", transport ?? "",
+      "pid", process.pid,
+      "hostname", host,
+      "pidns", pidns ?? "",
+      "shared", options.shared ? "1" : "0"
+    )) as string[];
+    if (claim[0] === "held") {
+      throw new GptQueueError(
+        "AGENT_NAME_HELD",
+        `Agent name '${agentName}' is held by a live session (${claim[1]}). ` +
+          "Choose another name, or have both registrants opt into sharing (shared: true / GPTQ_AGENT_SHARED=1).",
+        { name: agentName, holder_session_id: claim[1]! }
+      );
+    }
 
     // Publish the name's provisional registry value, recording what a
     // rollback restores (RF3, FIX2, R2). It is exactly the JSON JavaScript
@@ -228,6 +336,21 @@ export class SessionStore {
       write.written
     );
     return undone === 1;
+  }
+
+  /** Sessions holding a name whose recorded pid on this host is gone. */
+  private async deadLocalHolders(agentName: string, host: string, pidns: string | null): Promise<string[]> {
+    if (pidns === null) return []; // cannot prove a shared PID namespace: rely on lease expiry
+    const sids = await this.redis.smembers(SESSION_KEYS.agentSessions(agentName));
+    const holders = await Promise.all(
+      sids.map(async (sid) => {
+        const [pid, holderHost, holderPidns] = await this.redis.hmget(SESSION_KEYS.session(sid), "pid", "hostname", "pidns");
+        const pidNumber = Number(pid);
+        const dead = holderHost === host && holderPidns === pidns && Number.isInteger(pidNumber) && pidNumber > 0 && !pidAlive(pidNumber);
+        return dead ? sid : null;
+      })
+    );
+    return holders.filter((sid): sid is string => sid !== null);
   }
 
   /** Refresh a session's lease TTL. Returns false when the session no longer exists. */

@@ -16,6 +16,12 @@ export const registerAgentSchema = z.object({
     .describe(
       "Human-readable description of what this agent does and what it can help with. Other agents use this to decide who to talk to. Be specific."
     ),
+  shared: z
+    .boolean()
+    .optional()
+    .describe(
+      "Opt into sharing this name with other live sessions that also opted in. Names are exclusive by default: registering a name a live session holds fails with AGENT_NAME_HELD. Defaults to GPTQ_AGENT_SHARED=1 when set."
+    ),
 });
 
 /**
@@ -45,7 +51,9 @@ export async function registerAgent(
   const result = await client.register(
     params.role,
     params.name,
-    params.description
+    params.description,
+    undefined,
+    params.shared === undefined ? {} : { shared: params.shared }
   );
   await clearOutstandingWakeLease(client, result.name);
   return toolResult({

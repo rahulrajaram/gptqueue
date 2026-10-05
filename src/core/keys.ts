@@ -81,6 +81,9 @@ export const SESSION_KEYS = {
 
   /** Append-only audit of identity continuity adoptions (stream). */
   continuityAudit: "gptq:continuity-audit",
+
+  /** Append-only audit of agent-name takeovers from dead holders (stream). */
+  identityAudit: "gptq:identity-audit",
 } as const;
 
 /** Default constants. */

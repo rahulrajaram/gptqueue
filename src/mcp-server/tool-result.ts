@@ -33,7 +33,12 @@ export function stableToolError(error: unknown) {
   return toolResult(
     {
       status: "error",
-      error: { code, message, retryable: code === "REDIS_UNAVAILABLE" },
+      error: {
+        code,
+        message,
+        retryable: code === "REDIS_UNAVAILABLE",
+        ...(error instanceof GptQueueError && error.details ? { details: error.details } : {}),
+      },
     },
     true
   );

@@ -49,7 +49,14 @@ const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true } as const;
 const IDEMPOTENT_WRITE = { readOnlyHint: false, idempotentHint: true } as const;
 
 export const GPTQUEUE_INSTRUCTIONS =
-  "GPTQueue is an external/shared Redis-backed coordination plane. Choose it instead of native in-session collaboration; do not operate both for the same workflow. Register before session-scoped calls, retain the returned session_id for stateless reconnection, use idempotency_key when retrying sends, and prefer close_session over destructive unregister_agent when preserving the mailbox matters.";
+  "GPTQueue is an external/shared Redis-backed coordination plane. Choose it instead of native in-session collaboration; do not operate both for the same workflow. Register before session-scoped calls, retain the returned session_id for stateless reconnection, use idempotency_key when retrying sends, and prefer close_session over destructive unregister_agent when preserving the mailbox matters. Agent names are exclusive: registering a name a live session holds fails with AGENT_NAME_HELD unless both registrants pass shared: true. receive_message is deprecated: it is at-most-once (a message popped by a session that then fails is lost); consume with claim_tasks and acknowledge_tasks instead.";
+
+/** D3: receive_message keeps working but is deprecated as at-most-once. */
+export const RECEIVE_MESSAGE_DESCRIPTION =
+  "[safety: writable] DEPRECATED: at-most-once. Receives and consumes (destructively pops) the next message from this agent's GPTQueue inbox; a message is lost if this session fails after the pop. Use claim_tasks and acknowledge_tasks for at-least-once delivery. Returns the message or timeout.";
+
+export const REGISTER_AGENT_DESCRIPTION =
+  "[safety: writable] Register this agent and create a new durable session. Names are exclusive by default: a name held by a live session is refused with AGENT_NAME_HELD (details: name, holder_session_id); a dead holder is taken over with an audit event. Pass shared: true (on every registrant) to share a name. Re-registration is not idempotent: it creates a new session; renaming also migrates pending messages.";
 
 async function safeToolCall<T>(call: () => Promise<T>) {
   try {
@@ -62,7 +69,7 @@ async function safeToolCall<T>(call: () => Promise<T>) {
 export function registerTools(server: McpServer, redisClient: RedisClient): void {
   server.tool(
     "register_agent",
-    "[safety: writable] Register this agent and create a new durable session. Re-registration is not idempotent: it creates a new session; renaming also migrates pending messages.",
+    REGISTER_AGENT_DESCRIPTION,
     registerAgentSchema.shape,
     WRITABLE,
     async (params) => safeToolCall(() => registerAgent(redisClient, registerAgentSchema.parse(params)))
@@ -78,7 +85,7 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
 
   server.tool(
     "receive_message",
-    "[safety: writable] Receive and consume the next message from this agent's GPTQueue inbox. Returns the message or timeout.",
+    RECEIVE_MESSAGE_DESCRIPTION,
     receiveMessageSchema.shape,
     WRITABLE,
     // The request signal ends the receive's blocking pop when the MCP client
