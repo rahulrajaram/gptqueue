@@ -130,3 +130,51 @@ describe("Codex socket",()=>{
   } finally { await c.close(); await closeServer(x.srv); await rm(x.root, { recursive: true, force: true }); }
  });
 });
+
+describe("Codex socket notifications", () => {
+  it("delivers id-less server notifications (v2 turn/completed shape) to listeners and still resolves requests", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gptq-sock-notify-"));
+    const path = join(root, "sock");
+    const srv = createServer(socket => {
+      let buffer = Buffer.alloc(0), ready = false;
+      socket.on("data", (chunk: Buffer) => {
+        buffer = Buffer.concat([buffer, chunk]);
+        if (!ready) {
+          const end = buffer.indexOf("\r\n\r\n"); if (end < 0) return;
+          const key = /Sec-WebSocket-Key: (.+)/i.exec(buffer.subarray(0, end).toString())?.[1]?.trim() ?? "";
+          socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${createHash("sha1").update(key + GUID).digest("base64")}\r\n\r\n`);
+          buffer = buffer.subarray(end + 4); ready = true;
+        }
+        while (buffer.length >= 2) {
+          const code = buffer[1]! & 127; let header = 2, size = code;
+          if (code === 126) { if (buffer.length < 4) return; size = buffer.readUInt16BE(2); header = 4; }
+          if (buffer.length < header + 4 + size) return;
+          const mask = buffer.subarray(header, header + 4); header += 4;
+          const payload = Buffer.alloc(size);
+          for (let i = 0; i < size; i++) payload[i] = buffer[header + i]! ^ mask[i % 4]!;
+          buffer = buffer.subarray(header + size);
+          const message = JSON.parse(payload.toString()) as { id?: number; method?: string };
+          if (message.method === "initialized") continue;
+          if (message.method === "thread/turns/list") {
+            // Server request (has id and method) must never be surfaced as a notification.
+            socket.write(serverFrame(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 999, method: "item/tool/requestUserInput", params: { threadId: "thread-1" } }))));
+            socket.write(serverFrame(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [], itemsView: "notLoaded" } } }))));
+          }
+          socket.write(serverFrame(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }))));
+        }
+      });
+    });
+    await new Promise<void>(r => srv.listen(path, r));
+    const client = new CodexSocketClient(path, 2_000);
+    try {
+      const seen: unknown[] = [];
+      const off = client.onNotification((n) => { seen.push(n); });
+      client.onNotification(() => { throw new Error("listener fault is isolated"); });
+      await expect(client.request("thread/turns/list", { threadId: "thread-1" }, new AbortController().signal)).resolves.toEqual({});
+      expect(seen).toEqual([{ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [], itemsView: "notLoaded" } } }]);
+      off();
+      await client.request("thread/turns/list", { threadId: "thread-1" }, new AbortController().signal);
+      expect(seen).toHaveLength(1);
+    } finally { await client.close(); srv.close(); await rm(root, { recursive: true, force: true }); }
+  });
+});

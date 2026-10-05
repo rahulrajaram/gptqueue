@@ -1,6 +1,6 @@
 import type { RedisClient } from "../mcp-server/redis-client.js";
 import { startInboxDispatcher, type InboxDispatcher } from "./inbox-dispatcher.js";
-import { validateRuntimeBinding, type RuntimeAdapter, type RuntimeBinding } from "./runtime.js";
+import { subscribeStale, validateRuntimeBinding, type RuntimeAdapter, type RuntimeBinding } from "./runtime.js";
 import type { RuntimeTools } from "./runtime-tools.js";
 import { restoreRuntimeMailbox } from "./runtime-mailbox.js";
 
@@ -8,14 +8,18 @@ export const createRuntimeController = (
   client: RedisClient,
   expected: Readonly<{ client: "codex" | "pi"; working_directory: string }>,
   createAdapter: (binding: RuntimeBinding) => Promise<RuntimeAdapter>,
+  /** Called once the bound runtime reports it was closed by its host; the owner should retire the session. */
+  onRuntimeStale: (binding: RuntimeBinding) => void = () => undefined,
 ): RuntimeTools & { close(): Promise<void> } => {
   let binding: RuntimeBinding | undefined;
+  let host: RuntimeAdapter | undefined;
   let dispatcher: InboxDispatcher | undefined;
   let closed = false;
   let operation: Promise<unknown> = Promise.resolve();
   const status = (): Record<string, unknown> => ({
     status: "ok", agent: client.agentName, activation_ready: !!dispatcher && !closed,
     runtime: binding ?? null,
+    ...(host?.describe && dispatcher && !closed ? { runtime_host: host.describe() } : {}),
   });
   return {
     status,
@@ -37,7 +41,19 @@ export const createRuntimeController = (
           await restoreRuntimeMailbox(client, binding);
           dispatcher = await startInboxDispatcher(client.adapterConnection, client.requireRegistered(), adapter);
           const active = dispatcher;
+          host = adapter;
           void active.closed.finally(() => { if (dispatcher === active) dispatcher = undefined; });
+          const bound = binding;
+          // A closed host thread must not keep looking activation-ready, and must
+          // release its dispatcher lease so a resumed session can take over.
+          subscribeStale(adapter, () => {
+            operation = operation.then(async () => {
+              if (dispatcher !== active || binding !== bound) return;
+              dispatcher = undefined;
+              await active.close().catch(() => undefined);
+              onRuntimeStale(bound);
+            }).catch(() => undefined);
+          });
           return status();
         } catch (error) { await adapter.close(); throw error; }
       });

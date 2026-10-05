@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createCodexRuntime, type CodexRpcClient } from "../src/registered-shell/codex-runtime.js";
+import { createCodexRuntime, CODEX_TURN_WINDOW, type CodexNotification, type CodexRpcClient } from "../src/registered-shell/codex-runtime.js";
 
 const binding = { client: "codex" as const, runtime_id: "thread-1", epoch: "e1", working_directory: "/workspace" };
 const fake = (responses: Record<string, Record<string, unknown>>): CodexRpcClient & { calls: string[] } => {
@@ -11,7 +11,7 @@ describe("Codex runtime", () => {
   it("validates exact thread and starts an idle turn", async () => {
     const client = fake({ "thread/read": { id: "thread-1", cwd: "/workspace", turns: [] }, "turn/start": { turn: { id: "turn-1" } } });
     const runtime = await createCodexRuntime(binding, { client }); const result = await runtime.activate({ operation_id: "op-1", prompt: "hello" }, new AbortController().signal);
-    expect(result).toEqual({ status: "started", turn_id: "turn-1" }); expect(client.calls).toEqual(["thread/read", "thread/read", "turn/start"]);
+    expect(result).toEqual({ status: "started", turn_id: "turn-1" }); expect(client.calls).toEqual(["thread/read", "thread/read", "thread/turns/list", "thread/read", "turn/start"]);
   });
   it("returns busy and never steers an active thread", async () => {
     const client = fake({ "thread/read": { id: "thread-1", cwd: "/workspace", turns: [{ id: "t", status: "inProgress", items: [] }] } }); const runtime = await createCodexRuntime(binding, { client });
@@ -39,3 +39,117 @@ describe("Codex runtime", () => {
     expect(client.calls).not.toContain("turn/start");
   });
 });
+
+/**
+ * Faithful to `codex app-server generate-json-schema` (codex-cli 0.160.0), v2/:
+ * Thread.status is ThreadStatus {type: notLoaded|idle|systemError|active}; Turn has
+ * {id, status: completed|interrupted|failed|inProgress, items, itemsView: notLoaded|summary|full};
+ * thread/turns/list -> {data: Turn[], nextCursor, backwardsCursor} (default descending);
+ * thread/items/list -> {data: ThreadItemEntry{turnId, item}[], nextCursor};
+ * UserMessage item {type: "userMessage", id, clientId?, content}.
+ */
+type V2Turn = { id: string; status: "completed" | "interrupted" | "failed" | "inProgress"; items: Record<string, unknown>[] };
+const v2 = (turns: V2Turn[], status: Record<string, unknown> = { type: "idle" }) => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const listeners = new Set<(n: CodexNotification) => void>();
+  const client: CodexRpcClient & { calls: typeof calls; emit(n: CodexNotification): void } = {
+    calls,
+    emit: (n) => { for (const l of listeners) l(n); },
+    onNotification: (l) => { listeners.add(l); return () => listeners.delete(l); },
+    close: async () => {},
+    request: async (method, params) => {
+      calls.push({ method, params });
+      switch (method) {
+        case "thread/read":
+          if (params.includeTurns) throw new Error("full history must not be read");
+          return { thread: { id: "thread-1", cwd: "/workspace", status, turns: [] } };
+        case "thread/turns/list": {
+          const newest = [...turns].reverse();
+          const limit = Number(params.limit);
+          return { data: newest.slice(0, limit).map((t) => ({ id: t.id, status: t.status, items: [], itemsView: "notLoaded" })),
+            nextCursor: newest.length > limit ? "cursor" : null, backwardsCursor: null };
+        }
+        case "thread/items/list": {
+          const turn = turns.find((t) => t.id === params.turnId)!;
+          return { data: turn.items.slice(0, Number(params.limit)).map((item) => ({ turnId: turn.id, item })), nextCursor: null };
+        }
+        case "thread/resume": return { thread: { id: "thread-1" } };
+        case "turn/start": return { turn: { id: "turn-new", status: "inProgress", items: [] } };
+        default: return {};
+      }
+    },
+  };
+  return client;
+};
+const user = (clientId: string, text = "x") => ({ type: "userMessage", id: `u-${clientId}`, clientId, content: [{ type: "text", text }] });
+const filler = (n: number): V2Turn[] => Array.from({ length: n }, (_, i) => ({ id: `old-${i}`, status: "completed", items: [user(`other-${i}`), { type: "agentMessage", id: `a-${i}`, text: "y".repeat(1000) }] }));
+const sig = () => new AbortController().signal;
+
+describe("Codex runtime, bounded v2 history", () => {
+  it("does not go ambiguous on long or summarized history and reads only a bounded window", async () => {
+    const client = v2(filler(500));
+    const runtime = await createCodexRuntime(binding, { client });
+    expect(await runtime.activate({ operation_id: "op-new", prompt: "p" }, sig())).toEqual({ status: "started", turn_id: "turn-new" });
+    expect(client.calls.filter((c) => c.method === "thread/items/list")).toHaveLength(CODEX_TURN_WINDOW);
+    expect(client.calls.find((c) => c.method === "thread/turns/list")?.params).toMatchObject({ itemsView: "notLoaded", sortDirection: "desc" });
+    expect(client.calls.every((c) => c.method !== "thread/read" || c.params.includeTurns === false)).toBe(true);
+  });
+  it("keeps dedupe: a recent prior submission is found by clientId and never resubmitted", async () => {
+    const turns = [...filler(300), { id: "turn-mine", status: "completed" as const, items: [user("op-1", "hello")] }, ...filler(3).map((t) => ({ ...t, id: `n-${t.id}` }))];
+    const runtime = await createCodexRuntime(binding, { client: v2(turns) });
+    const client = v2(turns); const again = await createCodexRuntime(binding, { client });
+    expect(await runtime.activate({ operation_id: "op-1", prompt: "hello", recover_only: true }, sig())).toEqual({ status: "completed", turn_id: "turn-mine" });
+    expect(await again.activate({ operation_id: "op-1", prompt: "hello" }, sig())).toEqual({ status: "completed", turn_id: "turn-mine" });
+    expect(client.calls.map((c) => c.method)).not.toContain("turn/start");
+    // Outside the window with no match, recovery stays conservative.
+    expect(await runtime.activate({ operation_id: "op-missing", prompt: "z", recover_only: true }, sig())).toEqual({ status: "ambiguous" });
+  });
+  it("reports busy for an in-progress turn or active thread", async () => {
+    expect(await (await createCodexRuntime(binding, { client: v2([...filler(2), { id: "t", status: "inProgress", items: [user("someone")] }]) })).activate({ operation_id: "op", prompt: "p" }, sig())).toEqual({ status: "busy" });
+    expect(await (await createCodexRuntime(binding, { client: v2(filler(1), { type: "active", activeFlags: [] }) })).activate({ operation_id: "op", prompt: "p" }, sig())).toEqual({ status: "busy" });
+  });
+  it("still delivers to a notLoaded (detached TUI) thread headless and reports it truthfully", async () => {
+    const unloaded = v2(filler(1), { type: "notLoaded" });
+    const runtime = await createCodexRuntime(binding, { client: unloaded });
+    expect(await runtime.activate({ operation_id: "op", prompt: "p" }, sig())).toEqual({ status: "started", turn_id: "turn-new" });
+    expect(unloaded.calls.map((c) => c.method)).toContain("turn/start");
+    expect(runtime.describe!()).toEqual({ host_state: "notLoaded", attached: false, stale: false });
+  });
+  it("bounds systemError: unavailable, then stale only after N observations spanning the window", async () => {
+    const status: Record<string, unknown> = { type: "systemError" };
+    let clock = 0;
+    const runtime = await createCodexRuntime(binding, { client: v2([], status), now: () => clock, systemErrorThreshold: 3, systemErrorWindowMs: 120_000 });
+    let stale = 0; runtime.onStale!(() => { stale++; });
+    const go = () => runtime.activate({ operation_id: "op", prompt: "p" }, sig());
+    expect(await go()).toEqual({ status: "unavailable" });
+    clock = 60_000; expect(await go()).toEqual({ status: "unavailable" });
+    clock = 119_000; await go(); expect(stale).toBe(0); // three observations, window not yet spanned
+    status.type = "idle"; expect(await go()).toEqual({ status: "started", turn_id: "turn-new" }); // recovery resets
+    status.type = "systemError"; clock = 200_000; await go(); clock = 260_000; await go(); expect(stale).toBe(0);
+    clock = 320_000; await go(); expect(stale).toBe(1);
+    expect(await go()).toEqual({ status: "unavailable" });
+  });
+  it("fires the idle-again signal on turn/completed for its own thread only, after subscribing while busy", async () => {
+    const client = v2([{ id: "t", status: "inProgress", items: [user("someone")] }]);
+    const runtime = await createCodexRuntime(binding, { client });
+    let idle = 0; runtime.onIdle!(() => { idle++; });
+    expect(await runtime.activate({ operation_id: "op", prompt: "p" }, sig())).toEqual({ status: "busy" });
+    expect(client.calls.find((c) => c.method === "thread/resume")?.params).toEqual({ threadId: "thread-1", excludeTurns: true });
+    client.emit({ method: "turn/completed", params: { threadId: "other", turn: { id: "x", status: "completed", items: [] } } });
+    expect(idle).toBe(0);
+    client.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "t", status: "completed", items: [] } } });
+    client.emit({ method: "thread/status/changed", params: { threadId: "thread-1", status: { type: "idle" } } });
+    expect(idle).toBe(2);
+  });
+  it("marks itself stale on thread/closed and stops activating", async () => {
+    const client = v2([]);
+    const runtime = await createCodexRuntime(binding, { client });
+    let stale = 0; runtime.onStale!(() => { stale++; });
+    client.emit({ method: "thread/closed", params: { threadId: "thread-1" } });
+    client.emit({ method: "thread/closed", params: { threadId: "thread-1" } });
+    expect(stale).toBe(1);
+    expect(await runtime.activate({ operation_id: "op", prompt: "p" }, sig())).toEqual({ status: "unavailable" });
+    expect(client.calls.map((c) => c.method)).not.toContain("turn/start");
+  });
+});
+

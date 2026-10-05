@@ -15,7 +15,7 @@ export interface LifecycleLog {
   readonly phase?: string;
   readonly duration_ms?: number;
   readonly code?: string;
-  readonly reason?: "caller_abort" | "transport_closed" | "explicit_close" | "startup_failed";
+  readonly reason?: "caller_abort" | "transport_closed" | "explicit_close" | "startup_failed" | "runtime_closed";
 }
 
 /** Honor the configured state location and otherwise use the user's state directory. */

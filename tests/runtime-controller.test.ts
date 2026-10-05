@@ -105,4 +105,41 @@ describe("runtime controller (bind_runtime)", () => {
     await controller.close();
     expect(await controller.bind(binding({ epoch: "e3" }))).toEqual({ status: "error", code: "runtime_controller_closed" });
   });
+
+  it("refuses resume takeover while the old owner is live, and allows it once the old thread is closed", async () => {
+    const { client: original } = await setup();
+    const canonical = original.agentName!;
+    const nativeBinding = binding();
+    let fireStale: () => void = () => undefined;
+    const retired: RuntimeBinding[] = [];
+    const previous = createRuntimeController(original, { client: "codex", working_directory: WORKDIR }, async (identity) => ({
+      binding: identity, activate: async () => ({ status: "busy" }), close: async () => undefined,
+      onStale: (listener: () => void) => { fireStale = listener; return () => undefined; },
+      describe: () => ({ host_state: "notLoaded", attached: false }),
+    }), (stale) => { retired.push(stale); void original.closeCurrentSession(); });
+    cleanup.push(() => previous.close());
+    expect(await previous.bind(nativeBinding)).toMatchObject({ agent: canonical, activation_ready: true,
+      runtime_host: { host_state: "notLoaded", attached: false } });
+
+    const resumed = new RedisClient(null, TEST_REDIS_URL);
+    await resumed.register("both", `rc-takeover-${randomUUID()}`);
+    cleanup.push(async () => { await resumed.unregister(); await resumed.shutdown(); });
+    const adapter = async (identity: RuntimeBinding): Promise<RuntimeAdapter> =>
+      ({ binding: identity, activate: async () => ({ status: "queued" }), close: async () => undefined });
+    const refused = createRuntimeController(resumed, { client: "codex", working_directory: WORKDIR }, adapter);
+    cleanup.push(() => refused.close());
+    await expect(refused.bind(nativeBinding)).rejects.toThrow();
+    expect(resumed.agentName).not.toBe(canonical);
+
+    fireStale();
+    await expect.poll(() => retired.length).toBe(1);
+    await expect.poll(async () => (await original.adapterConnection.exists(SESSION_KEYS.runtimeBinding(canonical)))).toBe(0);
+    expect(previous.status()).toMatchObject({ activation_ready: false });
+    expect(previous.status()).not.toHaveProperty("runtime_host");
+
+    const takeover = createRuntimeController(resumed, { client: "codex", working_directory: WORKDIR }, adapter);
+    cleanup.push(() => takeover.close());
+    await expect.poll(async () => (await takeover.bind(nativeBinding).catch(() => ({ agent: undefined }))) .agent, { timeout: 5_000 }).toBe(canonical);
+  });
 });
+

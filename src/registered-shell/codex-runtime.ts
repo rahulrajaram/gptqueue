@@ -3,25 +3,121 @@ import type { ActivationRequest, ActivationOutcome, RuntimeAdapter, RuntimeBindi
 import { CodexSocketClient } from "./codex-socket.js";
 import { CodexThreadReader, userMessageMatches } from "./codex-history.js";
 
+export type CodexNotification = Readonly<{ method: string; params: Record<string, unknown> }>;
+
 export interface CodexRpcClient {
   request(method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<Record<string, unknown>>;
   close(): Promise<void>;
+  /** Server notifications (JSON-RPC messages without an id). Optional for older fakes and clients. */
+  onNotification?(listener: (notification: CodexNotification) => void): () => void;
 }
 
 export interface CodexRuntimeOptions {
   readonly client?: CodexRpcClient;
   readonly timeoutMs?: number;
   readonly expectedAgent?: string;
+  /** Consecutive `systemError` observations before the binding is retired as stale. */
+  readonly systemErrorThreshold?: number;
+  /** Minimum span of those observations before retiring (default 2 minutes). */
+  readonly systemErrorWindowMs?: number;
+  readonly now?: () => number;
 }
 
-const activeTurn = (thread: Record<string, unknown>): boolean => {
+/**
+ * Bounded history window. App-server v2 (`codex app-server generate-json-schema`,
+ * v2/ThreadTurnsListParams.json) pages turns newest-first; each page is fetched
+ * with `itemsView: "notLoaded"` and only the leading items of each turn are read
+ * through `thread/items/list` filtered by `turnId` (v2/ThreadItemsListParams.json).
+ * A `turn/start` user message is the first item of its turn.
+ */
+export const CODEX_TURN_WINDOW = 16;
+export const CODEX_TURN_ITEM_WINDOW = 8;
+
+const TERMINAL_TURN = new Set(["completed", "succeeded", "failed", "interrupted"]);
+const ACTIVE_TURN = new Set(["inprogress", "in_progress", "running", "started"]);
+
+type Record_ = Record<string, unknown>;
+const isRecord = (value: unknown): value is Record_ => !!value && typeof value === "object" && !Array.isArray(value);
+const turnStatus = (turn: Record_): string => String(turn.status ?? "").toLowerCase();
+
+const activeTurn = (thread: Record_): boolean => {
   const turns = thread.turns;
   if (!Array.isArray(turns)) return false;
-  return turns.some((turn) => {
-    if (!turn || typeof turn !== "object") return false;
-    const status = String((turn as Record<string, unknown>).status ?? "").toLowerCase();
-    return ["inprogress", "in_progress", "running", "started"].includes(status);
-  });
+  return turns.some((turn) => isRecord(turn) && ACTIVE_TURN.has(turnStatus(turn)));
+};
+
+/** v2 ThreadStatus: notLoaded | idle | systemError | active{activeFlags}. Absent on older daemons. */
+const threadStatusType = (thread: Record_): string | undefined =>
+  isRecord(thread.status) && typeof thread.status.type === "string" ? thread.status.type : undefined;
+
+const outcomeForTurn = (turn: Record_): ActivationOutcome | undefined => {
+  const id = String(turn.id ?? "");
+  if (!id) return undefined;
+  return TERMINAL_TURN.has(turnStatus(turn)) ? { status: "completed", turn_id: id } : { status: "started", turn_id: id };
+};
+
+const unsupportedMethod = (error: unknown): boolean =>
+  /-32601|method not found|unknown variant|unknown method|not supported/i.test(String(error));
+
+type Lookup =
+  | Readonly<{ kind: "match"; outcome: ActivationOutcome }>
+  | Readonly<{ kind: "none"; busy: boolean; complete: boolean }>
+  | Readonly<{ kind: "unsupported" }>;
+
+/** Recent-turn lookup: at most one turns page plus one small items page per turn. */
+const lookupRecent = async (
+  client: CodexRpcClient, threadId: string, request: ActivationRequest, signal: AbortSignal,
+): Promise<Lookup> => {
+  let page: Record_;
+  try {
+    page = await client.request("thread/turns/list", {
+      threadId, limit: CODEX_TURN_WINDOW, sortDirection: "desc", itemsView: "notLoaded",
+    }, signal);
+  } catch (error) {
+    if (unsupportedMethod(error)) return { kind: "unsupported" };
+    throw error;
+  }
+  if (!Array.isArray(page.data)) return { kind: "unsupported" };
+  const turns = page.data.filter(isRecord);
+  for (const turn of turns) {
+    const turnId = String(turn.id ?? "");
+    if (!turnId) continue;
+    const items = await client.request("thread/items/list", {
+      threadId, turnId, limit: CODEX_TURN_ITEM_WINDOW, sortDirection: "asc",
+    }, signal);
+    if (!Array.isArray(items.data)) return { kind: "unsupported" };
+    const matched = items.data.some((entry) => isRecord(entry) && isRecord(entry.item) &&
+      (entry.turnId === undefined || entry.turnId === turnId) &&
+      userMessageMatches(entry.item, request.operation_id, request.prompt));
+    if (matched) {
+      const outcome = outcomeForTurn(turn);
+      if (outcome) return { kind: "match", outcome };
+    }
+  }
+  return {
+    kind: "none",
+    busy: turns.some((turn) => ACTIVE_TURN.has(turnStatus(turn))),
+    // No further page means the whole history was consulted.
+    complete: page.nextCursor === null || page.nextCursor === undefined,
+  };
+};
+
+/** Pre-v2 path: whole-history read, kept only for daemons without turn paging. */
+const lookupLegacy = (current: Record_, request: ActivationRequest): Lookup | "ambiguous" | "unavailable" => {
+  if (!Array.isArray(current.turns)) return "unavailable";
+  const turns = current.turns;
+  for (const turn of turns) {
+    const items = isRecord(turn) ? turn.items : undefined;
+    if (Array.isArray(items)) for (const item of items) {
+      if (isRecord(item) && userMessageMatches(item, request.operation_id, request.prompt)) {
+        const outcome = outcomeForTurn(turn as Record_);
+        if (outcome) return { kind: "match", outcome };
+      }
+    }
+  }
+  if (activeTurn(current)) return { kind: "none", busy: true, complete: true };
+  if (turns.some((turn) => !isRecord(turn) || !Array.isArray(turn.items) || (turn.itemsView && turn.itemsView !== "full"))) return "ambiguous";
+  return { kind: "none", busy: false, complete: true };
 };
 
 export const createCodexRuntime = async (
@@ -32,48 +128,98 @@ export const createCodexRuntime = async (
   const client = options.client ?? new CodexSocketClient(undefined, options.timeoutMs);
   const signal = AbortSignal.timeout(options.timeoutMs ?? 10_000);
   const reader = new CodexThreadReader(client);
-  let raw: Record<string, unknown>;
-  try { raw = await reader.read(binding.runtime_id, signal); } catch (error) { await client.close(); throw error; }
-  if (String(raw.id ?? "") !== binding.runtime_id || typeof raw.cwd !== "string" || resolve(raw.cwd) !== resolve(binding.working_directory)) { await client.close(); throw new Error("Codex thread identity does not match binding"); }
+  const sameThread = (thread: Record_): boolean => String(thread.id ?? "") === binding.runtime_id &&
+    typeof thread.cwd === "string" && resolve(thread.cwd) === resolve(binding.working_directory);
+  const readMetadata = async (abortSignal: AbortSignal): Promise<Record_> => {
+    const result = await client.request("thread/read", { threadId: binding.runtime_id, includeTurns: false }, abortSignal);
+    return (result.thread ?? result) as Record_;
+  };
+  let raw: Record_;
+  try { raw = await readMetadata(signal); } catch (error) { await client.close(); throw error; }
+  if (!sameThread(raw)) { await client.close(); throw new Error("Codex thread identity does not match binding"); }
   if (options.expectedAgent) {
     try {
       const ownConnection = await client.request("mcpServer/tool/call", {
         threadId: binding.runtime_id, server: "gptqueue-shared", tool: "get_runtime_status", arguments: {},
       }, signal);
-      const status = ownConnection.structuredContent as Record<string, unknown> | undefined;
+      const status = ownConnection.structuredContent as Record_ | undefined;
       if (ownConnection.isError || status?.agent !== options.expectedAgent) {
         throw new Error("Codex thread does not own this GPTQueue connection");
       }
     } catch (error) { await client.close(); throw error; }
   }
+
+  const idleListeners = new Set<() => void>();
+  const staleListeners = new Set<() => void>();
+  let stale = false;
+  let subscribed = false;
+  let hostState: string = threadStatusType(raw) ?? "unknown";
+  let systemErrors: { count: number; since: number } | undefined;
+  const now = options.now ?? Date.now;
+  const errorThreshold = options.systemErrorThreshold ?? 3;
+  const errorWindowMs = options.systemErrorWindowMs ?? 120_000;
+  const emit = (listeners: ReadonlySet<() => void>): void => {
+    for (const listener of [...listeners]) { try { listener(); } catch { /* listener faults never reach the socket */ } }
+  };
+  const markStale = (): void => { if (!stale) { stale = true; emit(staleListeners); } };
+  // v2 ServerNotification.json: turn/completed {threadId, turn}, thread/status/changed {threadId, status},
+  // thread/closed {threadId}. Notifications for other threads are ignored.
+  const unsubscribe = client.onNotification?.((notification) => {
+    if (notification.params.threadId !== binding.runtime_id) return;
+    switch (notification.method) {
+      case "turn/completed": emit(idleListeners); return;
+      case "thread/status/changed": {
+        const type = isRecord(notification.params.status) ? notification.params.status.type : undefined;
+        if (type === "idle") emit(idleListeners);
+        return;
+      }
+      case "thread/closed": markStale(); return;
+      default: return;
+    }
+  });
+
+  /** Attach this connection to an already loaded thread so turn notifications reach it. */
+  const subscribe = async (abortSignal: AbortSignal): Promise<void> => {
+    if (subscribed || !idleListeners.size || !client.onNotification) return;
+    subscribed = true;
+    await client.request("thread/resume", { threadId: binding.runtime_id, excludeTurns: true }, abortSignal)
+      .catch(() => { subscribed = false; });
+  };
+
   const seen = new Map<string, string>();
   return {
     binding,
     async activate(request: ActivationRequest, abortSignal: AbortSignal): Promise<ActivationOutcome> {
-      const current = await reader.read(binding.runtime_id, abortSignal);
-      if (String(current.id ?? "") !== binding.runtime_id || typeof current.cwd !== "string" || resolve(current.cwd) !== resolve(binding.working_directory)) throw new Error("Codex thread identity does not match binding");
-      if (!Array.isArray(current.turns)) return { status: "unavailable" };
-      const turns = current.turns;
-      for (const turn of turns) {
-        const items = turn && typeof turn === "object" ? (turn as Record<string, unknown>).items : undefined;
-        if (Array.isArray(items)) for (const item of items) {
-          if (item && typeof item === "object" && userMessageMatches(item as Record<string, unknown>, request.operation_id, request.prompt)) {
-            const id = String((turn as Record<string, unknown>).id ?? "");
-            if (id) {
-              const status = String((turn as Record<string, unknown>).status ?? "").toLowerCase();
-              return ["completed", "succeeded", "failed", "interrupted"].includes(status) ? { status: "completed", turn_id: id } : { status: "started", turn_id: id };
-            }
-          }
-        }
+      if (stale) return { status: "unavailable" };
+      const current = await readMetadata(abortSignal);
+      if (!sameThread(current)) throw new Error("Codex thread identity does not match binding");
+      const statusType = threadStatusType(current);
+      hostState = statusType ?? "unknown";
+      if (statusType === "systemError") {
+        const at = now();
+        systemErrors = systemErrors ? { count: systemErrors.count + 1, since: systemErrors.since } : { count: 1, since: at };
+        // Bounded: a persistently failed thread releases its mailbox like a closed one.
+        if (systemErrors.count >= errorThreshold && at - systemErrors.since >= errorWindowMs) markStale();
+        return { status: "unavailable" };
       }
-      if (activeTurn(current)) return { status: "busy" };
-      if (turns.some((turn) => !turn || typeof turn !== "object" || !Array.isArray(turn.items) || (turn.itemsView && turn.itemsView !== "full"))) return { status: "ambiguous" };
+      systemErrors = undefined;
+      let lookup = await lookupRecent(client, binding.runtime_id, request, abortSignal);
+      if (lookup.kind === "unsupported") {
+        const legacy = lookupLegacy(await reader.read(binding.runtime_id, abortSignal), request);
+        if (legacy === "ambiguous" || legacy === "unavailable") return { status: legacy };
+        lookup = legacy;
+      }
+      if (lookup.kind === "match") return lookup.outcome;
+      // `notLoaded` (no attached TUI) still runs turns headless through the daemon;
+      // delivery continues and presence reports it via describe().
+      if (lookup.kind === "unsupported") return { status: "ambiguous" };
+      if (lookup.busy || statusType === "active") { await subscribe(abortSignal); return { status: "busy" }; }
       if (seen.has(request.operation_id) || request.recover_only) return { status: "ambiguous" };
       seen.set(request.operation_id, "pending");
       if (seen.size > 1024) seen.delete(seen.keys().next().value!);
       try {
         const result = await client.request("turn/start", { threadId: binding.runtime_id, input: [{ type: "text", text: request.prompt }], clientUserMessageId: request.operation_id }, abortSignal);
-        const id = String(((result.turn ?? result) as Record<string, unknown>).id ?? "");
+        const id = String(((result.turn ?? result) as Record_).id ?? "");
         if (!id) return { status: "ambiguous" };
         seen.set(request.operation_id, id); return { status: "started", turn_id: id };
       } catch (error) {
@@ -84,6 +230,20 @@ export const createCodexRuntime = async (
         return { status: "ambiguous" };
       }
     },
-    close: () => client.close(),
+    describe: () => Object.freeze({
+      host_state: hostState,
+      attached: hostState === "idle" || hostState === "active",
+      stale,
+    }),
+    onIdle(listener: () => void): () => void {
+      idleListeners.add(listener);
+      return () => { idleListeners.delete(listener); };
+    },
+    onStale(listener: () => void): () => void {
+      staleListeners.add(listener);
+      if (stale) queueMicrotask(listener);
+      return () => { staleListeners.delete(listener); };
+    },
+    close: async () => { unsubscribe?.(); idleListeners.clear(); staleListeners.clear(); await client.close(); },
   };
 };

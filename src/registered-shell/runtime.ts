@@ -37,7 +37,32 @@ export interface RuntimeAdapter {
    */
   activate(request: ActivationRequest, signal: AbortSignal): Promise<ActivationOutcome>;
   close(): Promise<void>;
+  /**
+   * Optional wake hint for the dispatcher. The listener fires when the runtime
+   * reports that its in-progress turn ended, so a `busy` activation can be
+   * retried immediately instead of waiting out backoff. It is a hint only:
+   * the dispatcher must still call `activate` (which re-checks state and keeps
+   * operation deduplication), and must keep its backoff as the fallback,
+   * because a runtime may never deliver the signal. Returns an unsubscribe.
+   */
+  onIdle?(listener: () => void): () => void;
+  /**
+   * Optional: the runtime this adapter is bound to was closed by its host
+   * (Codex `thread/closed`). After it fires, `activate` returns `unavailable`;
+   * the owner should release the binding so a resumed session can take over.
+   */
+  onStale?(listener: () => void): () => void;
+  /** Optional truthful host presence (e.g. Codex thread detached/headless), surfaced in runtime status. */
+  describe?(): Readonly<Record<string, unknown>>;
 }
+
+const noop = (): void => undefined;
+/** Default no-op for adapters without an idle signal. */
+export const subscribeIdle = (adapter: RuntimeAdapter, listener: () => void): (() => void) =>
+  adapter.onIdle?.(listener) ?? noop;
+/** Default no-op for adapters without a staleness signal. */
+export const subscribeStale = (adapter: RuntimeAdapter, listener: () => void): (() => void) =>
+  adapter.onStale?.(listener) ?? noop;
 
 export const validateRuntimeBinding = (
   value: unknown, expected: Readonly<{ client: "codex" | "pi"; working_directory: string }>,

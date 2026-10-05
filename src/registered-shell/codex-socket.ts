@@ -41,6 +41,13 @@ export class CodexSocketClient {
   private next = 1;
   private readonly pending = new Map<number, Pending>();
   private closed = false;
+  private readonly listeners = new Set<(notification: Readonly<{ method: string; params: Record<string, unknown> }>) => void>();
+
+  /** Server notifications (no `id`). Listener faults are isolated from the socket. */
+  onNotification(listener: (notification: Readonly<{ method: string; params: Record<string, unknown> }>) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
 
   constructor(
     private readonly path = defaultCodexSocketPath(),
@@ -144,7 +151,13 @@ export class CodexSocketClient {
       if (!final) continue;
       const message = JSON.parse(Buffer.concat(this.fragments).toString("utf8")) as Record<string, unknown>;
       this.fragments = []; this.fragmentBytes = 0;
-      if (typeof message.id !== "number") continue; // Unsubscribed notifications are intentionally not buffered.
+      if (message.id === undefined && typeof message.method === "string") {
+        // Notifications are delivered to current listeners only, never buffered.
+        const params = message.params && typeof message.params === "object" ? message.params as Record<string, unknown> : {};
+        for (const listener of [...this.listeners]) { try { listener({ method: message.method, params }); } catch { /* isolated */ } }
+        continue;
+      }
+      if (typeof message.id !== "number") continue;
       if (typeof message.method === "string") continue; // Server requests are not client responses; never auto-approve them.
       if (!Object.prototype.hasOwnProperty.call(message, "result") && !Object.prototype.hasOwnProperty.call(message, "error")) continue;
       const pending = this.pending.get(message.id);
@@ -182,6 +195,7 @@ export class CodexSocketClient {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.listeners.clear();
     this.fail(new Error("Codex client closed"));
   }
 }

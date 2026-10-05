@@ -129,13 +129,15 @@ export const startRegisteredShell = async (
         },
         close: async () => undefined,
       };
-    });
+    // The host closed this sidecar's thread: retire the session so its heartbeat
+    // and lease stop claiming the mailbox and a resumed thread can adopt it.
+    }, () => { void cleanup("runtime_closed").catch(() => undefined); });
   let registrationComplete = false;
   let cleanupPromise: Promise<void> | undefined;
   let initializedLogged = false;
   let resolveClosed!: () => void;
   const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
-  const cleanup = (requestedReason: "caller_abort" | "transport_closed" | "explicit_close" | "startup_failed" = "explicit_close"): Promise<void> => {
+  const cleanup = (requestedReason: "caller_abort" | "transport_closed" | "explicit_close" | "startup_failed" | "runtime_closed" = "explicit_close"): Promise<void> => {
     // Defer the body until the memoized promise is assigned: transport.close re-enters onclose.
     cleanupPromise ??= Promise.resolve().then(async () => {
       const reason = requestedReason;
