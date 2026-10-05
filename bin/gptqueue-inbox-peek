@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+// Non-consuming gptqueue inbox check and event-driven watcher (see src/claude/peek.ts).
+import { inboxPeekMain } from "../dist/claude/cli.js";
+await inboxPeekMain(process.argv.slice(2));

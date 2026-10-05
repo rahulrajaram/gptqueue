@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+// stdio MCP entry for Claude Code: run the gptqueue MCP server in this process
+// (so its parent is the Claude process, which keys the session record),
+// auto-registered under this project's agent name (see gptqueue-claude-name).
+import { resolveAgentName } from "../dist/claude/agent-name.js";
+process.env.REDIS_URL ||= "redis://127.0.0.1:6379/0";
+process.env.GPTQ_AGENT_NAME = resolveAgentName(process.env.CLAUDE_PROJECT_DIR || process.cwd());
+process.env.GPTQ_CLAUDE_SESSION_RECORD = "1";
+process.argv.length = 2;
+await import("../dist/mcp-server/index.js");

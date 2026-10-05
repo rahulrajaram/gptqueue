@@ -5,6 +5,7 @@ import { agentAttributionEnv } from "./attribution.js";
 import { IdleDetector } from "./idle-detector.js";
 import { RedisWatcher } from "./redis-watcher.js";
 import { terminalPromptBytes } from "./submit.js";
+import { DEFAULT_NUDGE_POLICY, NUDGE_IDLE, ScreenGuard, decideNudge, onArrival, onDrained, onNudged, profileFor } from "./screen-guard.js";
 
 function parseArgs(argv: string[]): { agent: string; cmd: string; args: string[] } {
   let agent = "";
@@ -50,11 +51,12 @@ const ptyProcess = pty.spawn(cmd, args, {
 const idleDetector = new IdleDetector(2000);
 const watcher = new RedisWatcher(agent);
 
-let pendingInjection = false;
+const guard = new ScreenGuard(profileFor(cmd));
 
 // Forward PTY output to stdout
 ptyProcess.onData((data: string) => {
   process.stdout.write(data);
+  guard.onOutput(data);
   idleDetector.onOutput();
 });
 
@@ -64,6 +66,7 @@ if (process.stdin.isTTY) {
 }
 process.stdin.resume();
 process.stdin.on("data", (data: Buffer) => {
+  guard.onUserInput(data.toString());
   ptyProcess.write(data.toString());
 });
 
@@ -75,24 +78,47 @@ process.stdout.on("resize", () => {
   );
 });
 
-// When Redis watcher detects messages, wait for idle then inject
-watcher.on("message", (count: number) => {
-  if (pendingInjection) return;
-  pendingInjection = true;
-
-  const inject = () => {
-    const prompt = `You have ${count} pending message(s) in your GPTQueue inbox. Call claim_tasks to claim a batch (optional max_batch and ttl_seconds), process the tasks, then acknowledge them with acknowledge_tasks (claim_id).`;
-    // Bracketed paste + CR submits the prompt in the wrapped TUI; a bare LF
-    // does NOT submit (proven against Claude Code CLI 2.1.283, 2026-09-28).
-    ptyProcess.write(terminalPromptBytes(prompt));
-    pendingInjection = false;
-  };
-
-  if (idleDetector.idle) {
-    inject();
-  } else {
-    idleDetector.once("idle", inject);
+// When mail is pending, inject only into a quiet, recognised empty input
+// prompt (WK-9), retrying while unsure, and re-nudge a bounded number of times
+// while the queue stays non-empty.
+let nudge = NUDGE_IDLE;
+let lastCount = 0;
+let nudgeTimer: ReturnType<typeof setTimeout> | null = null;
+const schedule = (ms: number) => {
+  if (nudgeTimer) clearTimeout(nudgeTimer);
+  nudgeTimer = setTimeout(() => void step(), ms);
+};
+const step = async (): Promise<void> => {
+  nudgeTimer = null;
+  if (nudge.nudges > 0) {
+    const depth = await watcher.depth().catch(() => null);
+    if (depth === 0) { nudge = onDrained(); lastCount = 0; return; }
+    if (depth !== null) lastCount = depth;
   }
+  const action = decideNudge(nudge, idleDetector.idle, guard.verdict(), Date.now());
+  switch (action.kind) {
+    case "inject": {
+      const prompt = `You have ${lastCount} pending message(s) in your GPTQueue inbox. Call claim_tasks to claim a batch (optional max_batch and ttl_seconds), process the tasks, then acknowledge them with acknowledge_tasks (claim_id).`;
+      // Bracketed paste + CR submits the prompt in the wrapped TUI; a bare LF
+      // does NOT submit (proven against Claude Code CLI 2.1.283, 2026-09-28).
+      ptyProcess.write(terminalPromptBytes(prompt));
+      guard.onInjected();
+      nudge = onNudged(nudge, Date.now());
+      schedule(DEFAULT_NUDGE_POLICY.renudgeMs);
+      return;
+    }
+    case "wait": schedule(action.ms); return;
+    case "give_up": nudge = NUDGE_IDLE; return; // new mail re-arms
+    case "none": return;
+    default: { const unreachable: never = action; throw new Error(String(unreachable)); }
+  }
+};
+
+watcher.on("message", (count: number) => {
+  // The polling fallback re-reports a non-empty queue; only growth is new mail.
+  if (!nudge.pending || count > lastCount) nudge = onArrival(nudge);
+  lastCount = count;
+  if (!nudgeTimer) schedule(0);
 });
 
 // Stopping the watcher talks to Redis, which may be down; never let that
@@ -105,6 +131,7 @@ const stopWatcher = (): Promise<void> =>
 
 // Handle PTY exit
 ptyProcess.onExit(async ({ exitCode }) => {
+  if (nudgeTimer) clearTimeout(nudgeTimer);
   idleDetector.destroy();
   await stopWatcher();
   process.exit(exitCode);
@@ -113,6 +140,7 @@ ptyProcess.onExit(async ({ exitCode }) => {
 // Graceful shutdown: kill the wrapped child first, so a Redis failure while
 // stopping the watcher can never leave it running.
 async function shutdown() {
+  if (nudgeTimer) clearTimeout(nudgeTimer);
   idleDetector.destroy();
   ptyProcess.kill();
   await stopWatcher();

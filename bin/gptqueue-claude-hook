@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// Claude Code hook: gptqueue-claude-hook session-start|stop (hook JSON on stdin).
+import "../dist/claude/hook-main.js";

@@ -51,6 +51,23 @@ export class RedisClient {
   private readonly wakeLeaseStore: WakeLeaseStore;
   private readonly taskClaimStore: TaskClaimStore;
   readonly queueBound: number;
+  /**
+   * Observers told about every change to the identity this client holds
+   * (name and session), after the change is committed. Used by runtime
+   * adapters that publish "the name this session holds" (Claude hooks).
+   * Observer failures never affect the identity operation.
+   */
+  private readonly identityObservers: Array<(name: string | null, sessionId: string | null) => void> = [];
+
+  onIdentityChange(observer: (name: string | null, sessionId: string | null) => void): void {
+    this.identityObservers.push(observer);
+  }
+
+  private notifyIdentity(): void {
+    for (const observer of this.identityObservers) {
+      try { observer(this._agentName, this._sessionId); } catch { /* observers are advisory */ }
+    }
+  }
 
   /** Internal adapter connection; lifecycle remains owned by this client. */
   get adapterConnection(): Redis {
@@ -175,6 +192,7 @@ export class RedisClient {
     if (result !== 1) throw new Error(`Continuity adoption refused (${result})`);
     this._agentName = target;
     this.startHeartbeat();
+    this.notifyIdentity();
   }
 
   /**
@@ -197,6 +215,7 @@ export class RedisClient {
 
     // Also maintain legacy heartbeat for backward compat
     this.startHeartbeat();
+    this.notifyIdentity();
 
     return session.agent_name;
   }
@@ -329,6 +348,7 @@ export class RedisClient {
     // Start both session lease refresh and legacy heartbeat
     this.sessionStore.startLeaseRefresh(session.session_id);
     this.startHeartbeat();
+    this.notifyIdentity();
 
     return { name, session_id: session.session_id };
   }
@@ -368,6 +388,7 @@ export class RedisClient {
 
     this._agentName = null;
     this._sessionId = null;
+    this.notifyIdentity();
     return name;
   }
 
@@ -402,6 +423,7 @@ export class RedisClient {
 
     this._agentName = null;
     this._sessionId = null;
+    this.notifyIdentity();
   }
 
   async sendMessage(message: QueueMessage): Promise<boolean> {

@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { RedisClient } from "./redis-client.js";
 import { GPTQUEUE_INSTRUCTIONS, registerTools } from "../transports/setup-tools.js";
 import { VERSION } from "../version.js";
+import { registerClaudeAware, startClaudeSessionRecord } from "../claude/mcp-record.js";
 
 // Name comes from CLI arg or env var. If neither, starts unregistered.
 const initialName = process.argv[2] || process.env.GPTQ_AGENT_NAME || null;
@@ -18,9 +19,13 @@ const server = new McpServer({
 
 registerTools(server, redisClient);
 
+// Under Claude Code, publish the identity this server holds so the session's
+// hooks and inbox watcher use it instead of re-deriving a name (ID-2).
+const removeClaudeRecord = startClaudeSessionRecord(redisClient);
+
 // Auto-register if name provided via CLI arg or env var (backward compat)
 if (initialName) {
-  await redisClient.register("both", initialName);
+  await registerClaudeAware(redisClient, initialName);
 }
 
 // Graceful shutdown. Besides signals, exit when the client goes away (stdin
@@ -30,6 +35,16 @@ let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  removeClaudeRecord?.();
+  // Close (not delete) the session so a restarted or resumed client can take
+  // the name back at once instead of waiting for the lease TTL. Bounded: a
+  // Redis outage must not block exit.
+  if (redisClient.registered) {
+    await Promise.race([
+      redisClient.closeCurrentSession().catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, 1_000).unref()),
+    ]);
+  }
   await redisClient.shutdown();
   process.exit(0);
 }

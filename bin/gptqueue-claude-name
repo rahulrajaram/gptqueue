@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+// Print the gptqueue agent name a Claude Code session should use for a directory.
+import { claudeNameMain } from "../dist/claude/cli.js";
+claudeNameMain(process.argv.slice(2));

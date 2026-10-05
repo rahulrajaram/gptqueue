@@ -111,6 +111,11 @@ export class RedisWatcher extends EventEmitter {
     }
   }
 
+  /** Current inbox depth (LLEN); used to stop re-nudging once the queue drains. */
+  async depth(): Promise<number> {
+    return this.redis.llen(SESSION_KEYS.queue(this.agentName));
+  }
+
   async stop(): Promise<void> {
     this.running = false;
     if (this.subscriber) {

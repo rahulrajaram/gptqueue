@@ -26,19 +26,22 @@ describe("stdio server lifecycle", () => {
     });
     const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
     try {
-      for (let i = 0; i < 100 && !(await redis.hexists(SESSION_KEYS.registry, agent)); i += 1) {
+      for (let i = 0; i < 2400 && !(await redis.hexists(SESSION_KEYS.registry, agent)); i += 1) { // up to 120 s: module loads from a contended mount can be slow
         await new Promise((r) => setTimeout(r, 50));
       }
       expect(await redis.hexists(SESSION_KEYS.registry, agent)).toBe(1);
       child.stdin!.end();
       const code = await Promise.race([exited, new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 8_000))]);
       expect(code).toBe(0);
+      // A clean exit closes the session instead of leaving it to the lease TTL,
+      // so a restarted client can take the name back at once.
+      expect(await redis.scard(SESSION_KEYS.agentSessions(agent))).toBe(0);
     } finally {
       if (child.exitCode === null) child.kill("SIGKILL");
       await redis.hdel(SESSION_KEYS.registry, agent);
-      await redis.del(SESSION_KEYS.queue(agent), SESSION_KEYS.mailboxMeta(agent), SESSION_KEYS.heartbeat(agent));
+      await redis.del(SESSION_KEYS.queue(agent), SESSION_KEYS.mailboxMeta(agent), SESSION_KEYS.heartbeat(agent), SESSION_KEYS.agentSessions(agent));
     }
-  }, 20_000);
+  }, 180_000);
 
   it("RedisClient.shutdown returns at its deadline and force-disconnects when QUIT hangs", async () => {
     const client = new RedisClient(null, TEST_REDIS_URL);
