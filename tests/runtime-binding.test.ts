@@ -48,3 +48,11 @@ describe("runtime binding contract", () => {
       .not.toBe(activationOperationId("agent", original, ["message"], 1));
   });
 });
+
+describe("activation outcome wire schema", () => {
+  it("accepts an undelivered outcome from the Pi extension instead of degrading it to ambiguous (I-3)", async () => {
+    const { activationOutcomeSchema } = await import("../src/registered-shell/runtime.js");
+    expect(activationOutcomeSchema.parse({ status: "undelivered" })).toEqual({ status: "undelivered" });
+    expect(activationOutcomeSchema.safeParse({ status: "completed" }).success).toBe(false);
+  });
+});

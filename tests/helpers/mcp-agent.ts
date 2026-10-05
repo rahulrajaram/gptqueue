@@ -59,7 +59,7 @@ function parseBody(text: string): any[] {
 export async function connectAgent(
   baseUrl: string,
   name: string,
-  opts: { role?: "publisher" | "consumer" | "both"; description?: string } = {}
+  opts: { role?: "publisher" | "consumer" | "both"; description?: string; shared?: boolean } = {}
 ): Promise<Agent> {
   const role = opts.role ?? "both";
   const description =
@@ -163,7 +163,7 @@ export async function connectAgent(
 
   // Register the agent now that the session is bound, then adopt the app-level
   // session_id that every session-scoped tool expects.
-  const reg = await call("register_agent", { name, role, description });
+  const reg = await call("register_agent", { name, role, description, ...(opts.shared ? { shared: true } : {}) });
   const returnedSessionId = reg.data.session_id as string | undefined;
   if (!returnedSessionId) {
     throw new Error(`register_agent for '${name}' did not return a session_id`);

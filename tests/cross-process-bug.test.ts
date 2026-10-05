@@ -62,10 +62,11 @@ describe("cross-process identity is session-scoped (NXT-002)", () => {
 
   it("re-registering under the same name in process B also gives access", async () => {
     const processA = new RedisClient(null, TEST_REDIS_URL);
-    await processA.register("both", "workaround-agent", "registered by A");
+    // Two live processes on one name is the opt-in shared policy (D2).
+    await processA.register("both", "workaround-agent", "registered by A", undefined, { shared: true });
 
     const processB = new RedisClient(null, TEST_REDIS_URL);
-    await processB.register("both", "workaround-agent", "re-registered by B");
+    await processB.register("both", "workaround-agent", "re-registered by B", undefined, { shared: true });
 
     // Send message after B is registered so BLPOP subscriber is ready
     await processA.sendMessage({

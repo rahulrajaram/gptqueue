@@ -254,6 +254,70 @@ describe("inbox dispatcher", () => {
     expect(submissions).toHaveLength(1);
   });
 
+  it("renders the wake prompt with the bound client's tool naming (I-1)", async () => {
+    const mailbox = new MailboxStore(redis, redis);
+    const promptFor = async (client: "codex" | "opencode") => {
+      const agent = `dispatcher-${randomUUID()}`; owned.add(agent);
+      const prompts: string[] = [];
+      const identity = client === "codex" ? binding(`runtime-${client}`)
+        : { client: "opencode" as const, runtime_id: "ses-1", epoch: "ses-1", working_directory: "/workspace" };
+      const adapter: RuntimeAdapter = { binding: identity, activate: async (request) => { prompts.push(request.prompt); return { status: "queued" }; }, close: async () => {} };
+      const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10 }); live.push({ agent, dispatcher });
+      await mailbox.send(task(agent));
+      await eventually(async () => prompts.length >= 1);
+      return prompts[0]!;
+    };
+    expect(await promptFor("opencode")).toContain("Call gptqueue_claim_tasks");
+    expect(await promptFor("codex")).toContain("Call claim_tasks");
+  });
+
+  it("refuses a second live dispatcher with the typed RUNTIME_BINDING_HELD code (I-2)", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent);
+    const adapter: RuntimeAdapter = { binding: binding("runtime-held"), activate: async () => ({ status: "queued" }), close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10 }); live.push({ agent, dispatcher });
+    await expect(startInboxDispatcher(redis, agent, { ...adapter, binding: binding("runtime-rival") }, { intervalMs: 10 }))
+      .rejects.toMatchObject({ code: "RUNTIME_BINDING_HELD" });
+  });
+
+  it("re-attempts an undelivered activation at once under a fresh operation, without reporting a turn (I-3)", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis);
+    const requests: string[] = [];
+    const adapter: RuntimeAdapter = { binding: binding("runtime-dropped"),
+      activate: async (request) => { requests.push(request.operation_id); return requests.length === 1 ? { status: "undelivered" } : { status: "queued" }; },
+      close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10, maxBackoffMs: 60_000 }); live.push({ agent, dispatcher });
+    await mailbox.send(task(agent));
+    await eventually(async () => requests.length >= 2);
+    expect(new Set(requests).size).toBe(2);
+    const traces = await redis.xrange(`gptq:inbox-trace:${agent}`, "-", "+");
+    const dropped = traces.filter(([, fields]) => fields.includes("native_delivery_dropped"));
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]![1]).toContain(requests[0]!);
+    expect(traces.some(([, fields]) => fields.includes("turn_id"))).toBe(false);
+  });
+
+  it("retries a busy activation as soon as the runtime reports idle, not after backoff (I-4)", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis);
+    const at: number[] = [];
+    const listeners = new Set<() => void>();
+    let unsubscribed = 0;
+    const adapter: RuntimeAdapter = { binding: binding("runtime-idle-hint"),
+      activate: async () => { at.push(Date.now()); return at.length === 1 ? { status: "busy" } : { status: "queued" }; },
+      onIdle: (listener) => { listeners.add(listener); return () => { unsubscribed += 1; listeners.delete(listener); }; },
+      close: async () => {} };
+    // Without the hint the retry waits at least one 3 s interval/backoff.
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 3_000, maxBackoffMs: 60_000 }); live.push({ agent, dispatcher });
+    await mailbox.send(task(agent));
+    await eventually(async () => at.length >= 1);
+    await new Promise((r) => setTimeout(r, 100));
+    const idleAt = Date.now();
+    for (const listener of listeners) listener();
+    await eventually(async () => at.length >= 2);
+    expect(at[1]! - idleAt).toBeLessThan(1_000);
+    await dispatcher.close();
+    expect(unsubscribed).toBe(1);
+  });
+
   it("surfaces a typed diagnostic when a live foreign owner fences the dispatcher", async () => {
     const agent = `dispatcher-${randomUUID()}`; owned.add(agent);
     const adapter: RuntimeAdapter = { binding: binding("runtime-fenced"), activate: async () => ({ status: "queued" }), close: async () => {} };

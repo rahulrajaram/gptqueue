@@ -77,6 +77,7 @@ describe("OpenCode second process on one session", () => {
       expect(payload(await first.callTool("get_runtime_status", {}))).toMatchObject({ activation_ready: true });
       const standby = payload(await second.callTool("get_runtime_status", {}));
       expect(standby).toMatchObject({ activation_ready: false, activation_state: "standby" });
+      expect(standby.activation_error_code).toBe("RUNTIME_BINDING_HELD");
       expect(String(standby.activation_error)).toMatch(/live dispatcher/);
       // Tools still work from the second process.
       expect(payload(await second.callTool("list_agents", {})).agents).toEqual(expect.arrayContaining([expect.objectContaining({ name })]));

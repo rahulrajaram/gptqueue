@@ -747,8 +747,8 @@ describe("claim_tasks concurrency enforcement (directory max_concurrency)", () =
     const r1 = new RedisClient(null, TEST_REDIS_URL);
     const r2 = new RedisClient(null, TEST_REDIS_URL);
     try {
-      const reg1 = await registerAgent(r1, registerAgentSchema.parse({ name: actorId, role: "both", description: "runtime one" }));
-      const reg2 = await registerAgent(r2, registerAgentSchema.parse({ name: actorId, role: "both", description: "runtime two" }));
+      const reg1 = await registerAgent(r1, registerAgentSchema.parse({ name: actorId, role: "both", description: "runtime one", shared: true }));
+      const reg2 = await registerAgent(r2, registerAgentSchema.parse({ name: actorId, role: "both", description: "runtime two", shared: true }));
       const reg1Session = (reg1.structuredContent as { session_id: string }).session_id;
       const reg2Session = (reg2.structuredContent as { session_id: string }).session_id;
       expect(reg1Session).toBeTruthy();

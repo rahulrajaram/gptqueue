@@ -141,6 +141,7 @@ describe("OpenCode backend", () => {
       );
       const standby = payload(await second.callTool("get_runtime_status", {}));
       expect(standby).toMatchObject({ activation_ready: false, activation_state: "standby" });
+      expect(standby.activation_error_code).toBe("RUNTIME_BINDING_HELD");
       expect(String(standby.activation_error)).toMatch(/live dispatcher/);
       expect(secondPort.close).not.toHaveBeenCalled();
       await second.close();

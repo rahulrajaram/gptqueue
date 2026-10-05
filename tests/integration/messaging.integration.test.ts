@@ -78,7 +78,7 @@ afterEach(async () => {
 /** Connect a fresh agent on the integration server and track it for cleanup. */
 async function connect(
   name: string,
-  opts?: { role?: "publisher" | "consumer" | "both"; description?: string }
+  opts?: { role?: "publisher" | "consumer" | "both"; description?: string; shared?: boolean }
 ) {
   const agent = await connectAgent(ctx.server.baseUrl, name, opts);
   ctx.agents.push(agent);
@@ -97,7 +97,8 @@ function expectClaimed(res: { data: Record<string, any> }) {
 // ---------------------------------------------------------------------------
 describe("registration & identity wire semantics", () => {
   it("register returns a session_id; duplicate name from a second connection gets a distinct session; list_agents shows both", async () => {
-    const a = await connect(uniq("reg-a"));
+    // A name on two live connections is the opt-in shared policy (D2).
+    const a = await connect(uniq("reg-a"), { shared: true });
     const b = await connect(uniq("reg-b"));
 
     const list = await a.call("list_agents", {});
@@ -107,7 +108,7 @@ describe("registration & identity wire semantics", () => {
     expect(names).toContain(b.name);
 
     // Same name from a second connection -> a DISTINCT session, same registry name.
-    const dup = await connect(a.name);
+    const dup = await connect(a.name, { shared: true });
     expect(dup.sessionId).toBeTruthy();
     expect(dup.sessionId).not.toBe(a.sessionId);
     const list2 = await a.call("list_agents", {});
@@ -699,7 +700,7 @@ describe("claim concurrency ceiling (directory max_concurrency)", () => {
     const actor = uniq("conc");
     // c1 is a session registered under the actor identity and self-registers the
     // durable profile (actor_id derived from the registered name, H4).
-    const c1 = await connect(actor);
+    const c1 = await connect(actor, { shared: true });
     const ownerReg = await c1.call("actor_register", {
       session_id: c1.sessionId,
       alias: actor,
@@ -708,7 +709,7 @@ describe("claim concurrency ceiling (directory max_concurrency)", () => {
     });
     expect(ownerReg.data.status).toBe("ok");
 
-    const c2 = await connect(actor);
+    const c2 = await connect(actor, { shared: true });
     const sender = await connect(uniq("conc-src"));
     await sender.call("send_message", { session_id: sender.sessionId, to: actor, content: "x1" });
     await sender.call("send_message", { session_id: sender.sessionId, to: actor, content: "x2" });
@@ -729,7 +730,7 @@ describe("claim concurrency ceiling (directory max_concurrency)", () => {
 
   it("max_concurrency 2 admits two outstanding claims and rejects the third", async () => {
     const actor = uniq("conc2");
-    const c1 = await connect(actor);
+    const c1 = await connect(actor, { shared: true });
     const ownerReg = await c1.call("actor_register", {
       session_id: c1.sessionId,
       alias: actor,
@@ -738,8 +739,8 @@ describe("claim concurrency ceiling (directory max_concurrency)", () => {
     });
     expect(ownerReg.data.status).toBe("ok");
 
-    const c2 = await connect(actor);
-    const c3 = await connect(actor);
+    const c2 = await connect(actor, { shared: true });
+    const c3 = await connect(actor, { shared: true });
     const sender = await connect(uniq("conc2-src"));
     for (let i = 0; i < 4; i += 1) {
       await sender.call("send_message", { session_id: sender.sessionId, to: actor, content: `t${i}` });

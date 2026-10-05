@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
+import { z } from "zod";
 
 import { runtimeBindingSchema, type RuntimeBinding } from "../core/runtime-binding.js";
 import { toolNamePrefix, type ToolNamingClient } from "./tool-names.js";
@@ -23,10 +24,29 @@ export type ActivationRequest = Readonly<{
 export type ActivationOutcome =
   | Readonly<{ status: "started"; turn_id: string }>
   | Readonly<{ status: "completed"; turn_id: string }>
+  /**
+   * Native evidence proves the submission never ran (dropped from the host's
+   * queue, lost with a restarted process). No turn exists to report; the
+   * dispatcher re-attempts promptly under a fresh bounded operation (I-3).
+   */
+  | Readonly<{ status: "undelivered" }>
   | Readonly<{ status: "queued" }>
   | Readonly<{ status: "busy" }>
   | Readonly<{ status: "unavailable" }>
   | Readonly<{ status: "ambiguous" }>;
+
+/** Wire schema for an ActivationOutcome returned across a process boundary (the Pi extension). */
+export const activationOutcomeSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("started"), turn_id: z.string().min(1) }),
+  z.object({ status: z.literal("completed"), turn_id: z.string().min(1) }),
+  z.object({ status: z.literal("undelivered") }),
+  z.object({ status: z.literal("queued") }), z.object({ status: z.literal("busy") }),
+  z.object({ status: z.literal("unavailable") }), z.object({ status: z.literal("ambiguous") }),
+]);
+// Compile-time check: the wire schema covers exactly ActivationOutcome.
+const outcomeSchemaCovers: z.infer<typeof activationOutcomeSchema>["status"] extends ActivationOutcome["status"]
+  ? ActivationOutcome["status"] extends z.infer<typeof activationOutcomeSchema>["status"] ? true : never : never = true;
+void outcomeSchemaCovers;
 
 export interface RuntimeAdapter {
   readonly binding: RuntimeIdentity;

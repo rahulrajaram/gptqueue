@@ -39,7 +39,12 @@ type Gate = Readonly<{
  * migration step until released. A failing gate rejects there (driving the
  * rollback); a succeeding one runs the real migration.
  */
-const gatedRename = async (who: RedisClient, oldName: string, outcome: "fail" | "succeed" = "fail"): Promise<Gate> => {
+const gatedRename = async (
+  who: RedisClient,
+  oldName: string,
+  outcome: "fail" | "succeed" = "fail",
+  shared = true
+): Promise<Gate> => {
   await who.register("both", oldName, oldName);
   const internals = who as unknown as { mailbox: MailboxStore };
   const realMigrate = internals.mailbox.migrateMessages.bind(internals.mailbox);
@@ -55,9 +60,12 @@ const gatedRename = async (who: RedisClient, oldName: string, outcome: "fail" | 
   }) as MailboxStore["migrateMessages"];
   return {
     start: async () => {
-      const attempt = who.register("both", N, `${oldName} attempt`);
+      // Overlapping attempts onto one name model the opt-in shared policy;
+      // exclusive names (D2) are pinned in their own tests below.
+      const attempt = who.register("both", N, `${oldName} attempt`, undefined, { shared });
       attempt.catch(() => {});
-      await atMigration;
+      // An attempt refused before migration must fail the test, not hang it.
+      await Promise.race([atMigration, attempt.then(() => { throw new Error("attempt finished before migration"); })]);
       return { attempt }; // wrapped: an async function would flatten it
     },
     release,
@@ -131,7 +139,7 @@ describe("registry rollback bookkeeping (R2)", () => {
   const prepare = async (state: InitialState): Promise<string | null> => {
     if (state === "free") return null;
     const owner = tracked();
-    const { session_id } = await owner.register("both", N, "existing owner");
+    const { session_id } = await owner.register("both", N, "existing owner", undefined, { shared: true });
     if (state === "completed online") return session_id;
     await owner.closeCurrentSession();
     return null;
@@ -273,8 +281,9 @@ describe("registry rollback bookkeeping (R2)", () => {
       };
 
       if (order === "rollback completes first") await rollback();
-      const registering = registrant.register("both", N, "plain registration");
-      await atPublish; // its provisional write has landed
+      const registering = registrant.register("both", N, "plain registration", undefined, { shared: true });
+      registering.catch(() => {});
+      await Promise.race([atPublish, registering.then(() => { throw new Error("registration finished before publication"); })]); // its provisional write has landed
       if (order.startsWith("rollback lands")) await rollback();
       releasePublish();
       await registering;
@@ -285,6 +294,51 @@ describe("registry rollback bookkeeping (R2)", () => {
       expect(await sideState(redis, N)).toEqual({ pending: null, restore: null });
     });
   }
+
+  describe("under exclusive names (D2)", () => {
+    it("a rename onto a live-held name is refused with AGENT_NAME_HELD and the old identity stays intact", async () => {
+      const owner = tracked();
+      const held = await owner.register("both", N, "exclusive owner");
+      const before = await redis.hget(SESSION_KEYS.registry, N);
+      const renamer = tracked();
+      const old = await renamer.register("both", "old-x", "old");
+
+      await expect(renamer.register("both", N, "rename")).rejects.toMatchObject({ code: "AGENT_NAME_HELD" });
+
+      expect(renamer.agentName).toBe("old-x");
+      expect(renamer.sessionId).toBe(old.session_id);
+      expect(await redis.hget(SESSION_KEYS.registry, N)).toBe(before);
+      expect(await redis.smembers(SESSION_KEYS.agentSessions(N))).toEqual([held.session_id]);
+      expect(await redis.smembers(SESSION_KEYS.agentSessions("old-x"))).toEqual([old.session_id]);
+      expect(await sideState(redis, N)).toEqual({ pending: null, restore: null });
+    });
+
+    it("a rename onto a free name still succeeds", async () => {
+      const renamer = tracked();
+      await renamer.register("both", "old-x", "old");
+      await expect(renamer.register("both", N, "rename")).resolves.toMatchObject({ name: N });
+      expect(renamer.agentName).toBe(N);
+      expect(await redis.hget(SESSION_KEYS.registry, "old-x")).toBeNull();
+    });
+
+    it("a plain registration during an in-flight rename is refused; after the rename fails the name is free again", async () => {
+      const loser = await gatedRename(tracked(), "old-a", "fail", false);
+      const a = (await loser.start()).attempt;
+      const rival = tracked();
+      await expect(rival.register("both", N, "plain")).rejects.toMatchObject({ code: "AGENT_NAME_HELD" });
+      const second = await gatedRename(tracked(), "old-b", "fail", false);
+      await expect(second.start()).rejects.toMatchObject({ code: "AGENT_NAME_HELD" });
+
+      loser.release();
+      await expect(a).rejects.toThrow(/migration failed/);
+      expect(await redis.hget(SESSION_KEYS.registry, N)).toBeNull();
+      expect(await sideState(redis, N)).toEqual({ pending: null, restore: null });
+      expect(await sessionsOf(redis, N)).toEqual([]);
+
+      await expect(rival.register("both", N, "plain")).resolves.toMatchObject({ name: N });
+      expect(JSON.parse((await redis.hget(SESSION_KEYS.registry, N))!)).toMatchObject({ description: "plain" });
+    });
+  });
 
   it("a completed registration publishes the plain JSON value and clears the name's rollback state (R2)", async () => {
     await redis.hset(SESSION_KEYS.registryPending, N, "stale-pending");
@@ -316,8 +370,8 @@ describe("registry rollback bookkeeping (R2)", () => {
     // Behaviour: with an in-flight attempt over a completed owner, the
     // restore hash holds the owner's value; no public read may show it.
     const owner = tracked();
-    await owner.register("both", N, "completed-owner-only-in-restore");
-    await tracked().sessions.createSession(N, "both", "in-flight attempt");
+    await owner.register("both", N, "completed-owner-only-in-restore", undefined, { shared: true });
+    await tracked().sessions.createSession(N, "both", "in-flight attempt", undefined, { shared: true });
     expect(await redis.hget(SESSION_KEYS.registryRestore, N)).toContain("completed-owner-only-in-restore");
     const diagnostics = new AgentDiagnostics(redis);
     const reads = {

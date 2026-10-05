@@ -654,14 +654,18 @@ describe("experimental authenticated bound bridge", () => {
     const competingSession = new RedisClient(null, TEST_REDIS_URL);
 
     try {
-      const first = await firstSession.register("both", name, "first session");
+      // A non-wrapper competitor can only join a held name by sharing (D2);
+      // the wrapper must still detect that it lost exclusive ownership.
+      const first = await firstSession.register("both", name, "first session", undefined, { shared: true });
       await expect(claim.assertExclusiveSession(first.session_id)).resolves.toBe(
         undefined
       );
       const competing = await competingSession.register(
         "both",
         name,
-        "competing session"
+        "competing session",
+        undefined,
+        { shared: true }
       );
       await expect(
         claim.assertExclusiveSession(first.session_id)

@@ -2,6 +2,7 @@ import type { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 import type { RuntimeIdentity } from "./runtime.js";
 import { SESSION_KEYS } from "../core/keys.js";
+import { GptQueueError } from "../mcp-server/errors.js";
 
 export type ActivationRecord = Readonly<{
   operation_id: string;
@@ -41,7 +42,9 @@ export class ActivationStore {
   async attach(binding: RuntimeIdentity): Promise<void> {
     const owner = JSON.stringify({ ...binding, token: this.token });
     if (await this.redis.set(SESSION_KEYS.runtimeBinding(this.agent), owner, "EX", 30, "NX") !== "OK") {
-      throw new Error("Runtime inbox already has a live dispatcher");
+      // Typed (I-2): callers classify the conflict by code, not by this wording.
+      throw new GptQueueError("RUNTIME_BINDING_HELD", "Runtime inbox already has a live dispatcher",
+        { agent: this.agent });
     }
     this.owner = owner;
   }

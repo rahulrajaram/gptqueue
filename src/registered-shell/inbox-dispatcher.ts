@@ -4,7 +4,7 @@ import { InboxEvents, type InboxTraceStage } from "../core/inbox-events.js";
 import { TaskClaimStore } from "../core/task-claim-store.js";
 import { CLAIM_KEYS } from "../core/keys.js";
 import { ActivationStore, type ActivationRecord } from "./activation-store.js";
-import { activationOperationId, inboxPrompt, type RuntimeAdapter } from "./runtime.js";
+import { activationOperationId, inboxPrompt, subscribeIdle, type RuntimeAdapter } from "./runtime.js";
 
 export interface InboxDispatcher {
   readonly closed: Promise<void>;
@@ -169,7 +169,7 @@ export const startInboxDispatcher = async (
     let outcome: Awaited<ReturnType<RuntimeAdapter["activate"]>>;
     try {
       outcome = await adapter.activate({ operation_id: record.operation_id,
-        prompt: inboxPrompt(agent, record.operation_id), recover_only: recovery }, stop.signal);
+        prompt: inboxPrompt(agent, record.operation_id, adapter.binding.client), recover_only: recovery }, stop.signal);
     } catch {
       clearInterval(heartbeat);
       if (stop.signal.aborted) return;
@@ -193,8 +193,12 @@ export const startInboxDispatcher = async (
           undefined, outcome.status === "started" ? outcome.turn_id : undefined);
         lastDeferred = undefined;
         return;
-      case "completed": {
-        // A turn ended without consuming all notified work; bounded fresh attempts prevent loops.
+      case "completed":
+      case "undelivered": {
+        // A turn ended without consuming all notified work, or the submission
+        // provably never ran: either way the next bounded attempt follows at
+        // once (no backoff), and the attempt bound prevents loops.
+        if (outcome.status === "undelivered") await trace("activation_failed", record, "native_delivery_dropped");
         const next = nextAttempt(record, pendingIds);
         await save(next);
         if (next.state === "exhausted") await trace("activation_failed", record, "activation_attempts_exhausted");
@@ -227,11 +231,34 @@ export const startInboxDispatcher = async (
   const closed = (async () => {
     let cursor = "0-0";
     const waiter = events.createWaiter();
+    // I-4: a runtime's idle hint ends the current wait and any backoff, so a
+    // busy activation is retried as soon as the turn ends. activate() still
+    // re-checks state; the backoff remains the fallback when no hint comes.
+    let wake = new AbortController();
+    const onStop = () => wake.abort();
+    stop.signal.addEventListener("abort", onStop, { once: true });
+    const unsubscribeIdle = subscribeIdle(adapter, () => {
+      backoff = 0;
+      retryAt = 0;
+      wake.abort();
+    });
+    /** True (and re-armed) when an idle hint, not a stop, ended the wait. */
+    const woken = (): boolean => {
+      if (stop.signal.aborted || !wake.signal.aborted) return false;
+      wake = new AbortController();
+      return true;
+    };
     try {
       while (!stop.signal.aborted) {
         try {
           await reconcile();
-          if (!stop.signal.aborted) cursor = await waiter.wait(agent, cursor, stop.signal, interval) ?? cursor;
+          if (stop.signal.aborted || woken()) continue;
+          try {
+            cursor = await waiter.wait(agent, cursor, wake.signal, interval) ?? cursor;
+          } catch (error) {
+            if (woken()) continue;
+            throw error;
+          }
         } catch {
           if (stop.signal.aborted) break;
           await trace("activation_failed", undefined, "dispatcher_reconcile_failed").catch(() => undefined);
@@ -239,6 +266,8 @@ export const startInboxDispatcher = async (
         }
       }
     } finally {
+      unsubscribeIdle();
+      stop.signal.removeEventListener("abort", onStop);
       waiter.close();
       await state.detach().catch(() => undefined);
       await adapter.close().catch(() => undefined);

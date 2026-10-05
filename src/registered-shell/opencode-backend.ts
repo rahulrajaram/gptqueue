@@ -18,6 +18,7 @@ import {
 import type { RuntimeTools } from "./runtime-tools.js";
 import type { RuntimeAdapter } from "./runtime.js";
 import { VERSION } from "../version.js";
+import { GptQueueError } from "../mcp-server/errors.js";
 
 export type OpenCodeBackendOptions = Readonly<{
   redisUrl: string;
@@ -101,6 +102,8 @@ export const createOpenCodeBackend = async (
   // Why activation is not running, when it is not: e.g. another process holds
   // the runtime-binding lease. Tools keep working; activation is retried.
   let activationError: string | undefined;
+  // The typed cause (e.g. RUNTIME_BINDING_HELD), for callers that branch on it.
+  let activationErrorCode: string | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let closeResult: Promise<void> | undefined;
 
@@ -110,6 +113,11 @@ export const createOpenCodeBackend = async (
       agentName,
       `OpenCode native session ${identity.sessionID}`,
       { label: agentName, uuid: null, client: null, working_directory: identity.directory },
+      // The name is derived from the native session id, so only processes on
+      // this same OpenCode session share it (D2 opt-in). A second process keeps
+      // its tools and waits in standby; the runtime-binding lease still admits
+      // exactly one activation owner.
+      { shared: true },
     );
     sessionRegistered = true;
     const binding = {
@@ -119,7 +127,7 @@ export const createOpenCodeBackend = async (
       working_directory: identity.directory,
     };
     const createdRuntime = await createOpenCodeRuntime(binding, options.runtimePort,
-      { ...options.runtimeOptions, agent: agentName });
+      options.runtimeOptions);
     runtime = createdRuntime;
     let runtimeTools: RuntimeTools;
     runtimeTools = {
@@ -130,7 +138,8 @@ export const createOpenCodeBackend = async (
           status: "ok",
           agent: agentName,
           activation_ready: ready,
-          ...(ready ? {} : { activation_state: "standby", activation_error: activationError ?? "activation dispatcher is not running" }),
+          ...(ready ? {} : { activation_state: "standby", activation_error: activationError ?? "activation dispatcher is not running",
+            ...(activationErrorCode ? { activation_error_code: activationErrorCode } : {}) }),
           runtime: createdRuntime.binding,
         };
       },
@@ -152,10 +161,11 @@ export const createOpenCodeBackend = async (
           redis.adapterConnection, agentName, createdRuntime, options.dispatcherOptions,
         );
         if (stopping.signal.aborted) { await started.close().catch(() => undefined); return; }
-        dispatcher = started; dispatcherClosed = false; activationError = undefined;
+        dispatcher = started; dispatcherClosed = false; activationError = undefined; activationErrorCode = undefined;
         void started.closed.then(onDispatcherClosed, onDispatcherClosed);
       } catch (error) {
         activationError = error instanceof Error ? error.message : String(error);
+        activationErrorCode = error instanceof GptQueueError ? error.code : undefined;
         scheduleActivation();
       }
     };
@@ -163,6 +173,7 @@ export const createOpenCodeBackend = async (
       dispatcherClosed = true;
       if (stopping.signal.aborted) return;
       activationError ??= "activation dispatcher stopped (runtime-binding lease lost)";
+      activationErrorCode ??= "RUNTIME_BINDING_LOST";
       scheduleActivation();
     };
     const scheduleActivation = () => {

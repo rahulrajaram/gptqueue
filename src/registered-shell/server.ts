@@ -8,8 +8,7 @@ import { createLifecycleLog, safeLifecycleCode } from "./lifecycle-log.js";
 import { createRuntimeController } from "./runtime-controller.js";
 import { createCodexRuntime } from "./codex-runtime.js";
 import { bootstrapCodexBinding } from "./codex-bootstrap.js";
-import { z } from "zod";
-import type { ActivationOutcome } from "./runtime.js";
+import { activationOutcomeSchema, type ActivationOutcome } from "./runtime.js";
 import { SESSION_KEYS } from "../core/keys.js";
 
 export type ShellClient = "codex" | "pi";
@@ -118,12 +117,7 @@ export const startRegisteredShell = async (
           if (!server) return { status: "unavailable" as const };
           try {
             return await server.server.request({ method: "gptqueue/activate", params: { binding, request } },
-              z.discriminatedUnion("status", [
-                z.object({ status: z.literal("started"), turn_id: z.string().min(1) }),
-                z.object({ status: z.literal("completed"), turn_id: z.string().min(1) }),
-                z.object({ status: z.literal("queued") }), z.object({ status: z.literal("busy") }),
-                z.object({ status: z.literal("unavailable") }), z.object({ status: z.literal("ambiguous") }),
-              ]),
+              activationOutcomeSchema,
               { signal, timeout: 10_000 }) as ActivationOutcome;
           } catch { return { status: "ambiguous" as const }; }
         },

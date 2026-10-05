@@ -20,8 +20,6 @@ export interface PiRuntimeHost {
 
 /** A submission younger than this may not yet be visible to isIdle()/hasPendingMessages(). */
 export const PI_SUBMIT_GRACE_MS = 5_000;
-/** turn_id reported when native evidence shows the follow-up never ran; the dispatcher then retries. */
-export const piUndeliveredTurnId = (operationId: string): string => `pi:undelivered:${operationId}`;
 
 /**
  * Own-session Pi adapter. Follow-ups are queued by Pi for both idle and busy turns.
@@ -92,7 +90,7 @@ export const createPiRuntime = (binding: RuntimeBinding, host: PiRuntimeHost,
       // A definite outcome lets the dispatcher submit a fresh bounded attempt.
       if ((known || request.recover_only) && settled) {
         submitted.delete(request.operation_id);
-        return Object.freeze({ status: "completed" as const, turn_id: piUndeliveredTurnId(request.operation_id) });
+        return Object.freeze({ status: "undelivered" as const });
       }
       if (known) return Object.freeze({ status: known.state });
       if (request.recover_only) return Object.freeze({ status: "ambiguous" as const });

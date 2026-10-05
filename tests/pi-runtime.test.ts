@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPiRuntime, piUndeliveredTurnId, type PiRuntimeHost } from "../src/registered-shell/pi-runtime.js";
+import { createPiRuntime, type PiRuntimeHost } from "../src/registered-shell/pi-runtime.js";
 import type { RuntimeBinding } from "../src/registered-shell/runtime.js";
 
 const binding: RuntimeBinding = Object.freeze({ client: "pi", runtime_id: "session-1", epoch: "epoch-1", working_directory: "/tmp/project" });
@@ -73,13 +73,13 @@ describe("Pi runtime adapter", () => {
       await expect(runtime.activate({ operation_id: "op-drop", prompt: "wake", recover_only: true }, signal)).resolves.toEqual({ status: "queued" });
       clock = 1_000;
       await expect(runtime.activate({ operation_id: "op-drop", prompt: "wake", recover_only: true }, signal))
-        .resolves.toEqual({ status: "completed", turn_id: piUndeliveredTurnId("op-drop") });
+        .resolves.toEqual({ status: "undelivered" });
       expect(fake.sendMessage).toHaveBeenCalledTimes(1);
     });
     it("resolves an ambiguous operation after an extension restart from Pi's idle state", async () => {
       const fake = idleHost();
       await expect(createPiRuntime(binding, fake.host).activate({ operation_id: "op-lost", prompt: "wake", recover_only: true }, signal))
-        .resolves.toEqual({ status: "completed", turn_id: piUndeliveredTurnId("op-lost") });
+        .resolves.toEqual({ status: "undelivered" });
       fake.state.idle = false;
       await expect(createPiRuntime(binding, fake.host).activate({ operation_id: "op-lost", prompt: "wake", recover_only: true }, signal))
         .resolves.toEqual({ status: "ambiguous" });

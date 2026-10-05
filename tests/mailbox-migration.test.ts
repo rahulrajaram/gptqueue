@@ -389,7 +389,10 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
   it("a refused rename onto an existing name leaves that name's registration intact (RF3)", async () => {
     const owner = new RedisClient(null, TEST_REDIS_URL);
     try {
-      await owner.register("both", "new-name", "existing owner");
+      // Both opt into sharing (D2) so the rename gets past session creation
+      // and is refused by the claimed-task check, exercising the rollback.
+      // The exclusive refusal is pinned in registry-rollback.test.ts.
+      await owner.register("both", "new-name", "existing owner", undefined, { shared: true });
       const before = await redis.hget(SESSION_KEYS.registry, "new-name");
       expect(before).not.toBeNull();
 
@@ -397,7 +400,7 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
       await redis.rpush(SESSION_KEYS.queue("old-name"), taskFor("t-live"));
       await claimOne(first.session_id, 300, new Date());
 
-      await expect(client.register("both", "new-name", "second")).rejects.toThrow(/unexpired claimed tasks/);
+      await expect(client.register("both", "new-name", "second", undefined, { shared: true })).rejects.toThrow(/unexpired claimed tasks/);
 
       expect(await redis.hget(SESSION_KEYS.registry, "new-name")).toBe(before);
       expect(await client.sessions.resolveRegistered("new-name")).toBe(true);
