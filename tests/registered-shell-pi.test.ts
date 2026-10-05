@@ -58,49 +58,64 @@ describe("registered Pi extension", () => {
       vi.useRealTimers();
     }
   });
-  it("closes and exits for an invalid catalog", async () => {
+  // These previously asserted process.exit(1). A GPTQueue fault must never
+  // kill the user's Pi session (WK-7), so they now assert degrade-and-retry.
+  it("degrades without exiting for an invalid catalog", async () => {
     const exit = interceptExit(); const client = makeClient();
     client.listTools.mockResolvedValue({ tools: [] });
-    await expect(createPiExtension(async () => client)(fakePi().pi)).rejects.toThrow(/mismatch/);
-    expect(client.close).toHaveBeenCalledOnce(); expect(exit).toHaveBeenCalledWith(1);
+    const { pi } = fakePi();
+    await expect(createPiExtension(async () => client)(pi)).resolves.toBeUndefined();
+    expect(client.close).toHaveBeenCalledOnce(); expect(exit).not.toHaveBeenCalled();
   });
-  it("aborts a hanging connect and exits within the configured deadline", async () => {
+  it("aborts a hanging connect within the deadline and keeps Pi running", async () => {
     const exit = interceptExit(); let connectSignal: AbortSignal | undefined;
     await expect(createPiExtension(async (signal) => {
       connectSignal = signal; return new Promise<SessionClient>(() => {});
-    }, 30)(fakePi().pi)).rejects.toThrow(/timed out/);
-    expect(connectSignal?.aborted).toBe(true); expect(exit).toHaveBeenCalledWith(1);
+    }, 30)(fakePi().pi)).resolves.toBeUndefined();
+    expect(connectSignal?.aborted).toBe(true); expect(exit).not.toHaveBeenCalled();
   });
-  it("closes and exits when tool discovery hangs", async () => {
+  it("closes without exiting when tool discovery hangs", async () => {
     const exit = interceptExit(); const client = makeClient();
     client.listTools.mockImplementation(() => new Promise(() => {}));
-    await expect(createPiExtension(async () => client, 30)(fakePi().pi)).rejects.toThrow(/timed out/);
-    expect(client.close).toHaveBeenCalledOnce(); expect(exit).toHaveBeenCalledWith(1);
+    await expect(createPiExtension(async () => client, 30)(fakePi().pi)).resolves.toBeUndefined();
+    expect(client.close).toHaveBeenCalledOnce(); expect(exit).not.toHaveBeenCalled();
   });
   it("closes a client that resolves after the startup deadline", async () => {
     interceptExit(); const client = makeClient(); let resolve!: (value: SessionClient) => void;
-    await expect(createPiExtension(() => new Promise((done) => { resolve = done; }), 30)(fakePi().pi)).rejects.toThrow(/timed out/);
+    await createPiExtension(() => new Promise((done) => { resolve = done; }), 30, { retry: { baseMs: 60_000 } })(fakePi().pi);
     resolve(client);
     await vi.waitFor(() => expect(client.close).toHaveBeenCalledOnce());
   });
-  it("exits when the runtime refuses required tool activation", async () => {
+  it("degrades when the runtime refuses required tool activation", async () => {
     const exit = interceptExit(); const client = makeClient(); const { pi, handlers } = fakePi();
     pi.setActiveTools.mockImplementation(() => {});
     await createPiExtension(async () => client)(pi);
-    await expect(handlers.get("before_agent_start")!({ systemPrompt: "original" })).rejects.toThrow(/not active/);
-    expect(client.close).toHaveBeenCalled(); expect(exit).toHaveBeenCalledWith(1);
+    const result = await handlers.get("before_agent_start")!({ systemPrompt: "original" });
+    expect(result.systemPrompt).toMatch(/^original\n\nGPTQueue is currently unavailable/);
+    expect(client.close).toHaveBeenCalled(); expect(exit).not.toHaveBeenCalled();
   });
-  it("exits before a turn when the MCP connection has failed", async () => {
-    const exit = interceptExit(); const client = makeClient(); const { pi, handlers } = fakePi();
-    await createPiExtension(async () => client)(pi);
-    client.listTools.mockRejectedValue(new Error("connection closed"));
-    await expect(handlers.get("before_agent_start")!({ systemPrompt: "original" })).rejects.toThrow(/connection closed/);
-    expect(client.close).toHaveBeenCalled(); expect(exit).toHaveBeenCalledWith(1);
+  it("keeps the turn, returns typed tool errors and reconnects after a connection failure", async () => {
+    const exit = interceptExit(); const client = makeClient(); const { pi, handlers, tools } = fakePi();
+    let connects = 0;
+    await createPiExtension(async () => { connects += 1; return client; }, 1_000, { retry: { baseMs: 10, maxMs: 20 } })(pi);
+    client.listTools.mockRejectedValueOnce(new Error("connection closed"));
+    const result = await handlers.get("before_agent_start")!({ systemPrompt: "original" });
+    expect(result.systemPrompt).toContain("GPTQueue is currently unavailable in this session (gptqueue_unavailable)");
+    expect(exit).not.toHaveBeenCalled(); expect(client.close).toHaveBeenCalled();
+    const error = await tools.find((tool) => tool.name === "send_message")!.execute("call", {}).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ name: "PiGptqueueUnavailableError", code: "gptqueue_unavailable" });
+    expect(JSON.parse((error as Error).message)).toMatchObject({ status: "error", code: "gptqueue_unavailable" });
+    await vi.waitFor(() => expect(connects).toBe(2));
+    await vi.waitFor(async () => expect(await handlers.get("before_agent_start")!({ systemPrompt: "original" }))
+      .toEqual({ systemPrompt: `original\n\n${client.getInstructions()}` }));
+    await expect(tools.find((tool) => tool.name === "send_message")!.execute("call", {})).resolves.toMatchObject({ content: [{ text: "ok" }] });
   });
-  it("requires instructions identifying the registered session", async () => {
+  it("requires instructions identifying the registered session, degrading instead of exiting", async () => {
     const exit = interceptExit(); const client = makeClient(); client.getInstructions.mockReturnValue("");
-    await expect(createPiExtension(async () => client)(fakePi().pi)).rejects.toThrow(/instructions/);
-    expect(client.close).toHaveBeenCalled(); expect(exit).toHaveBeenCalledWith(1);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await createPiExtension(async () => client, 1_000, { retry: { baseMs: 60_000 } })(fakePi().pi);
+    expect(errors.mock.calls.flat().join("\n")).toMatch(/instructions/);
+    expect(client.close).toHaveBeenCalled(); expect(exit).not.toHaveBeenCalled();
   });
 });
 

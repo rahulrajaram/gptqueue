@@ -25,6 +25,13 @@ describe("runtime binding contract", () => {
     expect(inboxPrompt("agent", "operation")).toContain("claim_tasks");
     expect(inboxPrompt("agent", "operation")).toContain("Do not acknowledge unfinished work");
   });
+  it.each([["pi", ""], ["codex", ""], ["opencode", "gptqueue_"]] as const)("names tools as the %s client exposes them", (client, prefix) => {
+    const prompt = inboxPrompt("agent", "operation", client);
+    for (const name of ["claim_tasks", "send_message", "acknowledge_tasks", "renew_claim", "receive_message"]) {
+      expect(prompt).toContain(`${prefix}${name}`);
+      if (prefix) expect(prompt).not.toMatch(new RegExp(`(?<!${prefix})\\b${name}\\b`));
+    }
+  });
 
   it("specifies reply message types so a completed task is not sent as a new task", () => {
     const prompt = inboxPrompt("agent", "operation");

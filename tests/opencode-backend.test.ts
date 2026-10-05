@@ -119,7 +119,10 @@ describe("OpenCode backend", () => {
     }
   });
 
-  it("closes the native runtime when dispatcher startup loses the lease", async () => {
+  // Previously asserted that losing the lease rejects backend startup, which
+  // left every gptqueue_* tool failing in the second process. The second
+  // process now runs in standby: tools work, activation stays with the owner.
+  it("keeps a second backend in standby when dispatcher startup loses the lease and closes its native runtime", async () => {
     const sessionID = `backend-startup-${Date.now()}`;
     const name = opencodeAgentName(sessionID);
     const firstPort = portFor(sessionID);
@@ -132,10 +135,15 @@ describe("OpenCode backend", () => {
       );
       const ready = payload(await first.callTool("get_runtime_status", {}));
       expect(ready.activation_ready).toBe(true);
-      await expect(createOpenCodeBackend(
+      const second = await createOpenCodeBackend(
         { sessionID, directory },
-        { redisUrl: REDIS_URL, runtimePort: secondPort, dispatcherOptions: { intervalMs: 20 } },
-      )).rejects.toThrow(/live dispatcher/);
+        { redisUrl: REDIS_URL, runtimePort: secondPort, dispatcherOptions: { intervalMs: 20 }, activationRetryMs: 60_000 },
+      );
+      const standby = payload(await second.callTool("get_runtime_status", {}));
+      expect(standby).toMatchObject({ activation_ready: false, activation_state: "standby" });
+      expect(String(standby.activation_error)).toMatch(/live dispatcher/);
+      expect(secondPort.close).not.toHaveBeenCalled();
+      await second.close();
       expect(secondPort.close).toHaveBeenCalledTimes(1);
     } finally {
       await first?.close();

@@ -7,7 +7,7 @@ import type {
   OpenCodeRuntimePort,
   OpenCodeSessionStatus,
 } from "./opencode-runtime.js";
-import type { OpenCodeSessionIdentity } from "./opencode-sessions.js";
+import type { OpenCodeSessionHandle, OpenCodeSessionIdentity } from "./opencode-sessions.js";
 import { z } from "zod";
 import { sendMessageSchema } from "../mcp-server/tools/send-message.js";
 import { claimTasksSchema } from "../mcp-server/tools/claim-tasks.js";
@@ -31,6 +31,8 @@ export interface OpenCodeNativeClient {
     status(options: any): Promise<any>;
     messages(options: any): Promise<any>;
     promptAsync(options: any): Promise<any>;
+    /** GET /session: lists the instance's sessions (used to bind pre-existing sessions on load). */
+    list?(options: any): Promise<any>;
   }>;
 }
 
@@ -48,7 +50,21 @@ export interface OpenCodePluginOptions {
     client: OpenCodeNativeClient,
     identity: OpenCodeSessionIdentity,
   ) => OpenCodeRuntimePort | Promise<OpenCodeRuntimePort>;
+  readonly activationRetryMs?: OpenCodeBackendFactoryOptions["activationRetryMs"];
+  /** Most-recently-updated pre-existing sessions bound on load (default 32). */
+  readonly bootstrapLimit?: number;
+  /** Base delay of the bounded retry for a session whose directory lookup failed transiently. */
+  readonly deferredRetryMs?: number;
+  /** Observes the load-time binding of pre-existing sessions (tests, diagnostics). */
+  readonly onBootstrapped?: (result: OpenCodeBootstrapResult) => void;
 }
+
+export type OpenCodeBootstrapResult = Readonly<{
+  bound: readonly string[];
+  failed: readonly Readonly<{ sessionID: string; error: string }>[];
+  skipped: number;
+  error?: string;
+}>;
 
 export interface OpenCodeEvent {
   readonly type: string;
@@ -62,6 +78,8 @@ export interface OpenCodePluginHooks {
     input: { sessionID?: string }, output: { system: string[] }
   ): Promise<void>;
   readonly tool: Readonly<Record<string, OpenCodeToolDefinition>>;
+  /** Sessions whose binding is deferred until their own directory can be read. */
+  deferredSessions(): readonly string[];
   dispose(): Promise<void>;
 }
 
@@ -104,6 +122,18 @@ const eventSessionIdentity = (event: OpenCodeEvent): OpenCodeSessionIdentity | u
     return nativeSessionIdentity(info);
   }
   return undefined;
+};
+
+/** The SDK's not-found shapes: a NotFoundError body, or an HTTP 404. */
+const isNotFound = (error: unknown): boolean => {
+  const object = record(error);
+  const response = record(object?.response);
+  return object?.name === "NotFoundError" || object?.status === 404 || object?.statusCode === 404 || response?.status === 404;
+};
+
+const updatedAt = (value: unknown): number => {
+  const time = record(record(value)?.time);
+  return typeof time?.updated === "number" ? time.updated : typeof time?.created === "number" ? time.created : 0;
 };
 
 const status = (value: unknown, runtimeID: string): OpenCodeSessionStatus => {
@@ -178,11 +208,96 @@ export const createOpenCodePlugin = (
     epoch: options.epoch,
     runtimeOptions: options.runtimeOptions,
     dispatcherOptions: options.dispatcherOptions,
+    activationRetryMs: options.activationRetryMs,
   });
 
   const ensure = async (identity: OpenCodeSessionIdentity): Promise<void> => {
     await owner.getOrCreate(identity);
   };
+
+  /**
+   * A hook that carries only a sessionID binds the session in its own
+   * directory: the owned entry's, else the native session record's. The
+   * fallback directory is used only when the native record is definitively
+   * absent (not found). A transient lookup failure defers binding: nothing is
+   * created for the wrong directory, and a bounded retry binds it later.
+   */
+  const sessionIdentity = async (sessionID: string, fallback: string): Promise<OpenCodeSessionIdentity | undefined> => {
+    const owned = owner.directoryOf(sessionID);
+    if (owned) return { sessionID, directory: owned };
+    try {
+      const native = nativeSessionIdentity(data(await input.client.session.get({
+        path: { id: sessionID }, throwOnError: true, responseStyle: "data",
+      })));
+      if (native?.sessionID === sessionID) return native;
+      return undefined;
+    } catch (error) {
+      return isNotFound(error) ? { sessionID, directory: fallback } : undefined;
+    }
+  };
+
+  const deferred = new Map<string, Readonly<{ attempts: number; timer: ReturnType<typeof setTimeout> }>>();
+  const retryBaseMs = options.deferredRetryMs ?? 1_000;
+  const deferredLimit = 5;
+  let disposed = false;
+  const scheduleDeferred = (sessionID: string, fallback: string) => {
+    const attempts = (deferred.get(sessionID)?.attempts ?? 0) + 1;
+    if (deferred.get(sessionID)) clearTimeout(deferred.get(sessionID)!.timer);
+    if (disposed || attempts > deferredLimit) {
+      deferred.delete(sessionID);
+      console.error(`[gptqueue] OpenCode session ${JSON.stringify(sessionID)} left unbound: its directory could not be read after ${deferredLimit} attempts; the next hook for it retries`);
+      return;
+    }
+    const timer = setTimeout(() => { void bindSession(sessionID, fallback).catch(() => undefined); },
+      retryBaseMs * 2 ** (attempts - 1));
+    timer.unref?.();
+    deferred.set(sessionID, Object.freeze({ attempts, timer }));
+  };
+  /** Bind a hook's session in its own directory, or defer with a bounded retry. */
+  const bindSession = async (sessionID: string, fallback: string): Promise<OpenCodeSessionHandle | undefined> => {
+    const identity = await sessionIdentity(sessionID, fallback);
+    if (!identity) { scheduleDeferred(sessionID, fallback); return undefined; }
+    const pending = deferred.get(sessionID);
+    if (pending) { clearTimeout(pending.timer); deferred.delete(sessionID); }
+    return owner.getOrCreate(identity);
+  };
+  /** Sessions whose binding is deferred because their directory is not yet known. */
+  const deferredSessions = (): readonly string[] => Object.freeze([...deferred.keys()]);
+
+  /** Bind sessions that existed before this plugin loaded (or before a restart). */
+  const bootstrap = async (): Promise<OpenCodeBootstrapResult> => {
+    if (!input.client.session.list) return { bound: [], failed: [], skipped: 0, error: "session.list unavailable" };
+    let sessions: unknown;
+    try {
+      sessions = data(await input.client.session.list({
+        query: { directory: input.directory }, throwOnError: true, responseStyle: "data",
+      }));
+    } catch (error) {
+      return { bound: [], failed: [], skipped: 0, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (!Array.isArray(sessions)) return { bound: [], failed: [], skipped: 0, error: "OpenCode returned an invalid session list" };
+    const limit = options.bootstrapLimit ?? 32;
+    const ordered = [...sessions].sort((left, right) => updatedAt(right) - updatedAt(left));
+    const identities = ordered.slice(0, limit).flatMap((value) => {
+      const identity = nativeSessionIdentity(value);
+      return identity ? [identity] : [];
+    });
+    const outcomes = await Promise.allSettled(identities.map((identity) => Promise.resolve().then(() => owner.getOrCreate(identity))));
+    return {
+      bound: identities.filter((_, index) => outcomes[index]!.status === "fulfilled").map((identity) => identity.sessionID),
+      failed: identities.flatMap((identity, index) => {
+        const outcome = outcomes[index]!;
+        return outcome.status === "rejected"
+          ? [{ sessionID: identity.sessionID, error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason) }]
+          : [];
+      }),
+      skipped: Math.max(0, ordered.length - limit),
+    };
+  };
+  void bootstrap().then((result) => {
+    if (result.error || result.failed.length) console.error(`[gptqueue] OpenCode load-time session binding incomplete: ${JSON.stringify(result)}`);
+    options.onBootstrapped?.(result);
+  });
 
   const forwarded = (
     exposedName: string,
@@ -193,7 +308,11 @@ export const createOpenCodePlugin = (
     description,
     args: schema.shape,
     execute: async (args, context) => {
-      const session = await owner.getOrCreate({ sessionID: context.sessionID, directory: context.directory });
+      const session = await bindSession(context.sessionID, context.directory);
+      if (!session) {
+        throw new Error(JSON.stringify({ status: "error", code: "session_directory_unavailable",
+          message: "GPTQueue could not read this OpenCode session's directory yet; binding is deferred and retried. Retry the call shortly." }));
+      }
       const result = await session.callTool(backendName, schema.parse(args), context.abort);
       return { title: exposedName, output: toolOutput(result) };
     },
@@ -261,15 +380,21 @@ export const createOpenCodePlugin = (
       if (identity) await ensure(identity);
     },
     "chat.message": async ({ sessionID }: { sessionID: string }): Promise<void> => {
-      await ensure({ sessionID, directory: input.directory });
+      await bindSession(sessionID, input.directory);
     },
     "experimental.chat.system.transform": async (
       { sessionID }: { sessionID?: string }, output: { system: string[] },
     ): Promise<void> => {
-      if (sessionID) await ensure({ sessionID, directory: input.directory });
+      if (sessionID) await bindSession(sessionID, input.directory);
       output.system.push(GPTQUEUE_SYSTEM_GUIDANCE);
     },
     tool,
-    dispose: () => owner.dispose(),
+    deferredSessions,
+    dispose: () => {
+      disposed = true;
+      for (const pending of deferred.values()) clearTimeout(pending.timer);
+      deferred.clear();
+      return owner.dispose();
+    },
   });
 };

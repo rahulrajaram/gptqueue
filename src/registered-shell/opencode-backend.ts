@@ -25,6 +25,8 @@ export type OpenCodeBackendOptions = Readonly<{
   epoch?: string;
   runtimeOptions?: OpenCodeRuntimeOptions;
   dispatcherOptions?: Readonly<{ intervalMs?: number; maxAttempts?: number }>;
+  /** How often a backend without a live dispatcher retries taking activation ownership. */
+  activationRetryMs?: number;
 }>;
 
 export type OpenCodeBackendFactoryOptions = Readonly<{
@@ -35,7 +37,10 @@ export type OpenCodeBackendFactoryOptions = Readonly<{
   epoch?: string | ((identity: OpenCodeSessionIdentity) => string);
   runtimeOptions?: OpenCodeRuntimeOptions;
   dispatcherOptions?: Readonly<{ intervalMs?: number; maxAttempts?: number }>;
+  activationRetryMs?: number;
 }>;
+
+const DEFAULT_ACTIVATION_RETRY_MS = 5_000;
 
 export const opencodeAgentName = (sessionID: string): string =>
   `gptqueue-opencode-${sessionID}`;
@@ -85,12 +90,18 @@ export const createOpenCodeBackend = async (
   const agentName = opencodeAgentName(identity.sessionID);
   const redis = new RedisClient(null, options.redisUrl);
   const shutdown = new AbortController();
+  // Stops activation supervision first; `shutdown` still ends the MCP server after cleanup.
+  const stopping = new AbortController();
   let dispatcher: InboxDispatcher | undefined;
   let server: ReturnType<typeof createBoundMcpServer> | undefined;
   let client: Client | undefined;
   let runtime: RuntimeAdapter | undefined;
   let sessionRegistered = false;
   let dispatcherClosed = false;
+  // Why activation is not running, when it is not: e.g. another process holds
+  // the runtime-binding lease. Tools keep working; activation is retried.
+  let activationError: string | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let closeResult: Promise<void> | undefined;
 
   try {
@@ -107,30 +118,59 @@ export const createOpenCodeBackend = async (
       epoch: typeof options.epoch === "string" ? options.epoch : identity.sessionID,
       working_directory: identity.directory,
     };
-    const createdRuntime = await createOpenCodeRuntime(binding, options.runtimePort, options.runtimeOptions);
+    const createdRuntime = await createOpenCodeRuntime(binding, options.runtimePort,
+      { ...options.runtimeOptions, agent: agentName });
     runtime = createdRuntime;
     let runtimeTools: RuntimeTools;
     runtimeTools = {
       bind: async () => ({ status: "error", code: "runtime_binding_host_owned" }),
-      status: () => ({
-        status: "ok",
-        agent: agentName,
-        activation_ready: dispatcher !== undefined && !dispatcherClosed,
-        runtime: createdRuntime.binding,
-      }),
+      status: () => {
+        const ready = dispatcher !== undefined && !dispatcherClosed;
+        return {
+          status: "ok",
+          agent: agentName,
+          activation_ready: ready,
+          ...(ready ? {} : { activation_state: "standby", activation_error: activationError ?? "activation dispatcher is not running" }),
+          runtime: createdRuntime.binding,
+        };
+      },
     };
     server = createBoundMcpServer({ agentName, redisClient: redis, runtime: runtimeTools }, shutdown.signal);
     const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     client = new Client({ name: "gptqueue-opencode-host", version: VERSION });
     await client.connect(clientTransport);
-    dispatcher = await startInboxDispatcher(
-      redis.adapterConnection,
-      agentName,
-      createdRuntime,
-      options.dispatcherOptions,
-    );
-    void dispatcher.closed.then(() => { dispatcherClosed = true; }, () => { dispatcherClosed = true; });
+    const retryMs = options.activationRetryMs ?? DEFAULT_ACTIVATION_RETRY_MS;
+    // Activation is owned by exactly one process per session (the dispatcher's
+    // lease). Losing that race, a lost lease or a Redis blip must not take the
+    // session's tools down: stay in standby and retry until this backend closes.
+    const superviseActivation = async (): Promise<void> => {
+      retryTimer = undefined;
+      if (stopping.signal.aborted) return;
+      try {
+        const started = await startInboxDispatcher(
+          redis.adapterConnection, agentName, createdRuntime, options.dispatcherOptions,
+        );
+        if (stopping.signal.aborted) { await started.close().catch(() => undefined); return; }
+        dispatcher = started; dispatcherClosed = false; activationError = undefined;
+        void started.closed.then(onDispatcherClosed, onDispatcherClosed);
+      } catch (error) {
+        activationError = error instanceof Error ? error.message : String(error);
+        scheduleActivation();
+      }
+    };
+    const onDispatcherClosed = () => {
+      dispatcherClosed = true;
+      if (stopping.signal.aborted) return;
+      activationError ??= "activation dispatcher stopped (runtime-binding lease lost)";
+      scheduleActivation();
+    };
+    const scheduleActivation = () => {
+      if (stopping.signal.aborted || retryTimer) return;
+      retryTimer = setTimeout(() => { void superviseActivation(); }, retryMs);
+      retryTimer.unref?.();
+    };
+    await superviseActivation();
 
     const boundClient = client;
     return Object.freeze({
@@ -138,13 +178,20 @@ export const createOpenCodeBackend = async (
         boundClient.callTool({ name, arguments: { ...args } }, undefined, signal ? { signal } : undefined),
       close: () => {
         dispatcherClosed = true;
+        stopping.abort();
+        if (retryTimer) clearTimeout(retryTimer);
+        // A standby backend never handed its runtime to a dispatcher; close it here.
+        const standby = dispatcher === undefined;
         closeResult ??= cleanup(redis, dispatcher, server, boundClient, sessionRegistered)
+          .finally(async () => { if (standby) await createdRuntime.close(); })
           .finally(() => shutdown.abort());
         return closeResult;
       },
     });
   } catch (error) {
     shutdown.abort();
+    stopping.abort();
+    if (retryTimer) clearTimeout(retryTimer);
     dispatcherClosed = true;
     const startupFailures: unknown[] = [];
     if (!dispatcher && runtime) {
@@ -167,6 +214,7 @@ export const createOpenCodeBackendFactory = (
     epoch: typeof options.epoch === "function" ? options.epoch(identity) : options.epoch,
     runtimeOptions: options.runtimeOptions,
     dispatcherOptions: options.dispatcherOptions,
+    activationRetryMs: options.activationRetryMs,
   });
   return Object.freeze({ factory, owner: new OpenCodeSessionOwner(factory) });
 };

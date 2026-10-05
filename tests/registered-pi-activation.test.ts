@@ -64,15 +64,44 @@ describe("registered Pi activation lifecycle", () => {
     await expect(first.handler(oldBind, { operation_id: "old", prompt: "stale" }, new AbortController().signal)).resolves.toEqual({ status: "unavailable" });
   });
 
-  it("rejects a relative cwd without starting a client", async () => {
+  // Previously asserted process.exit(1); a host misconfiguration must degrade, not kill Pi (WK-7).
+  it("rejects a relative cwd without starting a client, keeping Pi running and telling the user", async () => {
     const fake = fakePi(); fake.setCwd("relative/project"); const calls: unknown[][] = [];
     const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ui = { notify: vi.fn(), setStatus: vi.fn() };
     try {
       await createPiExtension(async (...args: unknown[]) => { calls.push(args); return makeClient(); }, 100, { runtimeEnabled: true })(fake.pi);
-      await expect(fake.handlers.get("session_start")({}, fake.context())).rejects.toThrow(/session identity/);
+      await expect(fake.handlers.get("session_start")({}, { ...fake.context(), ui })).resolves.toBeUndefined();
       expect(calls).toHaveLength(0);
-      expect(exit).toHaveBeenCalledWith(1);
-    } finally { exit.mockRestore(); }
+      expect(exit).not.toHaveBeenCalled();
+      expect(ui.setStatus).toHaveBeenCalledWith("gptqueue", expect.stringMatching(/runtime_unsupported/));
+      expect(ui.notify).toHaveBeenCalledWith(expect.stringMatching(/session identity/), "error");
+    } finally { exit.mockRestore(); errors.mockRestore(); }
+  });
+
+  it("surfaces a refused duplicate-resume bind, keeps Pi running, and binds once the owner is gone", async () => {
+    const refused = makeClient(); const accepted = makeClient(); const fake = fakePi();
+    (refused.callTool as any).mockImplementation(async ({ name }: { name: string }) => name === "bind_runtime"
+      ? { isError: true, content: [{ type: "text", text: "occupied_target: runtime mailbox is owned by a live session" }] }
+      : { content: [{ type: "text", text: "ok" }] });
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ui = { notify: vi.fn(), setStatus: vi.fn() };
+    const factory = vi.fn().mockResolvedValueOnce(refused).mockResolvedValue(accepted);
+    try {
+      await createPiExtension(factory, 100, { runtimeEnabled: true, retry: { baseMs: 10, maxMs: 20 } })(fake.pi);
+      await fake.handlers.get("session_start")({}, { ...fake.context(), ui });
+      expect(exit).not.toHaveBeenCalled();
+      expect(refused.close).toHaveBeenCalled();
+      expect(ui.notify).toHaveBeenCalledWith(expect.stringMatching(/refused this Pi session's mailbox binding.*occupied_target/), "warning");
+      const before = await fake.handlers.get("before_agent_start")({ systemPrompt: "p" });
+      expect(before.systemPrompt).toContain("(runtime_binding_refused)");
+      await vi.waitFor(() => expect((accepted.callTool as any).mock.calls.some((call: any[]) => call[0]?.name === "bind_runtime")).toBe(true));
+      await vi.waitFor(() => expect(ui.notify).toHaveBeenCalledWith("GPTQueue reconnected", "info"));
+      expect(ui.setStatus).toHaveBeenLastCalledWith("gptqueue", undefined);
+      expect((await fake.handlers.get("before_agent_start")({ systemPrompt: "p" })).systemPrompt).toBe("p\n\ninstructions");
+    } finally { exit.mockRestore(); errors.mockRestore(); }
   });
 
   it("binds the exact session identity and submits native follow-ups", async () => {

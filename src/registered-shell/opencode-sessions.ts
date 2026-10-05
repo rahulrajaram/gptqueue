@@ -87,6 +87,11 @@ export class OpenCodeSessionOwner {
     return this.entries.size;
   }
 
+  /** The directory a session is owned for, if it is owned. */
+  public directoryOf(sessionID: string): string | undefined {
+    return this.entries.get(sessionID)?.identity.directory;
+  }
+
   public sessionIDs(): readonly string[] {
     return Object.freeze([...this.entries.keys()]);
   }

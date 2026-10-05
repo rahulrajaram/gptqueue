@@ -17,3 +17,21 @@ export const DIAGNOSTIC_TOOL_NAMES = Object.freeze([
 
 /** Every registered-shell tool, runtime first. */
 export const SHELL_TOOL_NAMES = Object.freeze([...RUNTIME_TOOL_NAMES, ...DIAGNOSTIC_TOOL_NAMES] as const);
+
+/** The runtimes that receive an inbox wake prompt, and how each exposes our tools. */
+export type ToolNamingClient = "codex" | "pi" | "opencode";
+/** OpenCode plugin tools are namespaced (opencode-plugin-factory.ts registers gptqueue_*). */
+export const OPENCODE_TOOL_PREFIX = "gptqueue_";
+export const toolNamePrefix = (client: ToolNamingClient): string => {
+  switch (client) {
+    case "codex":
+    case "pi":
+      return "";
+    case "opencode":
+      return OPENCODE_TOOL_PREFIX;
+    default: {
+      const exhaustive: never = client;
+      throw new Error(`Unknown tool-naming client: ${String(exhaustive)}`);
+    }
+  }
+};

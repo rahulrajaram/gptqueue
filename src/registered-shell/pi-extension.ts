@@ -82,17 +82,46 @@ export const validateCatalog = (catalog: { tools?: CatalogTool[] }, runtimeEnabl
   });
 };
 
+/** Typed tool error while the extension is degraded; Pi keeps running. */
+export type PiGptqueueUnavailableCode = "gptqueue_unavailable" | "runtime_binding_refused" | "runtime_unsupported";
+export class PiGptqueueUnavailableError extends Error {
+  constructor(readonly code: PiGptqueueUnavailableCode, readonly reason: string) {
+    super(JSON.stringify({ status: "error", code, message: `GPTQueue is unavailable in this Pi session: ${reason}` }));
+    this.name = "PiGptqueueUnavailableError";
+  }
+}
+/** Pi's bind_runtime refusal: another live process owns this session's mailbox. Not transient by itself, but retried. */
+class BindingRefusedError extends Error {}
+/** Missing host identity or API: retrying cannot help. */
+class UnsupportedHostError extends Error {}
+
+export type PiRetryOptions = Readonly<{ baseMs?: number; maxMs?: number }>;
+const STATUS_KEY = "gptqueue";
+const describe = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const classify = (error: unknown): PiGptqueueUnavailableCode =>
+  error instanceof UnsupportedHostError ? "runtime_unsupported"
+    : error instanceof BindingRefusedError ? "runtime_binding_refused" : "gptqueue_unavailable";
+/** Exponential backoff, capped: the delay is bounded, the retry is not abandoned. */
+export const retryDelay = (attempt: number, options: PiRetryOptions = {}): number =>
+  Math.min((options.baseMs ?? 1_000) * 2 ** Math.min(attempt, 20), options.maxMs ?? 30_000);
+
 export const createPiExtension = (
   makeClient: (signal: AbortSignal, context?: PiContext) => Promise<SessionClient>, timeout = STARTUP_TIMEOUT_MS,
-  options: { readonly runtimeEnabled?: boolean } = {}
+  options: { readonly runtimeEnabled?: boolean; readonly retry?: PiRetryOptions } = {}
 ) => async (pi: PiAPI): Promise<void> => {
   let client: SessionClient | undefined;
   let runtime: ReturnType<typeof createPiRuntime> | undefined;
   let binding: RuntimeBinding | undefined;
   let context: PiContext | undefined;
   let instructions = "";
+  // Degraded state: why GPTQueue is unavailable, and the pending reconnect.
+  let degraded: PiGptqueueUnavailableError | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryAttempt = 0;
+  let generation = 0;
   const registered = new Set<string>();
   const expected: readonly string[] = options.runtimeEnabled ? [...GPTQUEUE_TOOLS, ...REQUIRED_RUNTIME_TOOLS] : GPTQUEUE_TOOLS;
+  const cancelRetry = () => { if (retryTimer) clearTimeout(retryTimer); retryTimer = undefined; };
   const close = async () => {
     runtime?.invalidate(); runtime = undefined; binding = undefined;
     const old = client; client = undefined;
@@ -105,11 +134,45 @@ export const createPiExtension = (
       throw error;
     }
   };
-  const fatal = async (error: unknown): Promise<never> => {
-    console.error(`[gptqueue] Pi registration readiness failed: ${error instanceof Error ? error.message : String(error)}`);
+  const status = (text: string | undefined, level?: "info" | "warning" | "error") => {
+    const ui = context?.ui;
+    try {
+      ui?.setStatus?.(STATUS_KEY, text);
+      if (text && level && ui?.notify) ui.notify(text, level);
+    } catch { /* UI is best effort; never let it take Pi down */ }
+  };
+  const recovered = () => {
+    cancelRetry(); retryAttempt = 0;
+    if (!degraded) return;
+    degraded = undefined;
+    status(undefined);
+    try { context?.ui?.notify?.("GPTQueue reconnected", "info"); } catch { /* best effort */ }
+  };
+  /** Never exit Pi: close the sidecar, tell the user, and (unless hopeless) reconnect later. */
+  const degrade = async (error: unknown): Promise<void> => {
+    const code = classify(error);
+    const reason = describe(error);
+    degraded = new PiGptqueueUnavailableError(code, reason);
+    console.error(`[gptqueue] Pi registration degraded (${code}): ${reason}`);
     await close().catch(() => undefined);
-    process.exit(1);
-    throw error;
+    const text = code === "runtime_binding_refused"
+      ? `GPTQueue refused this Pi session's mailbox binding (another live process may own it); Pi continues without GPTQueue and retries: ${reason}`
+      : `GPTQueue unavailable (${code}): ${reason}`;
+    status(text, code === "runtime_binding_refused" ? "warning" : "error");
+    if (code !== "runtime_unsupported") scheduleRetry();
+  };
+  const scheduleRetry = () => {
+    cancelRetry();
+    const mine = generation;
+    const timer = setTimeout(() => {
+      retryTimer = undefined;
+      if (mine !== generation) return;
+      retryAttempt += 1;
+      void attempt().then(() => { if (mine === generation) recovered(); },
+        (error: unknown) => mine === generation ? degrade(error) : undefined);
+    }, retryDelay(retryAttempt, options.retry));
+    timer.unref?.();
+    retryTimer = timer;
   };
   const connect = async () => {
     if (!client) client = await withTimeout(async (signal) => {
@@ -130,7 +193,8 @@ export const createPiExtension = (
         name: definition.name, label: `GPTQueue ${definition.name}`,
         description: definition.description ?? `GPTQueue ${definition.name}`, parameters: definition.inputSchema,
         async execute(_id, params, signal) {
-          if (!client) throw new Error("Pi GPTQueue session is not connected");
+          if (degraded) throw degraded;
+          if (!client) throw new PiGptqueueUnavailableError("gptqueue_unavailable", "Pi GPTQueue session is not connected");
           const result = await client.callTool({ name: definition.name, arguments: params }, undefined, { signal });
           const content = result.content.filter((item): item is { type: "text"; text: string } => item.type === "text");
           if (result.isError) throw new Error(content.map((item) => item.text).join("\n") || "GPTQueue tool failed");
@@ -142,13 +206,13 @@ export const createPiExtension = (
   const startRuntime = async (current: PiContext) => {
     context = current;
     if (!options.runtimeEnabled) return;
-    if (!current.cwd || !isAbsolute(current.cwd) || !current.sessionManager.getSessionId() || !pi.sendMessage) throw new Error("Pi session identity or native message API unavailable");
+    if (!current.cwd || !isAbsolute(current.cwd) || !current.sessionManager.getSessionId() || !pi.sendMessage) throw new UnsupportedHostError("Pi session identity or native message API unavailable");
     if (binding?.runtime_id === current.sessionManager.getSessionId() && runtime && client) return;
     if (binding) await close();
     const catalog = await connect();
     registerCatalog(catalog);
     const session = client!;
-    if (!session.setActivationHandler) throw new Error("Pi activation request transport unavailable");
+    if (!session.setActivationHandler) throw new UnsupportedHostError("Pi activation request transport unavailable");
     binding = Object.freeze({ client: "pi", runtime_id: current.sessionManager.getSessionId(), epoch: randomUUID(), working_directory: current.cwd });
     const ownBinding = binding;
     const adapter = createPiRuntime(binding, {
@@ -164,46 +228,71 @@ export const createPiExtension = (
       return adapter.activate(request, signal);
     });
     const result = await withTimeout((signal) => session.callTool({ name: "bind_runtime", arguments: { ...binding } }, undefined, { signal }), timeout);
-    if (result.isError || result.structuredContent?.activation_ready !== true) throw new Error("Pi inbox activation binding failed");
-  };
-  try {
-    if (!options.runtimeEnabled) registerCatalog(await connect());
-    pi.on("before_agent_start", async (event) => {
-      try {
-        if (options.runtimeEnabled) {
-          if (!context) throw new Error("Pi session_start has not supplied runtime identity");
-          if (!runtime) await startRuntime(context);
-          await connect();
-        } else {
-          await connect();
-        }
-        const active = pi.getActiveTools();
-        const missing = expected.filter((name) => !active.includes(name));
-        if (missing.length) pi.setActiveTools([...active, ...missing]);
-        if (!expected.every((name) => pi.getActiveTools().includes(name))) throw new Error("GPTQueue tools are not active");
-        return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
-      } catch (error) { return fatal(error); }
-    });
-    if (options.runtimeEnabled) {
-      pi.on("session_start", async (_event, current) => {
-        try { await startRuntime(current); } catch (error) { await fatal(error); }
-      });
-      pi.on("session_before_switch", async () => { await close(); });
-      pi.on("agent_end", (event) => {
-        for (const item of event.messages ?? []) {
-          if (!item || typeof item !== "object") continue;
-          const message = item as Record<string, unknown>;
-          const details = message.details as Record<string, unknown> | undefined;
-          if (message.role === "custom" && message.customType === "gptqueue-inbox-activation" &&
-              details?.runtime_id === binding?.runtime_id && typeof details?.operation_id === "string") {
-            pi.appendEntry?.("gptqueue-inbox-activation-completed", { operation_id: details.operation_id,
-              runtime_id: binding!.runtime_id, turn_id: `pi:${details.operation_id}`, status: "completed" });
-          }
-        }
-      });
+    if (result.isError) {
+      const text = result.content.filter((item) => item.type === "text").map((item) => (item as { text: string }).text).join("\n");
+      throw new BindingRefusedError(`Pi inbox activation binding refused${text ? `: ${text}` : ""}`);
     }
-    pi.on("session_shutdown", close);
-  } catch (error) { return fatal(error); }
+    if (result.structuredContent?.activation_ready !== true) throw new Error("Pi inbox activation binding failed");
+  };
+  /** One (re)connection attempt for the current mode. */
+  const attempt = async () => {
+    if (options.runtimeEnabled) {
+      if (!context) throw new Error("Pi session_start has not supplied runtime identity");
+      await startRuntime(context);
+    } else {
+      registerCatalog(await connect());
+    }
+  };
+  const activateTools = () => {
+    const active = pi.getActiveTools();
+    const missing = expected.filter((name) => !active.includes(name));
+    if (missing.length) pi.setActiveTools([...active, ...missing]);
+    if (!expected.every((name) => pi.getActiveTools().includes(name))) throw new Error("GPTQueue tools are not active");
+  };
+  const unavailableNote = () =>
+    `GPTQueue is currently unavailable in this session (${degraded?.code}); GPTQueue tools will report errors until it reconnects. Continue the user's work normally.`;
+  pi.on("before_agent_start", async (event) => {
+    if (degraded) return { systemPrompt: `${event.systemPrompt}\n\n${unavailableNote()}` };
+    try {
+      if (options.runtimeEnabled) {
+        if (!context) throw new Error("Pi session_start has not supplied runtime identity");
+        if (!runtime) await startRuntime(context);
+      }
+      await connect();
+      activateTools();
+      recovered();
+      return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
+    } catch (error) {
+      await degrade(error);
+      return { systemPrompt: `${event.systemPrompt}\n\n${unavailableNote()}` };
+    }
+  });
+  if (options.runtimeEnabled) {
+    pi.on("session_start", async (_event, current) => {
+      generation += 1; cancelRetry(); retryAttempt = 0; degraded = undefined;
+      context = current;
+      try { await startRuntime(current); recovered(); } catch (error) { await degrade(error); }
+    });
+    pi.on("session_before_switch", async () => { generation += 1; cancelRetry(); await close(); });
+    pi.on("agent_end", (event) => {
+      for (const item of event.messages ?? []) {
+        if (!item || typeof item !== "object") continue;
+        const message = item as Record<string, unknown>;
+        const details = message.details as Record<string, unknown> | undefined;
+        // The completion marker only says the turn ended; the dispatcher
+        // re-reads pending work and re-arms a fresh attempt for anything unclaimed.
+        if (message.role === "custom" && message.customType === "gptqueue-inbox-activation" &&
+            details?.runtime_id === binding?.runtime_id && typeof details?.operation_id === "string") {
+          pi.appendEntry?.("gptqueue-inbox-activation-completed", { operation_id: details.operation_id,
+            runtime_id: binding!.runtime_id, turn_id: `pi:${details.operation_id}`, status: "completed" });
+        }
+      }
+    });
+  }
+  pi.on("session_shutdown", async () => { generation += 1; cancelRetry(); await close(); });
+  if (!options.runtimeEnabled) {
+    try { registerCatalog(await connect()); } catch (error) { await degrade(error); }
+  }
 };
 
 export const createRegisteredPiExtension = (options: {

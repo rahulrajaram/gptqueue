@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPiRuntime, type PiRuntimeHost } from "../src/registered-shell/pi-runtime.js";
+import { createPiRuntime, piUndeliveredTurnId, type PiRuntimeHost } from "../src/registered-shell/pi-runtime.js";
 import type { RuntimeBinding } from "../src/registered-shell/runtime.js";
 
 const binding: RuntimeBinding = Object.freeze({ client: "pi", runtime_id: "session-1", epoch: "epoch-1", working_directory: "/tmp/project" });
@@ -53,5 +53,45 @@ describe("Pi runtime adapter", () => {
     expect((await createPiRuntime(binding, stale.host).activate({ operation_id: "op-stale-session", prompt: "wake" }, new AbortController().signal)).status).toBe("unavailable");
     const epochHost = host(); epochHost.host.getEpoch = () => "epoch-stale";
     expect((await createPiRuntime(binding, epochHost.host).activate({ operation_id: "op-stale-epoch", prompt: "wake" }, new AbortController().signal)).status).toBe("unavailable");
+  });
+  describe("evidence-based recovery", () => {
+    const idleHost = (entries: any[] = [], state = { idle: true, pending: false }) => {
+      const fake = host(entries); const sessionManager = fake.host.getContext().sessionManager;
+      fake.host.getContext = () => ({ cwd: "/tmp/project", sessionManager, isIdle: () => state.idle, hasPendingMessages: () => state.pending });
+      return { ...fake, state };
+    };
+    const signal = new AbortController().signal;
+    it("reports a dropped follow-up as undelivered once Pi is idle with an empty queue, so the dispatcher retries", async () => {
+      let clock = 0;
+      const fake = idleHost([], { idle: false, pending: true });
+      const runtime = createPiRuntime(binding, fake.host, { now: () => clock, graceMs: 1_000 });
+      await expect(runtime.activate({ operation_id: "op-drop", prompt: "wake" }, signal)).resolves.toEqual({ status: "queued" });
+      // Still running or queued: the follow-up may yet be delivered.
+      await expect(runtime.activate({ operation_id: "op-drop", prompt: "wake", recover_only: true }, signal)).resolves.toEqual({ status: "queued" });
+      // Idle and nothing queued, but inside the grace window: not yet evidence.
+      fake.state.idle = true; fake.state.pending = false;
+      await expect(runtime.activate({ operation_id: "op-drop", prompt: "wake", recover_only: true }, signal)).resolves.toEqual({ status: "queued" });
+      clock = 1_000;
+      await expect(runtime.activate({ operation_id: "op-drop", prompt: "wake", recover_only: true }, signal))
+        .resolves.toEqual({ status: "completed", turn_id: piUndeliveredTurnId("op-drop") });
+      expect(fake.sendMessage).toHaveBeenCalledTimes(1);
+    });
+    it("resolves an ambiguous operation after an extension restart from Pi's idle state", async () => {
+      const fake = idleHost();
+      await expect(createPiRuntime(binding, fake.host).activate({ operation_id: "op-lost", prompt: "wake", recover_only: true }, signal))
+        .resolves.toEqual({ status: "completed", turn_id: piUndeliveredTurnId("op-lost") });
+      fake.state.idle = false;
+      await expect(createPiRuntime(binding, fake.host).activate({ operation_id: "op-lost", prompt: "wake", recover_only: true }, signal))
+        .resolves.toEqual({ status: "ambiguous" });
+      expect(fake.sendMessage).not.toHaveBeenCalled();
+    });
+    it("treats a delivered follow-up without a completion marker as finished once Pi is idle", async () => {
+      const delivered = [{ type: "message", message: { role: "custom", customType: "gptqueue-inbox-activation", details: { operation_id: "op-ran" } } }];
+      const fake = idleHost(delivered, { idle: false, pending: false });
+      await expect(createPiRuntime(binding, fake.host).activate({ operation_id: "op-ran", prompt: "wake", recover_only: true }, signal)).resolves.toEqual({ status: "queued" });
+      fake.state.idle = true;
+      await expect(createPiRuntime(binding, fake.host).activate({ operation_id: "op-ran", prompt: "wake", recover_only: true }, signal))
+        .resolves.toEqual({ status: "completed", turn_id: "pi:op-ran" });
+    });
   });
 });

@@ -6,6 +6,7 @@ import type {
   OpenCodeBinding,
   RuntimeAdapter,
 } from "./runtime.js";
+import { inboxPrompt } from "./runtime.js";
 
 export type OpenCodeSessionStatus = "idle" | "busy" | "retry";
 export type OpenCodeHistoryPart = Readonly<{ type?: string; text?: string }>;
@@ -34,6 +35,11 @@ export interface OpenCodeRuntimePort {
 
 export interface OpenCodeRuntimeOptions {
   readonly timeoutMs?: number;
+  /**
+   * The bound GPTQueue agent. When set, the wake prompt is rendered with
+   * OpenCode's gptqueue_* tool names instead of the dispatcher's unprefixed ones.
+   */
+  readonly agent?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -147,7 +153,8 @@ export const createOpenCodeRuntime = async (
       }
       if (status !== "idle") return { status: "busy" };
 
-      const prompt = `${marker(request.operation_id)}\n${request.prompt}`;
+      const body = options.agent ? inboxPrompt(options.agent, request.operation_id, "opencode") : request.prompt;
+      const prompt = `${marker(request.operation_id)}\n${body}`;
       try {
         await withDeadline((inner) => port.promptAsync({ messageID: nativeMessageId(request.operation_id), text: prompt }, inner), signal, timeoutMs);
         return { status: "queued" };
