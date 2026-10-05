@@ -9,7 +9,14 @@ export type ActivationRecord = Readonly<{
   attempt: number;
   state: "pending" | "submitting" | "accepted" | "ambiguous" | "exhausted";
   created_at: string;
+  /** When the record entered its current state; deadlines are measured from it. */
+  state_since?: string;
+  /** First attempt of the current bounded retry round (exhausted cooldown re-arms a new round). */
+  round_start?: number;
 }>;
+
+/** Outcome of renewing the activation lease. */
+export type LeaseRenewal = "held" | "reacquired" | "lost";
 
 const operationKey = SESSION_KEYS.activation;
 
@@ -19,6 +26,8 @@ const isActivationRecord = (value: unknown): value is ActivationRecord => {
   const record = value as Record<string, unknown>;
   return typeof record.operation_id === "string" && typeof record.created_at === "string" &&
     typeof record.attempt === "number" && ACTIVATION_STATES.has(record.state) &&
+    (record.state_since === undefined || typeof record.state_since === "string") &&
+    (record.round_start === undefined || typeof record.round_start === "number") &&
     Array.isArray(record.message_ids) && record.message_ids.every((id) => typeof id === "string");
 };
 
@@ -38,11 +47,23 @@ export class ActivationStore {
   }
 
   async refresh(): Promise<boolean> {
-    if (!this.owner) return false;
-    return await this.redis.eval(
-      "if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end redis.call('EXPIRE',KEYS[1],30) return 1",
+    return await this.renew() !== "lost";
+  }
+
+  /**
+   * Renews the lease. A lease that lapsed (for example during one long native
+   * call) is re-acquired when no other owner took it; only a live foreign
+   * owner fences this dispatcher.
+   */
+  async renew(): Promise<LeaseRenewal> {
+    if (!this.owner) return "lost";
+    const result = await this.redis.eval(
+      "local v = redis.call('GET',KEYS[1]) " +
+      "if v == ARGV[1] then redis.call('EXPIRE',KEYS[1],30) return 1 end " +
+      "if not v then redis.call('SET',KEYS[1],ARGV[1],'EX',30) return 2 end return 0",
       1, SESSION_KEYS.runtimeBinding(this.agent), this.owner,
-    ) === 1;
+    );
+    return result === 1 ? "held" : result === 2 ? "reacquired" : "lost";
   }
 
   async current(): Promise<ActivationRecord | null> {

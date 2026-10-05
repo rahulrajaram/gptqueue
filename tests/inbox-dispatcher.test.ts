@@ -160,4 +160,106 @@ describe("inbox dispatcher", () => {
     expect(calls).toBe(stoppedAt);
     expect(await redis.get(`gptq:runtime-binding:${agent}`)).toBe("foreign-owner");
   });
+
+  const traceCodes = async (agent: string) => (await redis.xrange(`gptq:inbox-trace:${agent}`, "-", "+")).map(([, fields]) => fields.join(" "));
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("returns a pre-submit failure to pending and later activates with a fresh submission", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis);
+    const requests: Array<{ operation_id: string; recover_only?: boolean }> = [];
+    const adapter: RuntimeAdapter = { binding: binding("runtime-throw"), activate: async (request) => {
+      requests.push(request);
+      if (requests.length === 1) throw new Error("thread/read socket closed");
+      return { status: "queued" };
+    }, close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10 }); live.push({ agent, dispatcher });
+    await mailbox.send(task(agent));
+    await eventually(async () => (await redis.get(`gptq:activation:${agent}`))?.includes('"state":"accepted"') ?? false);
+    // The retry is a real submission, not a recover-only probe that would report ambiguous forever.
+    expect(requests[1]?.recover_only).toBe(false);
+    expect(requests[1]?.operation_id).toBe(requests[0]?.operation_id);
+    expect((await traceCodes(agent)).join(" ")).toContain("activation_submit_failed");
+  });
+
+  it("re-attempts an accepted activation under a new operation id after the settle deadline", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis);
+    const requests: Array<{ operation_id: string; recover_only?: boolean }> = [];
+    // A follow-up accepted then silently dropped: recovery keeps reporting queued.
+    const adapter: RuntimeAdapter = { binding: binding("runtime-drop"), activate: async (request) => { requests.push(request); return { status: "queued" }; }, close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10, settleTimeoutMs: 150 }); live.push({ agent, dispatcher });
+    await mailbox.send(task(agent));
+    await eventually(async () => new Set(requests.filter((r) => !r.recover_only).map((r) => r.operation_id)).size >= 2);
+    expect((await traceCodes(agent)).join(" ")).toContain("activation_deadline_expired");
+  });
+
+  it("bounds an ambiguous record recovered after restart and then re-attempts it", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis);
+    const first: RuntimeAdapter = { binding: binding("runtime-amb"), activate: async () => ({ status: "ambiguous" }), close: async () => {} };
+    const old = await startInboxDispatcher(redis, agent, first, { intervalMs: 10 }); live.push({ agent, dispatcher: old });
+    await mailbox.send(task(agent));
+    await eventually(async () => (await redis.get(`gptq:activation:${agent}`))?.includes('"state":"ambiguous"') ?? false);
+    await old.close();
+    const original = (JSON.parse((await redis.get(`gptq:activation:${agent}`))!) as { operation_id: string }).operation_id;
+    const requests: Array<{ operation_id: string; recover_only?: boolean }> = [];
+    const second: RuntimeAdapter = { binding: { ...binding("runtime-amb"), epoch: "epoch-2" }, activate: async (request) => {
+      requests.push(request); return request.recover_only ? { status: "ambiguous" } : { status: "queued" };
+    }, close: async () => {} };
+    const newer = await startInboxDispatcher(redis, agent, second, { intervalMs: 10, settleTimeoutMs: 150 }); live.push({ agent, dispatcher: newer });
+    await eventually(async () => requests.some((r) => !r.recover_only));
+    expect(requests[0]).toMatchObject({ operation_id: original, recover_only: true });
+    expect(requests.find((r) => !r.recover_only)?.operation_id).not.toBe(original);
+  });
+
+  it("re-arms an exhausted record after the cooldown without new work", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); const requests: string[] = [];
+    const adapter: RuntimeAdapter = { binding: binding("runtime-cool"), activate: async (request) => { requests.push(request.operation_id); return { status: "completed", turn_id: `turn-${requests.length}` }; }, close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10, maxAttempts: 2, exhaustedCooldownMs: 150 }); live.push({ agent, dispatcher });
+    await mailbox.send(task(agent));
+    await eventually(async () => requests.length >= 3);
+    expect(new Set(requests).size).toBe(requests.length);
+    expect((await traceCodes(agent)).join(" ")).toContain("activation_cooldown_elapsed");
+  });
+
+  it("re-acquires a lease lost during one long activation and still delivers", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); let calls = 0;
+    const adapter: RuntimeAdapter = { binding: binding("runtime-lease"), activate: async () => {
+      calls += 1;
+      // The 30 s lease lapses while native calls are slow.
+      if (calls === 1) { await redis.del(`gptq:runtime-binding:${agent}`); await sleep(30); return { status: "busy" }; }
+      return { status: "queued" };
+    }, close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10, leaseRenewMs: 10_000 }); live.push({ agent, dispatcher });
+    await mailbox.send(task(agent));
+    await eventually(async () => (await redis.get(`gptq:activation:${agent}`))?.includes('"state":"accepted"') ?? false);
+    expect(await redis.get(`gptq:runtime-binding:${agent}`)).toContain("runtime-lease");
+    expect((await traceCodes(agent)).join(" ")).toContain("lease_reacquired");
+    let settled = false; void dispatcher.closed.then(() => { settled = true; }); await sleep(20); expect(settled).toBe(false);
+  });
+
+  // Documented limitation (not tested): the claim check and activate are not
+  // atomic, so a claim taken between them can still be followed by one
+  // prompt. Worst case is one empty turn; claims prevent duplicate work.
+  it("never activates again while a claim is held, even past the settle deadline", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); const claims = new TaskClaimStore(redis);
+    const submissions: string[] = [];
+    const adapter: RuntimeAdapter = { binding: binding("runtime-held"), activate: async (request) => {
+      if (!request.recover_only) submissions.push(request.operation_id);
+      if (submissions.length === 1 && !request.recover_only) await claims.claim({ actor_id: agent, session_id: "s", max_batch: 1, ttl_seconds: 30, now: new Date().toISOString() });
+      return { status: "queued" };
+    }, close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10, settleTimeoutMs: 30, exhaustedCooldownMs: 30 }); live.push({ agent, dispatcher });
+    await mailbox.send(task(agent)); await eventually(async () => submissions.length >= 1);
+    await mailbox.send(task(agent)); // new work while the claim is held
+    await sleep(200);
+    expect(submissions).toHaveLength(1);
+  });
+
+  it("surfaces a typed diagnostic when a live foreign owner fences the dispatcher", async () => {
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent);
+    const adapter: RuntimeAdapter = { binding: binding("runtime-fenced"), activate: async () => ({ status: "queued" }), close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10 }); live.push({ agent, dispatcher });
+    await redis.set(`gptq:runtime-binding:${agent}`, "foreign-owner", "EX", 30);
+    await dispatcher.closed;
+    expect((await traceCodes(agent)).join(" ")).toContain("dispatcher_lease_lost");
+  });
 });

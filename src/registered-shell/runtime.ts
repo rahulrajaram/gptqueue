@@ -29,7 +29,12 @@ export type ActivationOutcome =
 
 export interface RuntimeAdapter {
   readonly binding: RuntimeIdentity;
-  /** Must deduplicate operation_id, including recovery after ambiguous delivery. */
+  /**
+   * Must deduplicate operation_id, including recovery after ambiguous delivery.
+   * Throw only before anything reaches the native runtime: any failure at or
+   * after the native submit must resolve as `ambiguous`, because the
+   * dispatcher returns a thrown non-recovery activation to `pending`.
+   */
   activate(request: ActivationRequest, signal: AbortSignal): Promise<ActivationOutcome>;
   close(): Promise<void>;
 }
