@@ -139,15 +139,20 @@ describe("mailbox continuity operator API", () => {
     expect(client.agentName).toBe(provisional);
   });
 
-  it("refuses source queue, claim, and outbound activity", async () => {
+  it("forwards a queued provisional source into the bound mailbox, re-addressed, in the adoption step (DL-2)", async () => {
     const { redis, canonical, provisional, b } = await setup();
-    await redis.set(`gptq:runtime-mailbox:${(await import("node:crypto")).createHash("sha256").update(JSON.stringify([b.client, b.runtime_id])).digest("hex")}`, JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
+    await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
     const client = new RedisClient(null, redisUrl); clients.push(client); await client.register("both", provisional);
-    await redis.rpush(SESSION_KEYS.queue(provisional), "queued");
-    await expect(restoreRuntimeMailbox(client, b)).rejects.toThrow();
-    expect(client.agentName).toBe(provisional);
+    const existing = { id: "already-bound", from: "peer", to: canonical, timestamp: "t0", type: "task", payload: { content: "first" } };
+    const sent = { id: "sent-to-provisional", from: "peer", to: provisional, timestamp: "t1", type: "task", payload: { content: "x", n: 12345678901234567 } };
+    await redis.rpush(SESSION_KEYS.queue(canonical), JSON.stringify(existing));
+    await redis.rpush(SESSION_KEYS.queue(provisional), JSON.stringify(sent));
+    await expect(restoreRuntimeMailbox(client, b)).resolves.toBe(canonical);
+    expect(await redis.exists(SESSION_KEYS.queue(provisional))).toBe(0);
+    // FIFO after existing work; only the address changes, byte for byte.
+    expect(await redis.lrange(SESSION_KEYS.queue(canonical), 0, -1)).toEqual([JSON.stringify(existing), JSON.stringify({ ...sent, to: canonical })]);
   });
-  it.each(["queue", "claim", "outbound"])("refused adoption with %s leaves durable ownership unchanged", async cause => {
+  it.each(["claim", "outbound"])("refused adoption with %s leaves durable ownership unchanged", async cause => {
     const { redis, canonical, provisional, b } = await setup();
     await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
     const client = new RedisClient(null, redisUrl); clients.push(client); await client.register("both", provisional);
@@ -303,7 +308,7 @@ describe("mailbox continuity operator API", () => {
     await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
     const client = new RedisClient(null, redisUrl); clients.push(client);
     await client.register("both", provisional);
-    await redis.rpush(SESSION_KEYS.queue(provisional), "queued");
+    await redis.set(`gptq:outbound-activity:${provisional}`, "1");
     await expect(restoreRuntimeMailbox(client, b)).rejects.toThrow();
     expect(await redis.xlen("gptq:continuity-audit")).toBe(0);
   });

@@ -8,12 +8,13 @@ import { SESSION_KEYS } from '../dist/core/keys.js';
 import { AgentDiagnostics } from '../dist/core/agent-diagnostics.js';
 import { prepareContinuity, applyContinuity } from '../dist/core/mailbox-continuity.js';
 import { probeActivationReady, bindingAgrees } from '../dist/core/doctor-probe.js';
+import { sweepProvisional } from '../dist/core/provisional-sweeper.js';
 import { CodexSocketClient } from '../dist/registered-shell/codex-socket.js';
 
 const [command, ...args] = process.argv.slice(2);
-const allowed = ['agent', 'find', 'delivery', 'connection', 'config', 'continuity-plan', 'continuity-apply'];
+const allowed = ['agent', 'find', 'delivery', 'connection', 'config', 'continuity-plan', 'continuity-apply', 'sweep-provisional'];
 if (!allowed.includes(command)) {
-  console.log('Usage: node scripts/gptqueue-doctor.mjs <agent|find|delivery|connection|config|continuity-plan|continuity-apply> --redis-url redis://host/db [--agent NAME] [--message-id ID] [--query TEXT] [--thread-id ID] [--client codex|pi --runtime-id ID --cwd PATH --legacy yes --out PLAN] [--plan PLAN --apply yes] [--tier base|sandbox-auto|sandbox-max]');
+  console.log('Usage: node scripts/gptqueue-doctor.mjs <agent|find|delivery|connection|config|continuity-plan|continuity-apply|sweep-provisional> --redis-url redis://host/db [--agent NAME] [--message-id ID] [--query TEXT] [--thread-id ID] [--client codex|pi --runtime-id ID --cwd PATH --legacy yes --out PLAN] [--plan PLAN --apply yes] [--tier base|sandbox-auto|sandbox-max] [--limit N]');
   process.exit(command === '--help' ? 0 : 1);
 }
 let redis = null;
@@ -125,6 +126,10 @@ try {
       await writeFile(required('--out'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
       break;
     }
+    // DL-2: retire crashed sidecars' provisional names (idempotent; never touches live or claimed names).
+    case 'sweep-provisional':
+      result = { swept: await sweepProvisional(redis, Number(options['--limit'] ?? 1000)) };
+      break;
     case 'continuity-apply':
       if (options['--apply'] !== 'yes') throw new Error('Operator approval required: --apply yes');
       result = { status: await applyContinuity(redis, JSON.parse(await readFile(required('--plan'), 'utf8'))) };

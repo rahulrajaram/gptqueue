@@ -171,7 +171,7 @@ export const startRegisteredShell = async (
   };
   callerSignal.addEventListener("abort", onAbort, { once: true });
   try {
-    await bounded(redis.register("both", agentName, `${options.client} interactive shell in ${identity.working_directory}`, identity),
+    await bounded(redis.register("both", agentName, `${options.client} interactive shell in ${identity.working_directory}`, identity, { provisional: true }),
       options.startupTimeoutMs ?? 10_000, "Registered shell startup timed out", shutdown.signal);
     registrationComplete = true;
     lifecycle.emit({ event: "registration_complete", phase: "registration", duration_ms: lifecycle.elapsed() - registrationStarted, session_id: redis.sessionId ?? undefined });

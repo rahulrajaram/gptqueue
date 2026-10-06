@@ -2,7 +2,7 @@ import type { RedisClient } from "../mcp-server/redis-client.js";
 import { startInboxDispatcher, type InboxDispatcher } from "./inbox-dispatcher.js";
 import { subscribeStale, validateRuntimeBinding, type RuntimeAdapter, type RuntimeBinding } from "./runtime.js";
 import type { RuntimeTools } from "./runtime-tools.js";
-import { restoreRuntimeMailbox } from "./runtime-mailbox.js";
+import { restoreRuntimeMailbox, RuntimeMailboxAdoptionRefused } from "./runtime-mailbox.js";
 
 export const createRuntimeController = (
   client: RedisClient,
@@ -15,6 +15,9 @@ export const createRuntimeController = (
   let host: RuntimeAdapter | undefined;
   let dispatcher: InboxDispatcher | undefined;
   let closed = false;
+  // DL-2: the bound mailbox a refused adoption targeted. While this client
+  // still holds its provisional name, closing retires that name into it.
+  let refusedTarget: string | undefined;
   let operation: Promise<unknown> = Promise.resolve();
   const status = (): Record<string, unknown> => ({
     status: "ok", agent: client.agentName, activation_ready: !!dispatcher && !closed,
@@ -38,7 +41,13 @@ export const createRuntimeController = (
         await dispatcher?.close();
         binding = validation.binding;
         try {
-          await restoreRuntimeMailbox(client, binding);
+          try {
+            await restoreRuntimeMailbox(client, binding);
+            refusedTarget = undefined;
+          } catch (error) {
+            if (error instanceof RuntimeMailboxAdoptionRefused) refusedTarget = error.target;
+            throw error;
+          }
           dispatcher = await startInboxDispatcher(client.adapterConnection, client.requireRegistered(), adapter);
           const active = dispatcher;
           host = adapter;
@@ -65,6 +74,12 @@ export const createRuntimeController = (
       await operation;
       await dispatcher?.close();
       dispatcher = undefined;
+      const provisional = client.agentName;
+      if (refusedTarget && provisional && provisional !== refusedTarget) {
+        // Hand anything a peer sent to the provisional name to the bound
+        // mailbox and stop the name being discoverable, in one atomic step.
+        await client.retireProvisionalMailbox(provisional, refusedTarget).catch(() => false);
+      }
     },
   };
 };

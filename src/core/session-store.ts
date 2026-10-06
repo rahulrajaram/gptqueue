@@ -9,7 +9,7 @@ import { readlinkSync } from "node:fs";
 import { hostname } from "node:os";
 import { Redis, type ChainableCommander } from "ioredis";
 import { v4 as uuidv4 } from "uuid";
-import { SESSION_KEYS, SESSION_DEFAULTS } from "./keys.js";
+import { SESSION_KEYS, SESSION_DEFAULTS, SYSTEM_SENDER } from "./keys.js";
 import type { SessionRecord, LeaseState, AgentPresence } from "./types.js";
 import { GptQueueError } from "../mcp-server/errors.js";
 
@@ -223,6 +223,9 @@ export class SessionStore {
     transport?: string,
     options: ClaimOptions = {}
   ): Promise<CreatedSession> {
+    if (agentName === SYSTEM_SENDER) {
+      throw new GptQueueError("AGENT_NAME_RESERVED", `Agent name '${agentName}' is reserved for gptqueue's own messages.`, { name: agentName });
+    }
     const sessionId = uuidv4();
     const now = new Date().toISOString();
 

@@ -93,6 +93,12 @@ export const SESSION_KEYS = {
 
   /** Append-only audit of agent-name takeovers from dead holders (stream). */
   identityAudit: "gptq:identity-audit",
+  /**
+   * DL-2: names registered as a sidecar's per-startup provisional identity
+   * and not yet adopted or bound. The provisional sweeper retires a member
+   * whose sessions all expired (core/provisional-sweeper.ts).
+   */
+  provisional: "gptq:provisional-identities",
 } as const;
 
 /** Default constants. */
@@ -146,7 +152,12 @@ export const DLQ_KEYS = {
    * never silent. claims-purge.lua deletes it by the same literal prefix.
    */
   dropped: (actorId: string) => `gptq:dlq-dropped:${actorId}`,
+  /** Per-actor hash: DLQ'd message id -> reason, when one is recorded (e.g. recipient_retired). */
+  reasons: (actorId: string) => `gptq:dlq-reason:${actorId}`,
 } as const;
+
+/** Reserved sender of gptqueue's own envelopes (e.g. RECIPIENT_RETIRED); no agent may register it. */
+export const SYSTEM_SENDER = "gptqueue-system";
 
 /**
  * PROVISIONAL dead-letter / recovery-quarantine / claim-lifecycle policy

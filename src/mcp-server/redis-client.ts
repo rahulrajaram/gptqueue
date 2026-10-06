@@ -3,6 +3,7 @@ import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS, DLQ_PROVISIONAL, SESSION_DEFAULTS } from "../core/keys.js";
 import { occupancyGuardLua } from "../core/occupancy-guard.js";
+import { sweepProvisional } from "../core/provisional-sweeper.js";
 import { MailboxStore } from "../core/mailbox-store.js";
 import { SessionStore } from "../core/session-store.js";
 import { CustodyStore } from "../core/custody-store.js";
@@ -36,6 +37,23 @@ local removed = purge_actor_claims(KEYS[8], KEYS[9], KEYS[10], KEYS[11], KEYS[12
 redis.call('DEL', KEYS[5], KEYS[6], KEYS[7])
 return removed
 `;
+
+/**
+ * Lua: move every envelope from KEYS[src] to KEYS[dst]'s tail, re-addressing
+ * the top-level "to" from ARGV source to target by exact text substitution
+ * (no cjson round trip, which would alter numbers and reject unpaired
+ * surrogates). An envelope without that exact field moves unchanged.
+ */
+const forwardProvisionalLua = (src: string, dst: string, sourceArg: string, targetArg: string): string => `
+      local fromField = '"to":' .. cjson.encode(${sourceArg})
+      local toField = '"to":' .. cjson.encode(${targetArg})
+      local pending = redis.call('LRANGE', ${src}, 0, -1)
+      for _, raw in ipairs(pending) do
+        local at = string.find(raw, fromField, 1, true)
+        if at then raw = string.sub(raw, 1, at - 1) .. toField .. string.sub(raw, at + #fromField) end
+        redis.call('RPUSH', ${dst}, raw)
+      end
+      redis.call('DEL', ${src})`;
 
 export class RedisClient {
   private redis: Redis;
@@ -166,7 +184,7 @@ export class RedisClient {
       if redis.call('HGET', KEYS[3], 'agent_name') ~= ARGV[1] or redis.call('EXISTS', KEYS[4]) ~= 1 then return -3 end
       if redis.call('SCARD', KEYS[5]) ~= 1 or redis.call('SISMEMBER', KEYS[5], ARGV[3]) ~= 1 then return -4 end
       if occupied_target(ARGV[2], KEYS[7]) then return -5 end
-      if redis.call('LLEN', KEYS[8]) > 0 or redis.call('ZCARD', KEYS[9]) > 0 or redis.call('EXISTS', KEYS[10]) == 1 or redis.call('EXISTS', KEYS[11]) == 1 then return -6 end
+      if redis.call('ZCARD', KEYS[9]) > 0 or redis.call('EXISTS', KEYS[10]) == 1 or redis.call('EXISTS', KEYS[11]) == 1 then return -6 end
       targetReg.pid = sourceReg.pid
       targetReg.metadata = targetReg.metadata or {}
       if sourceReg.metadata then
@@ -182,17 +200,47 @@ export class RedisClient {
       redis.call('HDEL', KEYS[15], ARGV[2])
       redis.call('HDEL', KEYS[2], ARGV[1])
       redis.call('DEL', KEYS[12])
+      -- DL-2: work a peer sent to the provisional source name moves with the
+      -- identity, in this same atomic step, to the bound mailbox's tail.
+      local moved = redis.call('LLEN', KEYS[8])
+      ${forwardProvisionalLua("KEYS[8]", "KEYS[16]", "ARGV[1]", "ARGV[2]")}
+      if moved > 0 then redis.call('XADD', KEYS[17], '*', 'type', 'forwarded') end
+      redis.call('SREM', '${SESSION_KEYS.provisional}', ARGV[1])
       redis.call('XADD', KEYS[13], 'MAXLEN', '~', 1000, '*', 'event', 'runtime_continuity', 'target', ARGV[2], 'source', ARGV[1], 'runtime_id', ARGV[5], 'session_id', ARGV[3])
       return 1
-    `, 15, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
+    `, 17, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
       SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), wrapper(target),
       SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), SESSION_KEYS.outboundActivity(source), wrapper(source),
       SESSION_KEYS.heartbeat(source), SESSION_KEYS.continuityAudit, SESSION_KEYS.registryPending, SESSION_KEYS.registryRestore,
+      SESSION_KEYS.queue(target), SESSION_KEYS.inboxEvents(target),
       source, target, this._sessionId, expectedMapping, runtimeId ?? "");
     if (result !== 1) throw new Error(`Continuity adoption refused (${result})`);
     this._agentName = target;
     this.startHeartbeat();
     this.notifyIdentity();
+  }
+
+  /**
+   * DL-2: retire a provisional name whose adoption of `target` was refused.
+   * In one atomic step its pending messages move to the bound mailbox's tail
+   * and its registry entry is removed, so a peer can no longer discover it
+   * and no send to it is accepted afterwards. Refused (returns false, nothing
+   * changes) while the provisional name holds a claim: claimed work stays
+   * durable under its claim and is recovered by the normal lease path.
+   */
+  async retireProvisionalMailbox(source: string, target: string): Promise<boolean> {
+    if (source === target || this._agentName !== source) return false;
+    const result = await this.redis.eval(`
+      if redis.call('ZCARD', KEYS[2]) > 0 then return 0 end
+      local moved = redis.call('LLEN', KEYS[1])
+      ${forwardProvisionalLua("KEYS[1]", "KEYS[3]", "ARGV[1]", "ARGV[2]")}
+      redis.call('HDEL', KEYS[4], ARGV[1])
+      redis.call('SREM', '${SESSION_KEYS.provisional}', ARGV[1])
+      if moved > 0 then redis.call('XADD', KEYS[5], '*', 'type', 'forwarded') end
+      return 1
+    `, 5, SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), SESSION_KEYS.queue(target),
+      SESSION_KEYS.registry, SESSION_KEYS.inboxEvents(target), source, target);
+    return result === 1;
   }
 
   /**
@@ -225,7 +273,14 @@ export class RedisClient {
     name: string,
     description?: string,
     metadata?: AgentDiscoveryMetadata,
-    options: { readonly shared?: boolean } = {}
+    options: {
+      readonly shared?: boolean;
+      /**
+       * DL-2: a sidecar's per-startup provisional identity. Marked before its
+       * session exists, so a crash at any point leaves it sweepable.
+       */
+      readonly provisional?: boolean;
+    } = {}
   ): Promise<{ name: string; session_id: string }> {
     // D2: names are exclusive unless this registrant opts into sharing,
     // explicitly or through GPTQ_AGENT_SHARED=1 for processes that cannot
@@ -253,6 +308,8 @@ export class RedisClient {
         this.heartbeatTimer = null;
       }
     }
+
+    if (options.provisional) await this.redis.sadd(SESSION_KEYS.provisional, name);
 
     // Create a new session
     let session: Awaited<ReturnType<SessionStore["createSession"]>>;
@@ -350,6 +407,10 @@ export class RedisClient {
     this.startHeartbeat();
     this.notifyIdentity();
 
+    if (options.provisional) {
+      // Opportunistic, bounded: retire provisional names whose sidecars died.
+      await sweepProvisional(this.redis).catch(() => undefined);
+    }
     return { name, session_id: session.session_id };
   }
 
