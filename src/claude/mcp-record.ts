@@ -5,6 +5,8 @@
  */
 import { randomBytes } from "node:crypto";
 import { SESSION_DEFAULTS } from "../core/keys.js";
+import { GptQueueError } from "../mcp-server/errors.js";
+import { stableToolError } from "../mcp-server/tool-result.js";
 import { processKey, publishSessionRecord, readProcess, type ProcessInfo } from "./session-record.js";
 
 export type IdentitySource = { onIdentityChange(observer: (name: string | null, sessionId: string | null) => void): void; agentName: string | null; sessionId: string | null };
@@ -133,21 +135,74 @@ export const registerClaudeAware = async (
   throw new NameExhaustedError(tried);
 };
 
-type MessageTransport<M> = { onmessage?: (message: M, extra?: never) => void };
+type HeldMessage = { readonly method?: unknown; readonly id?: unknown };
+type MessageTransport<M> = {
+  onmessage?: (message: M, extra?: never) => void;
+  onclose?: () => void;
+  send?: (message: { jsonrpc: "2.0"; id: string | number; result: Record<string, unknown> }) => Promise<void>;
+};
+
+/** Default bound on holding tool calls: covers the 32 s old-holder lease wait plus registration. */
+export const HOLD_TOOL_CALLS_MS = 45_000;
 
 /**
- * Delay incoming tools/call requests until `gate` settles (success or
- * failure), so tools never run against a half-registered identity. Every
- * other message (initialize, tools/list, notifications) passes straight
- * through. Must be called after server.connect() has installed onmessage.
+ * Delay incoming tools/call requests until `gate` settles, so tools never run
+ * against a half-registered identity. Every other message (initialize,
+ * tools/list, notifications) passes straight through. Held calls keep their
+ * arrival order. If registration succeeds they are delivered; if it fails,
+ * or does not settle within `timeoutMs`, each held call is answered with a
+ * typed tool error (the registration's own code, or AGENT_NOT_REGISTERED).
+ * If the transport closes first, held calls are dropped, never delivered.
+ * Must be called after server.connect() has installed onmessage/onclose.
  */
-export const holdToolCallsUntil = <M>(transport: MessageTransport<M>, gate: Promise<unknown>): void => {
+export const holdToolCallsUntil = <M>(
+  transport: MessageTransport<M>, gate: Promise<unknown>, timeoutMs = HOLD_TOOL_CALLS_MS,
+): void => {
   const deliver = transport.onmessage;
   if (!deliver) return;
-  let settled = false;
-  const done = gate.then(() => { settled = true; }, () => { settled = true; });
+  // pending: hold; ok: pass through; refused: answer with the typed error.
+  // No retry happens here (the gate is one registration attempt), but a
+  // registration that completes after the timeout still turns this to ok.
+  let outcome: { kind: "pending" } | { kind: "ok" } | { kind: "refused"; error: unknown; final: boolean } = { kind: "pending" };
+  let closed = false;
+  const held: Array<{ message: M; extra?: never }> = [];
+  const answer = (message: M, error: unknown) => {
+    const id = (message as HeldMessage | null)?.id;
+    if (closed || (typeof id !== "string" && typeof id !== "number")) return;
+    void transport.send?.({ jsonrpc: "2.0", id, result: stableToolError(error) as unknown as Record<string, unknown> })
+      .catch(() => undefined);
+  };
+  const timer = setTimeout(() => {
+    if (outcome.kind !== "pending") return;
+    const error = new GptQueueError("AGENT_NOT_REGISTERED",
+      `GPTQueue registration did not complete within ${Math.round(timeoutMs / 1000)} s; retry the tool call.`);
+    outcome = { kind: "refused", error, final: false };
+    for (const { message } of held.splice(0)) answer(message, error);
+  }, timeoutMs);
+  timer.unref?.();
+  gate.then(
+    () => {
+      clearTimeout(timer);
+      if (outcome.kind === "refused" && outcome.final) return;
+      outcome = { kind: "ok" };
+      for (const { message, extra } of held.splice(0)) if (!closed) deliver(message, extra);
+    },
+    (error: unknown) => {
+      clearTimeout(timer);
+      outcome = { kind: "refused", error, final: true };
+      for (const { message } of held.splice(0)) answer(message, error);
+    },
+  );
+  const previousClose = transport.onclose;
+  transport.onclose = () => {
+    closed = true;
+    held.length = 0;
+    clearTimeout(timer);
+    previousClose?.();
+  };
   transport.onmessage = (message: M, extra?: never) => {
-    if (settled || (message as { method?: unknown } | null)?.method !== "tools/call") { deliver(message, extra); return; }
-    void done.then(() => deliver(message, extra));
+    if ((message as HeldMessage | null)?.method !== "tools/call" || outcome.kind === "ok") { deliver(message, extra); return; }
+    if (outcome.kind === "refused") { answer(message, outcome.error); return; }
+    if (!closed) held.push({ message, extra });
   };
 };

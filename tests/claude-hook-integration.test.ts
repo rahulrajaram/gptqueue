@@ -26,7 +26,7 @@ beforeAll(async () => {
   // Spawned entry points load modules from /workspace, which can be slow under I/O contention.
   home = await mkdtemp(join(tmpdir(), "gptq-claude-hook-"));
   runtime = join(home, "rt");
-  env = { PATH: process.env.PATH, HOME: home, REDIS_URL, GPTQ_CLAUDE_RUNTIME_DIR: runtime };
+  env = { PATH: process.env.PATH, HOME: home, REDIS_URL, GPTQ_CLAUDE_RUNTIME_DIR: runtime, GPTQ_CLAUDE_LEGACY_SCAN: "off" };
 });
 afterEach(async () => {
   for (const c of children.splice(0)) c.kill("SIGKILL");

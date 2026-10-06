@@ -42,7 +42,7 @@ describe("session record (ID-2)", () => {
   });
 
   it("is found through the reader's ancestry and ignored when the server is gone", async () => {
-    const env = { GPTQ_CLAUDE_RUNTIME_DIR: join(await temp(), "rt") } as NodeJS.ProcessEnv;
+    const env = { GPTQ_CLAUDE_RUNTIME_DIR: join(await temp(), "rt"), GPTQ_CLAUDE_LEGACY_SCAN: "off" } as NodeJS.ProcessEnv;
     const parent = readProcess(process.ppid)!;
     publishSessionRecord(parent, "claude-held", "s-1", env);
     expect((await stat(env.GPTQ_CLAUDE_RUNTIME_DIR!)).mode & 0o777).toBe(0o700);
@@ -59,7 +59,7 @@ describe("session record (ID-2)", () => {
   });
 
   it("treats a record whose server pid is live but has a different start time as stale (pid reuse)", async () => {
-    const env = { GPTQ_CLAUDE_RUNTIME_DIR: join(await temp(), "rt") } as NodeJS.ProcessEnv;
+    const env = { GPTQ_CLAUDE_RUNTIME_DIR: join(await temp(), "rt"), GPTQ_CLAUDE_LEGACY_SCAN: "off" } as NodeJS.ProcessEnv;
     const parent = readProcess(process.ppid)!;
     const dir = ensureRuntimeDir(env);
     const fabricated = { version: 1, agent: "claude-stale", gptqueue_session_id: "s-old", claude_pid: parent.pid, claude_start: parent.start,

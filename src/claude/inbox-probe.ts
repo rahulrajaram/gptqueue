@@ -7,6 +7,7 @@
 import { Redis } from "ioredis";
 import { CLAIM_KEYS, SESSION_KEYS } from "../core/keys.js";
 import { ancestry, findSessionRecord, type RecordLookup } from "./session-record.js";
+import { findLegacyIdentity, type LegacyLookup } from "./legacy-identity.js";
 import { resolveAgentName } from "./agent-name.js";
 
 export type InboxCounts = Readonly<{
@@ -75,7 +76,11 @@ export const probeClient = (url = process.env.REDIS_URL || "redis://127.0.0.1:63
   return redis;
 };
 
-export type IdentitySource = "session_record" | "env" | "derived";
+export type IdentitySource = "session_record" | "legacy_env" | "env" | "derived";
+
+/** Sources that name the inbox this session's own MCP server actually registered. */
+export const isConfirmed = (identity: Pick<Identity, "source">): boolean =>
+  identity.source === "session_record" || identity.source === "legacy_env";
 export type Identity = Readonly<{
   agent: string;
   gptqueue_session_id: string | null;
@@ -89,14 +94,27 @@ export type Identity = Readonly<{
  * server registered (session record), else today's resolution (GPTQ_AGENT_NAME,
  * names file, git top level of CLAUDE_PROJECT_DIR or `dir`), with a note.
  */
-export const resolveIdentity = (dir: string | undefined, env: NodeJS.ProcessEnv = process.env, lookup?: RecordLookup): Identity => {
-  const found = lookup ?? findSessionRecord(ancestry(env.GPTQ_CLAUDE_PID ? Number(env.GPTQ_CLAUDE_PID) : process.pid), env);
+export const resolveIdentity = (
+  dir: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  lookup?: RecordLookup,
+  legacy?: () => LegacyLookup,
+): Identity => {
+  const chain = lookup && legacy ? [] : ancestry(env.GPTQ_CLAUDE_PID ? Number(env.GPTQ_CLAUDE_PID) : process.pid);
+  const found = lookup ?? findSessionRecord(chain, env);
   if (found.kind === "found") {
     return Object.freeze({ agent: found.record.agent, gptqueue_session_id: found.record.gptqueue_session_id, source: "session_record", note: null });
   }
-  const note = found.kind === "stale"
+  // A running session started before session records existed: its old MCP
+  // server (a direct child of this Claude) carries the name it registered.
+  const old = legacy ? legacy() : env.GPTQ_CLAUDE_LEGACY_SCAN === "off" ? { kind: "none" as const } : findLegacyIdentity(chain);
+  if (old.kind === "confirmed") {
+    return Object.freeze({ agent: old.agent, gptqueue_session_id: null, source: "legacy_env", note: `confirmed from the environment of this session's pre-record gptqueue MCP server (pid ${old.server_pid})` });
+  }
+  const ambiguity = old.kind === "ambiguous" ? `; ${old.agents.length} legacy gptqueue MCP servers under pid ${old.claude_pid} (${old.agents.join(", ")})` : "";
+  const note = (found.kind === "stale"
     ? `session record ignored (${found.reason}); name re-derived`
-    : "no session record from this session's gptqueue MCP server; name re-derived";
+    : "no session record from this session's gptqueue MCP server; name re-derived") + ambiguity;
   return Object.freeze({
     agent: resolveAgentName(env.CLAUDE_PROJECT_DIR || dir, env),
     gptqueue_session_id: null,
@@ -115,7 +133,7 @@ export const waitForIdentity = async (dir: string | undefined, waitMs: number, e
   const deadline = Date.now() + waitMs;
   for (;;) {
     const identity = resolveIdentity(dir, env);
-    if (identity.source === "session_record" || Date.now() >= deadline) return identity;
+    if (isConfirmed(identity) || Date.now() >= deadline) return identity;
     await new Promise((r) => setTimeout(r, pollMs));
   }
 };

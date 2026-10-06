@@ -19,7 +19,7 @@
 import { Redis } from "ioredis";
 import { rmSync } from "node:fs";
 import { SESSION_KEYS } from "../core/keys.js";
-import { probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity } from "./inbox-probe.js";
+import { isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity } from "./inbox-probe.js";
 import { ensureRuntimeDir, readProcess, readWatcherPid, watcherPidPath, writeWatcherPid } from "./session-record.js";
 
 const USAGE = `Non-consuming gptqueue inbox check; never pops a message.
@@ -122,7 +122,7 @@ export const runPeek = async (argv: readonly string[], env: NodeJS.ProcessEnv = 
   const identity = args.name
     ? Object.freeze({ agent: args.name, gptqueue_session_id: null, source: "env" as const, note: "name given with --name" })
     : args.watch ? await waitForIdentity(args.dir ?? undefined, recordWaitMs(env, WATCH_RECORD_WAIT_MS), env) : resolveIdentity(args.dir ?? undefined, env);
-  if (args.watch && !args.name && identity.source !== "session_record") {
+  if (args.watch && !args.name && !isConfirmed(identity)) {
     process.stdout.write(`${JSON.stringify({ error: "session_identity_unconfirmed", message: `no gptqueue session record for this Claude session (${identity.note}); not watching a guessed mailbox` })}\n`);
     return 5;
   }

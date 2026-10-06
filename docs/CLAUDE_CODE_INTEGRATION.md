@@ -21,6 +21,15 @@ nearest ancestor that has one. The start time (`/proc/<pid>/stat` field 22) keep
 from matching an old record. A record whose server process is gone, or whose server pid now has a different start time, is ignored. Set `GPTQ_CLAUDE_PID`
 when a launcher sits between Claude and the server.
 
+Sessions whose MCP server predates session records (started before the wrapper swap) are
+confirmed another way. The old wrapper exported `GPTQ_AGENT_NAME` and exec'd
+`node .../dist/mcp-server/index.js`, so that server is a direct child of its Claude process.
+With no record, hooks and the name-free watcher look at the direct children of their nearest
+ancestors. They read `/proc` only for processes owned by the same uid. If exactly one such
+server is found under the nearest ancestor that has any, its `GPTQ_AGENT_NAME` is confirmed
+(source `legacy_env`) and the Stop hook gates on it. If several are found, the name stays
+unconfirmed. `GPTQ_CLAUDE_LEGACY_SCAN=off` disables the scan.
+
 If no record exists, the hook falls back to the old resolution (on `CLAUDE_PROJECT_DIR`, then the
 hook's `cwd`) and marks the name `UNCONFIRMED` in its output.
 

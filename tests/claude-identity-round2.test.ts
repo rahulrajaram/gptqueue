@@ -20,6 +20,7 @@ import { SESSION_KEYS } from "../src/core/keys.js";
 import { publishSessionRecord, readProcess } from "../src/claude/session-record.js";
 import { waitForIdentity } from "../src/claude/inbox-probe.js";
 import { outagePolicy, parsePeekArgs, watchInbox, WATCH_RECORD_WAIT_MS } from "../src/claude/peek.js";
+import { GptQueueError } from "../src/mcp-server/errors.js";
 import { fallbackCandidates, holdToolCallsUntil, NameExhaustedError, registerClaudeAware, type RegisterDeps } from "../src/claude/mcp-record.js";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
@@ -32,7 +33,7 @@ const self = () => readProcess(process.pid)!;
 
 beforeAll(async () => {
   home = await mkdtemp(join(tmpdir(), "gptq-claude-r2-"));
-  env = { PATH: process.env.PATH, HOME: home, REDIS_URL, GPTQ_CLAUDE_RUNTIME_DIR: join(home, "rt") };
+  env = { PATH: process.env.PATH, HOME: home, REDIS_URL, GPTQ_CLAUDE_RUNTIME_DIR: join(home, "rt"), GPTQ_CLAUDE_LEGACY_SCAN: "off" };
   redis = new Redis(REDIS_URL);
 });
 afterEach(async () => {
@@ -279,5 +280,98 @@ describe("AGENT_NAME_HELD: bounded fallback chain and old-format lease wait", ()
     release();
     await new Promise((r) => setTimeout(r, 0));
     expect(delivered).toEqual(["initialize", "tools/call"]);
+  });
+
+  type Msg = { method: string; id?: number };
+  type Sent = { jsonrpc: "2.0"; id: string | number; result: Record<string, unknown> };
+  const heldTransport = () => {
+    const delivered: Msg[] = [];
+    const sent: Sent[] = [];
+    let closedByServer = 0;
+    const transport: { onmessage?: (m: Msg) => void; onclose?: () => void; send: (m: Sent) => Promise<void> } = {
+      onmessage: (m) => delivered.push(m),
+      onclose: () => { closedByServer += 1; },
+      send: async (m) => { sent.push(m); },
+    };
+    return { transport, delivered, sent, closedByServer: () => closedByServer };
+  };
+  const code = (s: Sent) => ((s.result.structuredContent as { error: { code: string } }).error.code);
+
+  it("a registration that never settles answers held calls with AGENT_NOT_REGISTERED after the bound, in order", async () => {
+    const t = heldTransport();
+    holdToolCallsUntil(t.transport, new Promise<void>(() => undefined), 50);
+    for (const id of [1, 2, 3]) t.transport.onmessage!({ method: "tools/call", id });
+    await new Promise((r) => setTimeout(r, 120));
+    expect(t.delivered).toEqual([]);
+    expect(t.sent.map((s) => s.id)).toEqual([1, 2, 3]);
+    expect(t.sent.map(code)).toEqual(["AGENT_NOT_REGISTERED", "AGENT_NOT_REGISTERED", "AGENT_NOT_REGISTERED"]);
+    expect(t.sent[0]!.result.isError).toBe(true);
+  });
+
+  it("a registration failure answers every held call with the registration's own typed code", async () => {
+    const t = heldTransport();
+    let fail!: (e: unknown) => void;
+    holdToolCallsUntil(t.transport, new Promise<void>((_, reject) => { fail = reject; }));
+    for (const id of [7, 8]) t.transport.onmessage!({ method: "tools/call", id });
+    fail(new GptQueueError("AGENT_NAME_HELD", "held", { name: "x", holder_session_id: "s" }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(t.sent.map((s) => [s.id, code(s)])).toEqual([[7, "AGENT_NAME_HELD"], [8, "AGENT_NAME_HELD"]]);
+    expect(t.delivered).toEqual([]);
+  });
+
+  it("a closed transport drops held calls without any delivery or reply", async () => {
+    const t = heldTransport();
+    let release!: () => void;
+    holdToolCallsUntil(t.transport, new Promise<void>((r) => { release = r; }), 50);
+    t.transport.onmessage!({ method: "tools/call", id: 1 });
+    t.transport.onclose!();
+    expect(t.closedByServer()).toBe(1); // the server's own close handler still runs
+    release();
+    await new Promise((r) => setTimeout(r, 120));
+    expect(t.delivered).toEqual([]);
+    expect(t.sent).toEqual([]);
+  });
+
+  it("after a failure or a timeout, LATER tool calls get the same typed error; after success they pass", async () => {
+    const failed = heldTransport();
+    let fail!: (e: unknown) => void;
+    holdToolCallsUntil(failed.transport, new Promise<void>((_, reject) => { fail = reject; }));
+    fail(new GptQueueError("AGENT_NAME_HELD", "held", { name: "x", holder_session_id: "s" }));
+    await new Promise((r) => setTimeout(r, 0));
+    failed.transport.onmessage!({ method: "tools/call", id: 21 });
+    failed.transport.onmessage!({ method: "tools/list", id: 22 });
+    expect(failed.sent.map((s) => [s.id, code(s)])).toEqual([[21, "AGENT_NAME_HELD"]]);
+    expect(failed.delivered.map((m) => m.id)).toEqual([22]);
+
+    const slow = heldTransport();
+    let late!: () => void;
+    holdToolCallsUntil(slow.transport, new Promise<void>((r) => { late = r; }), 30);
+    await new Promise((r) => setTimeout(r, 80));
+    slow.transport.onmessage!({ method: "tools/call", id: 31 });
+    expect(slow.sent.map((s) => [s.id, code(s)])).toEqual([[31, "AGENT_NOT_REGISTERED"]]);
+    expect(slow.delivered).toEqual([]);
+    // A registration that completes after the timeout lets later calls through.
+    late();
+    await new Promise((r) => setTimeout(r, 0));
+    slow.transport.onmessage!({ method: "tools/call", id: 32 });
+    expect(slow.delivered.map((m) => m.id)).toEqual([32]);
+
+    const ok = heldTransport();
+    holdToolCallsUntil(ok.transport, Promise.resolve());
+    await new Promise((r) => setTimeout(r, 0));
+    ok.transport.onmessage!({ method: "tools/call", id: 41 });
+    expect(ok.delivered.map((m) => m.id)).toEqual([41]);
+    expect(ok.sent).toEqual([]);
+  });
+
+  it("success delivers held calls in arrival order, ahead of later calls", async () => {
+    const t = heldTransport();
+    let release!: () => void;
+    holdToolCallsUntil(t.transport, new Promise<void>((r) => { release = r; }));
+    for (const id of [1, 2, 3]) t.transport.onmessage!({ method: "tools/call", id });
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    t.transport.onmessage!({ method: "tools/call", id: 4 });
+    expect(t.delivered.map((m) => m.id)).toEqual([1, 2, 3, 4]);
   });
 });

@@ -18,7 +18,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureRuntimeDir, watcherPidPath, watcherRunning } from "./session-record.js";
-import { probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity, type ProbeResult } from "./inbox-probe.js";
+import { isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity, type ProbeResult } from "./inbox-probe.js";
 import { writeFileSync } from "node:fs";
 
 export type HookEvent = "session-start" | "stop";
@@ -43,10 +43,15 @@ export type HookDecision =
 
 const CONSUME = "Consume with claim_tasks (max_batch up to 16), act on each task, then acknowledge_tasks with the claim_id. Do not use receive_message: it is an unacknowledged pop.";
 
-const identityText = (id: Identity): string =>
-  id.source === "session_record"
-    ? `agent '${id.agent}' (gptqueue session ${id.gptqueue_session_id}, as registered by this session's gptqueue MCP server)`
-    : `agent '${id.agent}' (UNCONFIRMED: ${id.note}; source ${id.source})`;
+const identityText = (id: Identity): string => {
+  switch (id.source) {
+    case "session_record": return `agent '${id.agent}' (gptqueue session ${id.gptqueue_session_id}, as registered by this session's gptqueue MCP server)`;
+    case "legacy_env": return `agent '${id.agent}' (${id.note})`;
+    case "env":
+    case "derived": return `agent '${id.agent}' (UNCONFIRMED: ${id.note}; source ${id.source})`;
+    default: { const unreachable: never = id.source; throw new Error(String(unreachable)); }
+  }
+};
 
 export const countsText = (probe: Extract<ProbeResult, { ok: true }>): string => {
   const c = probe.counts;
@@ -63,7 +68,7 @@ export const decideHook = (input: HookInput): HookDecision => {
   const watchText = `To be woken when mail arrives while idle, run this with run_in_background (its exit wakes you; restart it after every wake): ${input.watchCommand}`;
   switch (input.event) {
     case "session-start": {
-      if (identity.source !== "session_record") {
+      if (!isConfirmed(identity)) {
         // The guessed name may be another session's (same directory): report no counts for it.
         return { kind: "context", text: `gptqueue: this session's agent name is UNCONFIRMED (${identity.note}). Its gptqueue MCP server registers the session itself; call get_queue_status or claim_tasks through it to see your own inbox. Use a distinct idempotency_key per recipient on send_message (keys are global). ${input.watchPolicy === "off" ? "" : watchText}`.trim() };
       }
@@ -79,7 +84,7 @@ export const decideHook = (input: HookInput): HookDecision => {
         }
         return { kind: "block", record: { reason: "error", event_id: null }, reason: `gptqueue inbox check for ${identityText(identity)} FAILED (${probe.code}: ${probe.message}). The inbox state is unknown, not empty. Tell the user gptqueue is unreachable, or retry with get_queue_status / claim_tasks, then stop.` };
       }
-      if (identity.source !== "session_record") {
+      if (!isConfirmed(identity)) {
         // Never present a guessed name's counts as this session's own.
         return { kind: "allow", systemMessage: `gptqueue: this session's agent name is UNCONFIRMED (${identity.note}); not gating on '${identity.agent}', which may be another session's inbox. Check this session's inbox with get_queue_status or claim_tasks.` };
       }
