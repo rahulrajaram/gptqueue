@@ -46,3 +46,59 @@ describe("shell registration installer", () => {
     const d = await dirs(); const fs = await import("node:fs/promises"); await fs.mkdir(d.codex, { recursive: true }); const target = join(d.root, "target.toml"); await fs.writeFile(target, "[mcp_servers.other]\nurl=\"x\"\n"); const link = join(d.codex, "config.toml"); await fs.symlink(target, link); const base = ["--redis-url", "redis://x/15", "--node-bin", process.execPath, "--pi-extension", d.ext, "--codex-dir", d.codex, "--pi-dir", d.pi, "--state-dir", d.state]; expect(run(base).status).not.toBe(0); expect(await fs.readlink(link)).toBe(target);
   });
 });
+
+describe("Pi extension stub (WK-7 no-exit, RT-1 runtime root)", () => {
+  const shim = (args: string[]) => run(["--print-pi-shim", "--redis-url", "redis://127.0.0.1:6379/0", "--node-bin", process.execPath, ...args]);
+  const load = async (source: string) => {
+    const fs = await import("node:fs/promises");
+    const dir = await mkdtemp(join(tmpdir(), "gptq-shim-"));
+    const file = join(dir, "stub.mjs");
+    await fs.writeFile(file, source);
+    return (await import(file)).default as (pi: unknown) => Promise<void>;
+  };
+
+  it("keeps Pi running and shows a status line when the extension fails to load", async () => {
+    const r = shim(["--runtime-root", "/nonexistent/gptqueue/current"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain("process.exit");
+    const stub = await load(r.stdout);
+    const exit = process.exit;
+    let exited = false;
+    process.exit = (() => { exited = true; }) as never;
+    const handlers: Record<string, (event: unknown, ctx: unknown) => void> = {};
+    const statuses: unknown[] = [];
+    try {
+      await stub({ on: (name: string, fn: (event: unknown, ctx: unknown) => void) => { handlers[name] = fn; } });
+    } finally { process.exit = exit; }
+    expect(exited).toBe(false);
+    handlers.session_start?.({}, { ui: { setStatus: (key: string, text: string) => statuses.push([key, text]), notify: () => undefined } });
+    expect(statuses).toEqual([["gptqueue", expect.stringContaining("GPTQueue unavailable (extension_load_failed)")]]);
+  });
+
+  it("loads the extension from the configured runtime root, overridable by GPTQUEUE_RUNTIME_ROOT", async () => {
+    const fs = await import("node:fs/promises");
+    const make = async () => {
+      const root = await mkdtemp(join(tmpdir(), "gptq-root-"));
+      await fs.mkdir(join(root, "dist/registered-shell"), { recursive: true });
+      await fs.writeFile(join(root, "dist/registered-shell/pi-extension.js"),
+        "export const createRegisteredPiExtension = (o) => async (pi) => { pi.loaded = o; };\n");
+      return root;
+    };
+    const installed = await make(); const override = await make();
+    const stub = await load(shim(["--runtime-root", installed]).stdout);
+    const pi: { loaded?: { sidecarPath: string; redisUrl: string } } = {};
+    await stub(pi);
+    expect(pi.loaded).toMatchObject({ sidecarPath: `${installed}/bin/gptqueue-session`, redisUrl: "redis://127.0.0.1:6379/0" });
+    process.env.GPTQUEUE_RUNTIME_ROOT = override;
+    try { await stub(pi); } finally { delete process.env.GPTQUEUE_RUNTIME_ROOT; }
+    expect(pi.loaded?.sidecarPath).toBe(`${override}/bin/gptqueue-session`);
+  });
+
+  it("apply writes the Codex sidecar and Pi stub from --runtime-root", async () => {
+    const d = await dirs();
+    const r = run(["--apply", "--runtime-root", process.cwd(), "--redis-url", "redis://x/15", "--node-bin", process.execPath, "--codex-dir", d.codex, "--pi-dir", d.pi, "--state-dir", d.state]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(await readFile(join(d.codex, "config.toml"), "utf8")).toContain(`${process.cwd()}/bin/gptqueue-session`);
+    expect(await readFile(join(d.pi, "extensions/gptqueue-registration.ts"), "utf8")).toContain(`const DEFAULT_RUNTIME_ROOT = ${JSON.stringify(process.cwd())}`);
+  });
+});

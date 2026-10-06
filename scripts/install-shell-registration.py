@@ -19,8 +19,8 @@ from urllib.parse import urlsplit
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-SIDECAR = ROOT / "bin/gptqueue-session"
-PI_EXTENSION = ROOT / "dist/registered-shell/pi-extension.js"
+SIDECAR_REL = "bin/gptqueue-session"
+PI_EXTENSION_REL = "dist/registered-shell/pi-extension.js"
 SHIM_NAME = "gptqueue-registration.ts"
 
 
@@ -85,7 +85,7 @@ def table_path(header: str) -> tuple[str, ...]:
     return keys
 
 
-def codex_config(content: bytes, name: str, node: str, redis_url: str) -> bytes:
+def codex_config(content: bytes, name: str, node: str, redis_url: str, sidecar: Path) -> bytes:
     source = content.decode()
     before = tomllib.loads(source)
     headers = list(re.finditer(r"(?m)^\s*(\[\[?[^\n]+?\]\]?)\s*(?:#[^\n]*)?$", source))
@@ -97,7 +97,7 @@ def codex_config(content: bytes, name: str, node: str, redis_url: str) -> bytes:
         source = source[:start] + source[end:]
     block = (f"[mcp_servers.{json.dumps(name)}]\n"
              f"command = {json.dumps(node)}\n"
-             f"args = {json.dumps([str(SIDECAR), '--client', 'codex', '--redis-url', redis_url])}\n"
+             f"args = {json.dumps([str(sidecar), '--client', 'codex', '--redis-url', redis_url])}\n"
              "required = true\nstartup_timeout_sec = 15\ntool_timeout_sec = 70\n")
     result = (source.rstrip() + "\n\n" + block).encode()
     if without_server(before, name) != without_server(tomllib.loads(result.decode()), name):
@@ -114,14 +114,31 @@ def pi_config(content: bytes, names: tuple[str, ...]) -> bytes:
     return (json.dumps(result, indent=2, ensure_ascii=False) + "\n").encode()
 
 
-def pi_shim(extension: Path, node: str, redis_url: str) -> bytes:
-    options = {"redisUrl": redis_url, "nodePath": node, "sidecarPath": str(SIDECAR)}
+def pi_shim(runtime_root: Path, node: str, redis_url: str, extension: Path | None = None) -> bytes:
+    """Pi extension stub. It never exits Pi: a load failure is logged and shown
+    as a status line, and Pi keeps running without GPTQueue (WK-7).
+    GPTQUEUE_RUNTIME_ROOT overrides the runtime root at Pi start."""
+    options = {"redisUrl": redis_url, "nodePath": node}
+    extension_expr = (f"pathToFileURL(root + {json.dumps('/' + PI_EXTENSION_REL)}).href" if extension is None
+                      else json.dumps(extension.as_uri()))
     return ("// Managed by GPTQueue's reversible shell registration installer.\n"
-            "export default async function (pi) {\n  try {\n"
-            f"    const {{ createRegisteredPiExtension }} = await import({json.dumps(extension.as_uri())});\n"
-            f"    await createRegisteredPiExtension({json.dumps(options)})(pi);\n"
-            "  } catch (error) {\n    console.error('[gptqueue] Required extension failed:', error);\n"
-            "    process.exit(1);\n  }\n}\n").encode()
+            "import { pathToFileURL } from \"node:url\";\n"
+            f"const DEFAULT_RUNTIME_ROOT = {json.dumps(str(runtime_root))};\n"
+            "export default async function (pi) {\n"
+            "  const root = process.env.GPTQUEUE_RUNTIME_ROOT || DEFAULT_RUNTIME_ROOT;\n"
+            "  try {\n"
+            f"    const {{ createRegisteredPiExtension }} = await import({extension_expr});\n"
+            f"    await createRegisteredPiExtension({{ ...{json.dumps(options)}, sidecarPath: root + {json.dumps('/' + SIDECAR_REL)} }})(pi);\n"
+            "  } catch (error) {\n"
+            "    // Degrade, never exit: Pi keeps running without GPTQueue.\n"
+            "    const text = `GPTQueue unavailable (extension_load_failed): ${error?.message ?? error}`;\n"
+            "    console.error(`[gptqueue] Pi extension failed to load from ${root}; Pi continues without GPTQueue:`, error);\n"
+            "    try {\n"
+            "      pi?.on?.(\"session_start\", (_event, ctx) => {\n"
+            "        try { ctx?.ui?.setStatus?.(\"gptqueue\", text); ctx?.ui?.notify?.(text, \"error\"); } catch { /* UI is best effort */ }\n"
+            "      });\n"
+            "    } catch { /* never let reporting take Pi down */ }\n"
+            "  }\n}\n").encode()
 
 
 def save_manifest(path: Path, value: dict) -> None:
@@ -186,8 +203,19 @@ def main() -> None:
     parser.add_argument("--pi-dir", type=Path, default=Path.home() / ".pi/agent")
     parser.add_argument("--state-dir", type=Path, default=Path.home() / ".local/state/gptqueue/shell-registration")
     parser.add_argument("--node-bin", default=shutil.which("node"))
-    parser.add_argument("--pi-extension", type=Path, default=PI_EXTENSION)
+    parser.add_argument("--runtime-root", type=Path, default=ROOT,
+                        help="gptqueue runtime the shells use, e.g. ~/.local/share/gptqueue/current")
+    parser.add_argument("--pi-extension", type=Path,
+                        help="override the Pi extension module (default: <runtime-root>/" + PI_EXTENSION_REL + ")")
+    parser.add_argument("--print-pi-shim", action="store_true",
+                        help="print the Pi extension stub and exit without reading or writing anything else")
     args = parser.parse_args()
+    runtime_root = args.runtime_root.absolute()
+    if args.print_pi_shim:
+        if not args.redis_url or not args.node_bin:
+            raise ValueError("--print-pi-shim needs --redis-url and --node-bin")
+        print(pi_shim(runtime_root, args.node_bin, args.redis_url, args.pi_extension).decode(), end="")
+        return
     manifest_path = args.state_dir.absolute() / "manifest.json"
     if args.rollback:
         with (manifest_path.parent / ".lock").open("a") as lock:
@@ -207,7 +235,10 @@ def main() -> None:
         raise ValueError("Invalid Redis URL") from None
     if not args.node_bin or not Path(args.node_bin).is_absolute() or not os.access(args.node_bin, os.X_OK):
         raise ValueError("--node-bin must be an absolute executable")
-    if not SIDECAR.is_file() or not (ROOT / "dist/registered-shell/server.js").is_file() or not args.pi_extension.is_file():
+    sidecar = runtime_root / SIDECAR_REL
+    extension = args.pi_extension.resolve() if args.pi_extension else None
+    if (not sidecar.is_file() or not (runtime_root / "dist/registered-shell/server.js").is_file()
+            or not (extension or runtime_root / PI_EXTENSION_REL).is_file()):
         raise ValueError("Missing built shell integration; run npm run build")
     codex = args.codex_dir.absolute() / "config.toml"
     pi = args.pi_dir.absolute() / "mcp.json"
@@ -216,9 +247,9 @@ def main() -> None:
     if originals[shim].exists and not manifest_path.exists():
         raise ValueError(f"Unowned extension exists: {shim}")
     changes = {
-        codex: codex_config(originals[codex].content, args.server_name, args.node_bin, args.redis_url),
+        codex: codex_config(originals[codex].content, args.server_name, args.node_bin, args.redis_url, sidecar),
         pi: pi_config(originals[pi].content, (args.server_name, args.pi_server_name or args.server_name)),
-        shim: pi_shim(args.pi_extension.resolve(), args.node_bin, args.redis_url),
+        shim: pi_shim(runtime_root, args.node_bin, args.redis_url, extension),
     }
     plan = {"mode": "apply" if args.apply else "plan", "targets": [
         {"path": str(path), "before_sha256": digest(originals[path].content), "after_sha256": digest(content)}

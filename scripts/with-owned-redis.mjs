@@ -5,10 +5,7 @@
 //
 //   node scripts/with-owned-redis.mjs -- npx vitest run tests/foo.test.ts
 import { spawn } from "node:child_process";
-import { createServer } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { startOwnedRedis } from "./lib/owned-redis.mjs";
 
 const separator = process.argv.indexOf("--");
 const command = separator === -1 ? [] : process.argv.slice(separator + 1);
@@ -17,49 +14,21 @@ if (command.length === 0) {
   process.exit(2);
 }
 
-const freePort = () => new Promise((resolve, reject) => {
-  const probe = createServer();
-  probe.once("error", reject);
-  probe.listen(0, "127.0.0.1", () => {
-    const { port } = probe.address();
-    probe.close(() => resolve(port));
-  });
-});
-
-const waitForReady = (server, timeoutMs) => new Promise((resolve, reject) => {
-  const timer = setTimeout(() => reject(new Error(`redis-server not ready within ${timeoutMs} ms`)), timeoutMs);
-  let output = "";
-  server.stdout.on("data", (chunk) => {
-    output += chunk;
-    if (output.includes("Ready to accept connections")) { clearTimeout(timer); resolve(); }
-  });
-  server.once("exit", (code) => { clearTimeout(timer); reject(new Error(`redis-server exited early (${code}): ${output.slice(-500)}`)); });
-});
-
-const port = await freePort();
-const dir = mkdtempSync(join(tmpdir(), "gptqueue-owned-redis-"));
-const redis = spawn(process.env.REDIS_SERVER_BIN ?? "redis-server", [
-  "--port", String(port), "--bind", "127.0.0.1", "--save", "", "--appendonly", "no",
-  "--dir", dir, "--protected-mode", "yes",
-], { stdio: ["ignore", "pipe", "inherit"] });
-
-const stopRedis = () => { if (redis.exitCode === null) redis.kill("SIGTERM"); };
-const cleanup = () => { stopRedis(); rmSync(dir, { recursive: true, force: true }); };
-
+let redis;
 try {
-  await waitForReady(redis, 10_000);
+  redis = await startOwnedRedis();
 } catch (error) {
   console.error(String(error));
-  cleanup();
   process.exit(1);
 }
+const cleanup = () => redis.stop();
 
 // The command runs in its own process group so a signal reaches every
 // descendant (npx -> sh -> vitest -> workers), not just the direct child.
 const child = spawn(command[0], command.slice(1), {
   stdio: "inherit",
   detached: true,
-  env: { ...process.env, REDIS_URL: `redis://127.0.0.1:${port}/15` },
+  env: { ...process.env, REDIS_URL: redis.url },
 });
 const signalGroup = (signal) => { try { process.kill(-child.pid, signal); } catch { /* group already gone */ } };
 const forward = (signal) => () => {
