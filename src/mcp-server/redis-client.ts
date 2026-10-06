@@ -52,8 +52,18 @@ const forwardProvisionalLua = (src: string, dst: string, sourceArg: string, targ
         local at = string.find(raw, fromField, 1, true)
         if at then raw = string.sub(raw, 1, at - 1) .. toField .. string.sub(raw, at + #fromField) end
         redis.call('RPUSH', ${dst}, raw)
+        -- COR-F1: the sender's outstanding-reply owner follows the task, as in
+        -- the provisional sweeper, so the target's reply still wakes the sender.
+        local ok, msg = pcall(cjson.decode, raw)
+        if ok and type(msg) == 'table' and msg.type == 'task' and type(msg.from) == 'string' and type(msg.id) == 'string' then
+          local owner = '${SESSION_KEYS.outstanding("", "").slice(0, -1)}' .. msg.from .. ':' .. msg.id
+          if redis.call('GET', owner) == ${sourceArg} then redis.call('SET', owner, ${targetArg}, 'KEEPTTL') end
+        end
       end
-      redis.call('DEL', ${src})`;
+      redis.call('DEL', ${src})
+      -- COR-F2: a send that resolved the source before this step forwards to
+      -- the target instead of landing in the deleted, unclaimed queue.
+      redis.call('SET', '${SESSION_KEYS.forward("")}' .. ${sourceArg}, 'to:' .. ${targetArg}, 'EX', ${SESSION_DEFAULTS.FORWARD_TOMBSTONE_TTL_SECONDS})`;
 
 export class RedisClient {
   private redis: Redis;

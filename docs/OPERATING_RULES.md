@@ -121,8 +121,10 @@ Redis connection database. Local cleanup helpers must use the shared guard.
 ## Agent name ownership (decision D2)
 
 Agent names are exclusive by default. `register_agent` (and a rename onto
-another name) fails with error code `AGENT_NAME_HELD`, details `name` and
-`holder_session_id`, while a live session holds the name. A session is live
+another name) fails with error code `AGENT_NAME_HELD`, details `name`,
+`holder_session_tag` (a non-reversible tag: the holder's session id is a
+bearer credential and is never disclosed), `holder_liveness_verifiable` and
+`holder_lease_ttl_ms`, while a live session holds the name. A session is live
 while its lease is unexpired and, when it recorded a pid on this host, that
 pid is alive. A dead holder is taken over atomically and audited to the
 `gptq:identity-audit` stream; its mailbox, claims and history are kept.

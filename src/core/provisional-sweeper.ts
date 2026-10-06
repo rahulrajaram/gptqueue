@@ -45,12 +45,23 @@ if redis.call('ZCARD', 'gptq:claims-index:' .. name) > 0 then return {'claimed',
 local queue, dlq, reasons = 'gptq:q:' .. name, 'gptq:dlq:' .. name, 'gptq:dlq-reason:' .. name
 local pending = redis.call('LRANGE', queue, 0, -1)
 local errors = 0
+-- SEC-F4: during a rollout an older server can register the reserved system
+-- name. Then a reply "from" it is forgeable, so the sweep neither hands it
+-- outstanding-reply ownership nor speaks as it; the work still moves to the
+-- DLQ, and a typed audit event records why no error was sent.
+local reserved = redis.call('HEXISTS', registry, system) == 1 or redis.call('SCARD', 'gptq:agent-sessions:' .. system) > 0
+if reserved and #pending > 0 then
+  redis.call('XADD', audit, 'MAXLEN', '~', 1000, '*', 'event', 'reserved_sender_registered', 'name', name, 'reserved', system)
+end
 for _, raw in ipairs(pending) do
+  -- ACCEPTED (final review 2026-10-06): this DLQ is deliberately not trimmed
+  -- to the DLQ size bound. Accepted work is never dropped, and the dropped
+  -- counter stays truthful because nothing is dropped here.
   redis.call('LPUSH', dlq, raw)
   local ok, msg = pcall(cjson.decode, raw)
   if ok and type(msg) == 'table' and type(msg.id) == 'string' then
     redis.call('HSET', reasons, msg.id, 'recipient_retired')
-    if msg.type == 'task' and type(msg.from) == 'string' and #msg.from > 0 and msg.from ~= system then
+    if not reserved and msg.type == 'task' and type(msg.from) == 'string' and #msg.from > 0 and msg.from ~= system then
       local owner = 'gptq:outstanding:' .. msg.from .. ':' .. msg.id
       if redis.call('GET', owner) == name then redis.call('SET', owner, system, 'KEEPTTL') end
       local envelope = cjson.encode({
@@ -71,6 +82,8 @@ end
 redis.call('DEL', queue)
 redis.call('HDEL', registry, name)
 redis.call('SREM', provisional, name)
+-- COR-F2: a send that resolved this name before now is refused, not stranded.
+redis.call('SET', 'gptq:forward:' .. name, 'retired', 'EX', 86400)
 redis.call('XADD', audit, 'MAXLEN', '~', 1000, '*', 'event', 'recipient_retired', 'name', name,
   'moved', tostring(#pending), 'errors_sent', tostring(errors))
 return {'retired', #pending, errors}
@@ -85,6 +98,19 @@ export const retireProvisional = async (redis: Redis, name: string, now = new Da
     name, now.toISOString(), SYSTEM_SENDER, RECIPIENT_RETIRED_TEXT, RECIPIENT_RETIRED,
   )) as [SweepOutcome, number, number];
   return Object.freeze({ name, outcome, moved: Number(moved), errors_sent: Number(errors) });
+};
+
+/**
+ * SEC-F4 doctor check: names of every registry entry or session set that
+ * claims the reserved SYSTEM_SENDER. Current code refuses that name, so any
+ * hit was written by an older server and should be removed by an operator.
+ */
+export const reservedSenderRegistrations = async (redis: Redis): Promise<Readonly<{ registry: boolean; sessions: number }>> => {
+  const [registry, sessions] = await Promise.all([
+    redis.hexists(SESSION_KEYS.registry, SYSTEM_SENDER),
+    redis.scard(SESSION_KEYS.agentSessions(SYSTEM_SENDER)),
+  ]);
+  return Object.freeze({ registry: registry === 1, sessions });
 };
 
 /** Sweep up to `limit` provisional names (a cheap, bounded, opportunistic pass). */

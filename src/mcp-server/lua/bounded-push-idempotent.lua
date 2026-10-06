@@ -1,6 +1,9 @@
 -- Atomic bounded push, retry deduplication, and eligible inbox event.
 local existing = redis.call('GET', KEYS[3])
 if existing then return {2, existing} end
+-- KEYS[6] (COR-F2): the recipient's forwarding tombstone; see bounded-push.lua.
+local forwarded = redis.call('GET', KEYS[6])
+if forwarded then return {-1, forwarded} end
 local current = redis.call('LLEN', KEYS[1])
 if current >= tonumber(ARGV[2]) then return {0, ARGV[3]} end
 if redis.call('TYPE', KEYS[2]).ok ~= 'none' and redis.call('TYPE', KEYS[2]).ok ~= 'hash' then return redis.error_reply('mailbox metadata key has wrong type') end

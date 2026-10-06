@@ -9,7 +9,7 @@ import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { sendMessage, sendMessageSchema } from "../src/mcp-server/tools/send-message.js";
 import { CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS, SYSTEM_SENDER } from "../src/core/keys.js";
 import { InboxEvents } from "../src/core/inbox-events.js";
-import { RECIPIENT_RETIRED, retireProvisional, sweepProvisional } from "../src/core/provisional-sweeper.js";
+import { RECIPIENT_RETIRED, reservedSenderRegistrations, retireProvisional, sweepProvisional } from "../src/core/provisional-sweeper.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
 const URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
@@ -70,6 +70,39 @@ describe("provisional identity sweeper (DL-2 / AC-1)", () => {
     expect(late.isError).toBe(true);
     expect(late.structuredContent).toMatchObject({ error: { code: "unknown_recipient" } });
     expect(await redis.exists(SESSION_KEYS.queue(name))).toBe(0);
+  });
+
+  it("COR-F2: a send that resolved the name before retirement is refused, not stranded", async () => {
+    const sender = client(); await sender.register("both", `sender-${randomUUID()}`);
+    const { name, expire } = await crashed({ provisional: true });
+    expect(await sender.sessions.resolveRegistered(name)).toBe(true); // resolve ...
+    await expire();
+    expect((await retireProvisional(redis, name)).outcome).toBe("retired"); // ... then retire ...
+    const late = { id: `late-${randomUUID()}`, from: sender.agentName!, to: name, timestamp: new Date().toISOString(), type: "task" as const, payload: { content: "late" } };
+    await expect(sender.sendMessage(late)).rejects.toMatchObject({ code: "RECIPIENT_RETIRED" }); // ... then push
+    await expect(sender.sendMessageIdempotent({ ...late, id: `late2-${randomUUID()}` }, "k1")).rejects.toMatchObject({ code: "RECIPIENT_RETIRED" });
+    expect(await redis.exists(SESSION_KEYS.queue(name))).toBe(0);
+    // A later registration of the name supersedes the tombstone.
+    const reborn = client(); await reborn.register("both", name);
+    expect(await sender.sendMessage({ ...late, id: `again-${randomUUID()}` })).toBe(true);
+  });
+
+  it("SEC-F4: with the reserved sender registered by an old server, the sweep neither re-points owners nor speaks as it", async () => {
+    const sender = client(); await sender.register("both", `sender-${randomUUID()}`);
+    const { name, expire } = await crashed({ provisional: true });
+    const taskId = sentId(await send(sender, name, "task"));
+    await expire();
+    // What a pre-change server writes when it registers the reserved name.
+    await redis.hset(SESSION_KEYS.registry, SYSTEM_SENDER, JSON.stringify({ name: SYSTEM_SENDER }));
+    expect(await reservedSenderRegistrations(redis)).toEqual({ registry: true, sessions: 0 });
+    expect(await retireProvisional(redis, name)).toMatchObject({ outcome: "retired", moved: 1, errors_sent: 0 });
+    expect(await redis.get(SESSION_KEYS.outstanding(sender.agentName!, taskId))).toBe(name);
+    expect(await redis.llen(SESSION_KEYS.queue(sender.agentName!))).toBe(0);
+    expect(await redis.llen(DLQ_KEYS.list(name))).toBe(1);
+    const audit = (await redis.xrange(SESSION_KEYS.identityAudit, "-", "+")).map(([, f]) => f.join(" "));
+    expect(audit.some((f) => f.includes("reserved_sender_registered") && f.includes(name))).toBe(true);
+    await redis.hdel(SESSION_KEYS.registry, SYSTEM_SENDER);
+    expect(await reservedSenderRegistrations(redis)).toEqual({ registry: false, sessions: 0 });
   });
 
   it("dead-letters results and pings to the dead name without replying", async () => {

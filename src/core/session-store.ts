@@ -12,6 +12,7 @@ import { v4 as uuidv4 } from "uuid";
 import { SESSION_KEYS, SESSION_DEFAULTS, SYSTEM_SENDER } from "./keys.js";
 import type { SessionRecord, LeaseState, AgentPresence } from "./types.js";
 import { GptQueueError } from "../mcp-server/errors.js";
+import { sessionTag } from "./session-tag.js";
 
 /** KEYS order shared by the registry rollback scripts below. */
 const REGISTRY_ROLLBACK_KEYS = [
@@ -300,9 +301,9 @@ export class SessionStore {
       ]).catch(() => [[null, null], -2] as [[null, null], number]);
       throw new GptQueueError(
         "AGENT_NAME_HELD",
-        `Agent name '${agentName}' is held by a live session (${holder}). ` +
+        `Agent name '${agentName}' is held by a live session (${sessionTag(holder)}). ` +
           "Choose another name, or have both registrants opt into sharing (shared: true / GPTQ_AGENT_SHARED=1).",
-        { name: agentName, holder_session_id: holder, holder_liveness_verifiable: !!pid && !!holderHost, holder_lease_ttl_ms: ttlMs }
+        { name: agentName, holder_session_tag: sessionTag(holder), holder_liveness_verifiable: !!pid && !!holderHost, holder_lease_ttl_ms: ttlMs }
       );
     }
 
@@ -317,6 +318,9 @@ export class SessionStore {
       registered_at: now,
     });
     try {
+      // COR-F2: a fresh registration of a name supersedes any forwarding
+      // tombstone a retired holder of that name left behind.
+      await this.redis.del(SESSION_KEYS.forward(agentName));
       await this.redis.eval(
         WRITE_PROVISIONAL_REGISTRY_SCRIPT,
         3,

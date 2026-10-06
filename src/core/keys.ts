@@ -99,10 +99,19 @@ export const SESSION_KEYS = {
    * whose sessions all expired (core/provisional-sweeper.ts).
    */
   provisional: "gptq:provisional-identities",
+  /**
+   * COR-F2: forwarding tombstone a retired or adopted provisional name leaves
+   * behind (value "to:<bound mailbox>" or "retired"). The push
+   * scripts honour it, so a send that resolved the name just before its
+   * retirement is forwarded or refused instead of stranded.
+   */
+  forward: (name: string) => `gptq:forward:${name}`,
 } as const;
 
 /** Default constants. */
 export const SESSION_DEFAULTS = {
+  /** Lifetime of a COR-F2 forwarding tombstone; covers the send path's retry window many times over. */
+  FORWARD_TOMBSTONE_TTL_SECONDS: 86400,
   LEASE_TTL_SECONDS: 30,
   LEASE_REFRESH_INTERVAL_SECONDS: 10,
   DEFAULT_QUEUE_BOUND: 10,

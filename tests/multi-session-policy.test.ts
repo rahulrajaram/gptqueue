@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { SessionStore, pidNamespaceId } from "../src/core/session-store.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { GptQueueError } from "../src/mcp-server/errors.js";
+import { sessionTag } from "../src/core/session-tag.js";
 
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
@@ -134,7 +135,7 @@ describe("Exclusive agent names (D2, ID-1, ID-5)", () => {
     await redis.quit();
   });
 
-  it("refuses a second live claimant with AGENT_NAME_HELD and the holder's session", async () => {
+  it("refuses a second live claimant with AGENT_NAME_HELD and the holder's session tag", async () => {
     const holder = await client().register("both", "excl-agent", "first");
     const error = await heldError(client().register("both", "excl-agent", "second"));
     expect(error.code).toBe("AGENT_NAME_HELD");
@@ -142,7 +143,7 @@ describe("Exclusive agent names (D2, ID-1, ID-5)", () => {
     // verifiable, and its lease has most of the 30 s TTL left.
     expect(error.details).toEqual({
       name: "excl-agent",
-      holder_session_id: holder.session_id,
+      holder_session_tag: sessionTag(holder.session_id),
       holder_liveness_verifiable: true,
       holder_lease_ttl_ms: expect.any(Number),
     });
@@ -150,6 +151,22 @@ describe("Exclusive agent names (D2, ID-1, ID-5)", () => {
     expect(ttl).toBeGreaterThan(0);
     expect(ttl).toBeLessThanOrEqual(30_000);
     expect(await redis.smembers(SESSION_KEYS.agentSessions("excl-agent"))).toEqual([holder.session_id]);
+  });
+
+  it("never discloses a credential usable by reconnectSession in a refused register (SEC-F1)", async () => {
+    const holder = await client().register("both", "excl-secret", "first");
+    const error = await heldError(client().register("both", "excl-secret", "second"));
+    const surface = JSON.stringify({ message: error.message, details: error.details });
+    expect(surface).not.toContain(holder.session_id);
+    // Every string the refusal carries, and every token in the message, must fail as a session id.
+    const strings = new Set<string>([
+      ...Object.values(error.details ?? {}).filter((v): v is string => typeof v === "string"),
+      ...error.message.split(/[\s()'.,]+/).filter(Boolean),
+    ]);
+    const probe = client();
+    for (const s of strings) {
+      await expect(probe.reconnectSession(s)).rejects.toThrow();
+    }
   });
 
   it("records pid and hostname on the session", async () => {

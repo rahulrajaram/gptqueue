@@ -58,7 +58,7 @@ export const RECEIVE_MESSAGE_DESCRIPTION =
   "[safety: writable] DEPRECATED: at-most-once. Receives and consumes (destructively pops) the next message from this agent's GPTQueue inbox; a message is lost if this session fails after the pop. Use claim_tasks and acknowledge_tasks for at-least-once delivery. Returns the message or timeout.";
 
 export const REGISTER_AGENT_DESCRIPTION =
-  "[safety: writable] Register this agent and create a new durable session. Names are exclusive by default: a name held by a live session is refused with AGENT_NAME_HELD (details: name, holder_session_id); a dead holder is taken over with an audit event. Pass shared: true (on every registrant) to share a name. Re-registration is not idempotent: it creates a new session; renaming also migrates pending messages.";
+  "[safety: writable] Register this agent and create a new durable session. Names are exclusive by default: a name held by a live session is refused with AGENT_NAME_HELD (details: name, holder_session_tag, holder_liveness_verifiable, holder_lease_ttl_ms; the holder's session id is never disclosed); a dead holder is taken over with an audit event. Pass shared: true (on every registrant) to share a name. Re-registration is not idempotent: it creates a new session; renaming also migrates pending messages.";
 
 async function safeToolCall<T>(call: () => Promise<T>) {
   try {

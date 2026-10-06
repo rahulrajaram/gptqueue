@@ -11,9 +11,28 @@ import { join } from "path";
 import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL } from "./keys.js";
 import type { QueueMessage } from "./types.js";
 import { LUA_DIR } from "./stored-read.js";
+import { GptQueueError } from "../mcp-server/errors.js";
 
 const eventKey = SESSION_KEYS.inboxEvents;
 const outstandingKey = SESSION_KEYS.outstanding;
+const outstandingKeyFor = (message: QueueMessage): string =>
+  outstandingKey(message.type === "task" ? message.from : message.to, message.type === "task" ? message.id : message.payload.in_reply_to || message.id);
+
+/**
+ * COR-F2: follow a recipient's forwarding tombstone. A name adopted into its
+ * bound mailbox forwards there (one hop: a bound mailbox is never itself
+ * tombstoned; value "to:<target>"); a retired name ("retired") refuses with RECIPIENT_RETIRED, never "sent".
+ */
+const forwardedMessage = (message: QueueMessage, tombstone: string): QueueMessage => {
+  const target = tombstone.startsWith("to:") ? tombstone.slice(3) : "";
+  if (target === "" || target === message.to) {
+    throw new GptQueueError("RECIPIENT_RETIRED",
+      `Recipient '${message.to}' was a temporary startup identity that has been retired; resend to the agent's bound mailbox.`,
+      { recipient: message.to });
+  }
+  return { ...message, to: target };
+};
+
 const eligible = (message: QueueMessage): boolean =>
   message.type === "task" || (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 
@@ -56,32 +75,34 @@ export class MailboxStore {
 
   /** Push a message to a target agent's mailbox with bounded retry. */
   async send(message: QueueMessage): Promise<boolean> {
-    const queueKey = SESSION_KEYS.queue(message.to);
-    const metaKey = SESSION_KEYS.mailboxMeta(message.to);
-    const serialized = JSON.stringify(message);
-
+    let current = message;
     let delay = 100;
     const maxDelay = 5000;
     const maxAttempts = 10;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const result = await this.redis.eval(
+      const raw = await this.redis.eval(
         this.boundedPushScript,
-        4,
-        queueKey,
-        metaKey,
-        eventKey(message.to),
-        outstandingKey(message.type === "task" ? message.from : message.to, message.type === "task" ? message.id : message.payload.in_reply_to || message.id),
-        serialized,
+        5,
+        SESSION_KEYS.queue(current.to),
+        SESSION_KEYS.mailboxMeta(current.to),
+        eventKey(current.to),
+        outstandingKeyFor(current),
+        SESSION_KEYS.forward(current.to),
+        JSON.stringify(current),
         this.queueBound,
-        message.id,
-        message.type,
-        eligible(message) ? 1 : 0,
-        message.type === "task" ? 1 : 0,
-        message.to,
-        message.from
-      );
-      if (result === 1) return true;
+        current.id,
+        current.type,
+        eligible(current) ? 1 : 0,
+        current.type === "task" ? 1 : 0,
+        current.to,
+        current.from
+      ) as [number, string];
+      if (raw[0] === 1) return true;
+      if (raw[0] === -1) {
+        current = forwardedMessage(current, raw[1]);
+        continue;
+      }
 
       await new Promise((r) => setTimeout(r, delay));
       delay = Math.min(delay * 2, maxDelay);
@@ -101,32 +122,34 @@ export class MailboxStore {
     sender: string,
     idempotencyKey: string
   ): Promise<{ status: "sent" | "duplicate" | "full"; messageId: string }> {
-    const dedupeKey = SESSION_KEYS.idempotencyFor(sender, message.to, idempotencyKey);
-    const queueKey = SESSION_KEYS.queue(message.to);
-    const metaKey = SESSION_KEYS.mailboxMeta(message.to);
-    const serialized = JSON.stringify(message);
+    let current = message;
     let delay = 100;
     for (let attempt = 0; attempt < 10; attempt++) {
       const raw = await this.redis.eval(
         this.boundedPushIdempotentScript,
-        5,
-        queueKey,
-        metaKey,
-        dedupeKey,
-        eventKey(message.to),
-        outstandingKey(message.type === "task" ? message.from : message.to, message.type === "task" ? message.id : message.payload.in_reply_to || message.id),
-        serialized,
+        6,
+        SESSION_KEYS.queue(current.to),
+        SESSION_KEYS.mailboxMeta(current.to),
+        SESSION_KEYS.idempotencyFor(sender, current.to, idempotencyKey),
+        eventKey(current.to),
+        outstandingKeyFor(current),
+        SESSION_KEYS.forward(current.to),
+        JSON.stringify(current),
         this.queueBound,
-        message.id,
+        current.id,
         86400,
-        eligible(message) ? 1 : 0,
-        message.type,
-        message.type === "task" ? 1 : 0,
-        message.to,
-        message.from
+        eligible(current) ? 1 : 0,
+        current.type,
+        current.type === "task" ? 1 : 0,
+        current.to,
+        current.from
       ) as [number, string];
       if (raw[0] === 1) return { status: "sent", messageId: raw[1] };
       if (raw[0] === 2) return { status: "duplicate", messageId: raw[1] };
+      if (raw[0] === -1) {
+        current = forwardedMessage(current, raw[1]);
+        continue;
+      }
       await new Promise((resolve) => setTimeout(resolve, delay));
       delay = Math.min(delay * 2, 5000);
     }

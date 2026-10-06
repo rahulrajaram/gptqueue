@@ -21,6 +21,7 @@ import { publishSessionRecord, readProcess } from "../src/claude/session-record.
 import { waitForIdentity } from "../src/claude/inbox-probe.js";
 import { outagePolicy, parsePeekArgs, watchInbox, WATCH_RECORD_WAIT_MS } from "../src/claude/peek.js";
 import { GptQueueError } from "../src/mcp-server/errors.js";
+import { sessionTag } from "../src/core/session-tag.js";
 import { fallbackCandidates, holdToolCallsUntil, NameExhaustedError, registerClaudeAware, type RegisterDeps } from "../src/claude/mcp-record.js";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
@@ -261,7 +262,7 @@ describe("AGENT_NAME_HELD: bounded fallback chain and old-format lease wait", ()
     const client = new RedisClient(null, REDIS_URL);
     clients.push(client);
     const plain = await client.register("both", name).catch((e: unknown) => e);
-    expect((plain as { details?: Record<string, unknown> }).details).toMatchObject({ holder_session_id: oldSid, holder_liveness_verifiable: false });
+    expect((plain as { details?: Record<string, unknown> }).details).toMatchObject({ holder_session_tag: sessionTag(oldSid), holder_liveness_verifiable: false });
     expect(Number((plain as { details: Record<string, unknown> }).details.holder_lease_ttl_ms)).toBeGreaterThan(0);
     const started = Date.now();
     const result = await registerClaudeAware(client, name, claudeEnv, { sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: Date.now, maxLeaseWaitMs: 5000 });
@@ -313,7 +314,7 @@ describe("AGENT_NAME_HELD: bounded fallback chain and old-format lease wait", ()
     let fail!: (e: unknown) => void;
     holdToolCallsUntil(t.transport, new Promise<void>((_, reject) => { fail = reject; }));
     for (const id of [7, 8]) t.transport.onmessage!({ method: "tools/call", id });
-    fail(new GptQueueError("AGENT_NAME_HELD", "held", { name: "x", holder_session_id: "s" }));
+    fail(new GptQueueError("AGENT_NAME_HELD", "held", { name: "x", holder_session_tag: "sid-sha256:000000000000" }));
     await new Promise((r) => setTimeout(r, 0));
     expect(t.sent.map((s) => [s.id, code(s)])).toEqual([[7, "AGENT_NAME_HELD"], [8, "AGENT_NAME_HELD"]]);
     expect(t.delivered).toEqual([]);
@@ -336,7 +337,7 @@ describe("AGENT_NAME_HELD: bounded fallback chain and old-format lease wait", ()
     const failed = heldTransport();
     let fail!: (e: unknown) => void;
     holdToolCallsUntil(failed.transport, new Promise<void>((_, reject) => { fail = reject; }));
-    fail(new GptQueueError("AGENT_NAME_HELD", "held", { name: "x", holder_session_id: "s" }));
+    fail(new GptQueueError("AGENT_NAME_HELD", "held", { name: "x", holder_session_tag: "sid-sha256:000000000000" }));
     await new Promise((r) => setTimeout(r, 0));
     failed.transport.onmessage!({ method: "tools/call", id: 21 });
     failed.transport.onmessage!({ method: "tools/list", id: 22 });

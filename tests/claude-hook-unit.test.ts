@@ -127,7 +127,7 @@ describe("hook decisions", () => {
 });
 
 describe("AGENT_NAME_HELD fallback (D2 contract, faked at the boundary)", () => {
-  const held = Object.assign(new Error("held"), { code: "AGENT_NAME_HELD", details: { name: "claude-p", holder_session_id: "s-old" } });
+  const held = Object.assign(new Error("held"), { code: "AGENT_NAME_HELD", details: { name: "claude-p", holder_session_tag: "sid-sha256:000000000000" } });
   const registrar = (failFor: readonly string[]) => {
     const calls: string[] = [];
     return { calls, register: async (_role: string, name: string) => { calls.push(name); if (failFor.includes(name)) throw held; return { name, session_id: `sid-${name}` }; } };
