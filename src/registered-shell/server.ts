@@ -218,7 +218,9 @@ export const startRegisteredShell = async (
           : state.readiness === "stopped" ? "native_binding_stopped" : "native_binding_retrying",
         phase: "binding", session_id: sessionId, code: state.last_binding_outcome ?? undefined });
       };
-      void bootstrapCodexBinding(runtime, redis.requireRegistered(), identity.working_directory, shutdown.signal,
+      const provisional = redis.requireRegistered();
+      // The current name: a bind may adopt a different mailbox (COR-F4).
+      void bootstrapCodexBinding(runtime, () => redis.agentName ?? provisional, identity.working_directory, shutdown.signal,
         undefined, { onState })
         .catch(() => lifecycle.emit({ event: "native_binding_unavailable", phase: "binding",
           session_id: sessionId, code: "native_transport_error" }));

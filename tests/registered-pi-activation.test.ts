@@ -83,7 +83,8 @@ describe("registered Pi activation lifecycle", () => {
   it("surfaces a refused duplicate-resume bind, keeps Pi running, and binds once the owner is gone", async () => {
     const refused = makeClient(); const accepted = makeClient(); const fake = fakePi();
     (refused.callTool as any).mockImplementation(async ({ name }: { name: string }) => name === "bind_runtime"
-      ? { isError: true, content: [{ type: "text", text: "occupied_target: runtime mailbox is owned by a live session" }] }
+      ? { isError: true, content: [{ type: "text", text: "occupied_target: runtime mailbox is owned by a live session" }],
+        structuredContent: { status: "error", error: { code: "RUNTIME_BINDING_HELD", message: "held", retryable: false } } }
       : { content: [{ type: "text", text: "ok" }] });
     const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -102,6 +103,60 @@ describe("registered Pi activation lifecycle", () => {
       expect(ui.setStatus).toHaveBeenLastCalledWith("gptqueue", undefined);
       expect((await fake.handlers.get("before_agent_start")({ systemPrompt: "p" })).systemPrompt).toBe("p\n\ninstructions");
     } finally { exit.mockRestore(); errors.mockRestore(); }
+  });
+
+  it("aborts and closes a superseded in-flight sidecar so exactly one client stays live", async () => {
+    const first = makeClient(); const second = makeClient(); const fake = fakePi();
+    const pending: Array<{ signal: AbortSignal; resolve: (client: SessionClient) => void }> = [];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await createPiExtension((signal) => new Promise<SessionClient>((resolve) => { pending.push({ signal, resolve }); }), 1_000, { runtimeEnabled: true })(fake.pi);
+      const stale = fake.handlers.get("session_start")({}, fake.context());
+      await vi.waitFor(() => expect(pending).toHaveLength(1));
+      await fake.handlers.get("session_before_switch")({}, fake.context());
+      fake.switchSession("session-2");
+      const current = fake.handlers.get("session_start")({}, fake.context());
+      await vi.waitFor(() => expect(pending).toHaveLength(2));
+      expect(pending[0]!.signal.aborted).toBe(true);
+      expect(pending[1]!.signal.aborted).toBe(false);
+      pending[0]!.resolve(first); pending[1]!.resolve(second);
+      await Promise.all([stale, current]);
+      expect(first.close).toHaveBeenCalledTimes(1);
+      expect(second.close).not.toHaveBeenCalled();
+      expect((first.callTool as any).mock.calls.some((call: any[]) => call[0]?.name === "bind_runtime")).toBe(false);
+      const bind = (second.callTool as any).mock.calls.find((call: any[]) => call[0]?.name === "bind_runtime");
+      expect(bind?.[0].arguments).toMatchObject({ runtime_id: "session-2" });
+    } finally { errors.mockRestore(); }
+  });
+
+  it("shares one in-flight sidecar between concurrent starts of the same session", async () => {
+    const only = makeClient(); const fake = fakePi();
+    const factory = vi.fn(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); return only; });
+    await createPiExtension(factory, 1_000, { runtimeEnabled: true })(fake.pi);
+    await Promise.all([fake.handlers.get("session_start")({}, fake.context()),
+      fake.handlers.get("before_agent_start")({ systemPrompt: "p" })]);
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(only.close).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["RUNTIME_BINDING_HELD", "runtime_binding_refused", /refused this Pi session's mailbox binding/, "warning"],
+    ["REDIS_UNAVAILABLE", "gptqueue_unavailable", /GPTQueue unavailable \(gptqueue_unavailable\)/, "error"],
+    ["GPTQUEUE_ERROR", "runtime_binding_failed", /GPTQueue unavailable \(runtime_binding_failed\).*\(GPTQUEUE_ERROR\)/, "error"],
+  ] as const)("reports a bind_runtime failure with code %s as %s", async (code, state, text, level) => {
+    const failing = makeClient(); const fake = fakePi();
+    (failing.callTool as any).mockImplementation(async ({ name }: { name: string }) => name === "bind_runtime"
+      ? { isError: true, content: [{ type: "text", text: "bind failed" }],
+        structuredContent: { status: "error", error: { code, message: "bind failed", retryable: false } } }
+      : { content: [{ type: "text", text: "ok" }] });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ui = { notify: vi.fn(), setStatus: vi.fn() };
+    try {
+      await createPiExtension(async () => failing, 100, { runtimeEnabled: true, retry: { baseMs: 60_000, maxMs: 60_000 } })(fake.pi);
+      await fake.handlers.get("session_start")({}, { ...fake.context(), ui });
+      expect(ui.notify).toHaveBeenCalledWith(expect.stringMatching(text), level);
+      expect((await fake.handlers.get("before_agent_start")({ systemPrompt: "p" })).systemPrompt).toContain(`(${state})`);
+    } finally { errors.mockRestore(); await fake.handlers.get("session_shutdown")({}, fake.context()); }
   });
 
   it("binds the exact session identity and submits native follow-ups", async () => {

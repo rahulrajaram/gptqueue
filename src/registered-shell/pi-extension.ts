@@ -83,7 +83,8 @@ export const validateCatalog = (catalog: { tools?: CatalogTool[] }, runtimeEnabl
 };
 
 /** Typed tool error while the extension is degraded; Pi keeps running. */
-export type PiGptqueueUnavailableCode = "gptqueue_unavailable" | "runtime_binding_refused" | "runtime_unsupported";
+export type PiGptqueueUnavailableCode =
+  "gptqueue_unavailable" | "runtime_binding_refused" | "runtime_binding_failed" | "runtime_unsupported";
 export class PiGptqueueUnavailableError extends Error {
   constructor(readonly code: PiGptqueueUnavailableCode, readonly reason: string) {
     super(JSON.stringify({ status: "error", code, message: `GPTQueue is unavailable in this Pi session: ${reason}` }));
@@ -92,6 +93,8 @@ export class PiGptqueueUnavailableError extends Error {
 }
 /** Pi's bind_runtime refusal: another live process owns this session's mailbox. Not transient by itself, but retried. */
 class BindingRefusedError extends Error {}
+/** Any other typed bind_runtime failure; the GPTQueue code is kept in the reason. */
+class BindingFailedError extends Error {}
 /** Missing host identity or API: retrying cannot help. */
 class UnsupportedHostError extends Error {}
 
@@ -100,10 +103,26 @@ const STATUS_KEY = "gptqueue";
 const describe = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const classify = (error: unknown): PiGptqueueUnavailableCode =>
   error instanceof UnsupportedHostError ? "runtime_unsupported"
-    : error instanceof BindingRefusedError ? "runtime_binding_refused" : "gptqueue_unavailable";
+    : error instanceof BindingRefusedError ? "runtime_binding_refused"
+      : error instanceof BindingFailedError ? "runtime_binding_failed" : "gptqueue_unavailable";
 /** Exponential backoff, capped: the delay is bounded, the retry is not abandoned. */
 export const retryDelay = (attempt: number, options: PiRetryOptions = {}): number =>
   Math.min((options.baseMs ?? 1_000) * 2 ** Math.min(attempt, 20), options.maxMs ?? 30_000);
+
+/** The typed GPTQueue code of a failed bind_runtime (stableToolError's structuredContent.error.code). */
+const bindErrorCode = (structured: unknown): string | undefined => {
+  const error = structured && typeof structured === "object" ? (structured as Record<string, unknown>).error : undefined;
+  const code = error && typeof error === "object" ? (error as Record<string, unknown>).code : undefined;
+  return typeof code === "string" ? code : undefined;
+};
+const bindError = (code: string | undefined, text: string): Error => {
+  const detail = text ? `: ${text}` : "";
+  switch (code) {
+    case "RUNTIME_BINDING_HELD": return new BindingRefusedError(`Pi inbox activation binding refused${detail}`);
+    case "REDIS_UNAVAILABLE": return new Error(`GPTQueue Redis unavailable during Pi inbox activation binding${detail}`);
+    default: return new BindingFailedError(`Pi inbox activation binding failed (${code ?? "UNKNOWN"})${detail}`);
+  }
+};
 
 export const createPiExtension = (
   makeClient: (signal: AbortSignal, context?: PiContext) => Promise<SessionClient>, timeout = STARTUP_TIMEOUT_MS,
@@ -119,6 +138,12 @@ export const createPiExtension = (
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let retryAttempt = 0;
   let generation = 0;
+  // Aborted on every generation bump: cancels in-flight attempts of the old generation.
+  let lifecycle = new AbortController();
+  let connecting: { readonly life: AbortSignal; readonly promise: Promise<SessionClient> } | undefined;
+  let starting: { readonly life: AbortSignal; readonly promise: Promise<void> } | undefined;
+  const supersede = () => { generation += 1; lifecycle.abort(); lifecycle = new AbortController(); };
+  const superseded = () => new Error("GPTQueue connection attempt superseded");
   const registered = new Set<string>();
   const expected: readonly string[] = options.runtimeEnabled ? [...GPTQUEUE_TOOLS, ...REQUIRED_RUNTIME_TOOLS] : GPTQUEUE_TOOLS;
   const cancelRetry = () => { if (retryTimer) clearTimeout(retryTimer); retryTimer = undefined; };
@@ -174,12 +199,30 @@ export const createPiExtension = (
     timer.unref?.();
     retryTimer = timer;
   };
-  const connect = async () => {
-    if (!client) client = await withTimeout(async (signal) => {
+  /** One sidecar creation per generation; a stale one closes what it created. */
+  const createClient = (life: AbortSignal): Promise<SessionClient> => {
+    if (connecting?.life === life) return connecting.promise;
+    const promise = withTimeout(async (timeoutSignal) => {
+      const signal = AbortSignal.any([timeoutSignal, life]);
       const connected = await makeClient(signal, context);
-      if (signal.aborted) { await connected.close(); throw new Error("GPTQueue startup aborted"); }
+      if (signal.aborted) {
+        await withTimeout(() => connected.close(), 2_500).catch(() => connected.destroy?.());
+        throw life.aborted ? superseded() : new Error("GPTQueue startup aborted");
+      }
       return connected;
-    }, timeout);
+    }, timeout).finally(() => { if (connecting?.promise === promise) connecting = undefined; });
+    connecting = { life, promise };
+    return promise;
+  };
+  const connect = async (life: AbortSignal = lifecycle.signal) => {
+    if (!client) {
+      const created = await createClient(life);
+      if (life.aborted) {
+        await withTimeout(() => created.close(), 2_500).catch(() => created.destroy?.());
+        throw superseded();
+      }
+      client ??= created;
+    }
     const catalog = validateCatalog(await withTimeout((signal) => client!.listTools(undefined, { signal }), timeout), options.runtimeEnabled);
     instructions = client.getInstructions?.() ?? "";
     if (!instructions.trim()) throw new Error("GPTQueue server instructions are missing or empty");
@@ -203,13 +246,23 @@ export const createPiExtension = (
       });
     }
   };
-  const startRuntime = async (current: PiContext) => {
+  /** Serialised per generation: concurrent starts share one in-flight attempt. */
+  const startRuntime = (current: PiContext): Promise<void> => {
+    const life = lifecycle.signal;
+    if (starting?.life === life) return starting.promise;
+    const promise = startRuntimeOnce(current, life)
+      .finally(() => { if (starting?.promise === promise) starting = undefined; });
+    starting = { life, promise };
+    return promise;
+  };
+  const startRuntimeOnce = async (current: PiContext, life: AbortSignal) => {
     context = current;
     if (!options.runtimeEnabled) return;
     if (!current.cwd || !isAbsolute(current.cwd) || !current.sessionManager.getSessionId() || !pi.sendMessage) throw new UnsupportedHostError("Pi session identity or native message API unavailable");
     if (binding?.runtime_id === current.sessionManager.getSessionId() && runtime && client) return;
     if (binding) await close();
-    const catalog = await connect();
+    const catalog = await connect(life);
+    if (life.aborted) throw superseded();
     registerCatalog(catalog);
     const session = client!;
     if (!session.setActivationHandler) throw new UnsupportedHostError("Pi activation request transport unavailable");
@@ -228,9 +281,10 @@ export const createPiExtension = (
       return adapter.activate(request, signal);
     });
     const result = await withTimeout((signal) => session.callTool({ name: "bind_runtime", arguments: { ...binding } }, undefined, { signal }), timeout);
+    if (life.aborted) throw superseded();
     if (result.isError) {
       const text = result.content.filter((item) => item.type === "text").map((item) => (item as { text: string }).text).join("\n");
-      throw new BindingRefusedError(`Pi inbox activation binding refused${text ? `: ${text}` : ""}`);
+      throw bindError(bindErrorCode(result.structuredContent), text);
     }
     if (result.structuredContent?.activation_ready !== true) throw new Error("Pi inbox activation binding failed");
   };
@@ -269,11 +323,14 @@ export const createPiExtension = (
   });
   if (options.runtimeEnabled) {
     pi.on("session_start", async (_event, current) => {
-      generation += 1; cancelRetry(); retryAttempt = 0; degraded = undefined;
+      supersede(); cancelRetry(); retryAttempt = 0; degraded = undefined;
       context = current;
-      try { await startRuntime(current); recovered(); } catch (error) { await degrade(error); }
+      const mine = generation;
+      // A superseded start must not degrade (and close) the newer session's client.
+      try { await startRuntime(current); if (mine === generation) recovered(); }
+      catch (error) { if (mine === generation) await degrade(error); }
     });
-    pi.on("session_before_switch", async () => { generation += 1; cancelRetry(); await close(); });
+    pi.on("session_before_switch", async () => { supersede(); cancelRetry(); await close(); });
     pi.on("agent_end", (event) => {
       for (const item of event.messages ?? []) {
         if (!item || typeof item !== "object") continue;
@@ -289,7 +346,7 @@ export const createPiExtension = (
       }
     });
   }
-  pi.on("session_shutdown", async () => { generation += 1; cancelRetry(); await close(); });
+  pi.on("session_shutdown", async () => { supersede(); cancelRetry(); await close(); });
   if (!options.runtimeEnabled) {
     try { registerCatalog(await connect()); } catch (error) { await degrade(error); }
   }

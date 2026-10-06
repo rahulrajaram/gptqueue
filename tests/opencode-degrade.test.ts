@@ -90,6 +90,34 @@ describe("OpenCode second process on one session", () => {
   });
 });
 
+describe("OpenCode activation after lease loss", () => {
+  it("restarts the dispatcher on an open runtime that activates pending work", async () => {
+    const identity = { sessionID: unique("oc-lease"), directory: "/tmp/gptqueue-oc-degrade" };
+    const sender = { sessionID: unique("oc-lease-sender"), directory: "/tmp/gptqueue-oc-degrade" };
+    const name = opencodeAgentName(identity.sessionID);
+    const native = portFor(identity);
+    try {
+      const backend = await createOpenCodeBackend(identity, {
+        redisUrl: REDIS_URL, runtimePort: native.port, dispatcherOptions: { intervalMs: 20 }, activationRetryMs: 50,
+      });
+      const peer = await createOpenCodeBackend(sender, { redisUrl: REDIS_URL, runtimePort: portFor(sender).port, dispatcherOptions: { intervalMs: 20 } });
+      live.push(backend, peer);
+      expect(payload(await backend.callTool("get_runtime_status", {}))).toMatchObject({ activation_ready: true });
+      // A foreign owner takes the lease briefly: the dispatcher is fenced and stops.
+      await redis.set(SESSION_KEYS.runtimeBinding(name), JSON.stringify({ token: "foreign" }), "PX", 400);
+      await vi.waitFor(async () => expect(payload(await backend.callTool("get_runtime_status", {})))
+        .toMatchObject({ activation_ready: false, activation_error_code: "RUNTIME_BINDING_LOST" }), { timeout: 5_000 });
+      await vi.waitFor(async () => expect(payload(await backend.callTool("get_runtime_status", {})))
+        .toMatchObject({ activation_ready: true }), { timeout: 5_000 });
+      expect(native.port.close).not.toHaveBeenCalled();
+      expect(payload(await peer.callTool("send_message", { to: name, content: "after lease loss", type: "task" })).status).toBe("sent");
+      await vi.waitFor(() => expect(native.prompts).toHaveLength(1), { timeout: 5_000 });
+    } finally {
+      await cleanupAgent(name); await cleanupAgent(opencodeAgentName(sender.sessionID));
+    }
+  });
+});
+
 describe("OpenCode plugin session discovery", () => {
   const nativeClient = (sessions: ReadonlyArray<Record<string, unknown>>): OpenCodeNativeClient => ({
     session: {

@@ -58,12 +58,15 @@ export type CodexBootstrapOptions = Readonly<{
  * the controller reports a runtime (bound here or by the hook's
  * bind_runtime; whichever is first wins) or on shutdown. Never guesses: it
  * binds only a uniquely owned thread (findOwnCodexThread).
+ * `agent` may be a getter: a bind can adopt a different mailbox name, and
+ * later attempts must match threads by the name the sidecar now reports.
  * Resolves true when bound, false when stopped by shutdown.
  */
 export const bootstrapCodexBinding = async (
-  runtime: RuntimeTools, agent: string, cwd: string, signal: AbortSignal,
+  runtime: RuntimeTools, agent: string | (() => string), cwd: string, signal: AbortSignal,
   rpc: CodexRpcClient = new CodexSocketClient(), options: CodexBootstrapOptions = {},
 ): Promise<boolean> => {
+  const currentAgent = typeof agent === "function" ? agent : () => agent;
   const fastAttempts = options.fastAttempts ?? 30;
   const fastDelay = options.fastDelayMs ?? 1_000;
   const maxBackoff = options.maxBackoffMs ?? 30_000;
@@ -86,7 +89,7 @@ export const bootstrapCodexBinding = async (
       if (alreadyBound()) { publish(Object.freeze({ ...state, readiness: "bound", next_attempt_at: null, last_binding_outcome: "bound" })); return true; }
       let outcome: NonNullable<CodexBindingState["last_binding_outcome"]>;
       try {
-        const id = await findOwnCodexThread(rpc, agent, cwd, signal);
+        const id = await findOwnCodexThread(rpc, currentAgent(), cwd, signal);
         if (signal.aborted) break;
         if (!id) outcome = "no_unique_owned_thread";
         else {

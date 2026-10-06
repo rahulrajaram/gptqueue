@@ -201,6 +201,31 @@ describe("an incomplete hook bind does not stop binding supervision (review roun
     expect(states.at(-1)).toMatchObject({ readiness: "bound" });
   });
 
+  it("matches threads by the adopted name after a bind that adopted another mailbox", async () => {
+    const adopted = `${agent}-adopted`;
+    let name = agent;
+    let status: Record<string, unknown> = { status: "ok", agent: name, activation_ready: false, runtime: null };
+    const client = {
+      close: vi.fn(async () => undefined),
+      request: vi.fn(async (method: string, params: Record<string, unknown>) => {
+        if (method === "thread/loaded/list") return { data: [own] };
+        if (method === "thread/read") return { thread: { id: params.threadId, cwd } };
+        if (method === "mcpServer/tool/call") return { structuredContent: { status: "ok", agent: name, runtime: status.runtime } };
+        throw Error("unexpected method");
+      }),
+    };
+    // First bind adopts another mailbox name, then the dispatcher fails to start.
+    const bind = vi.fn(async (value: { runtime_id: string }) => {
+      if (bind.mock.calls.length === 1) { name = adopted; status = { status: "ok", agent: name, activation_ready: false, runtime: value }; return status; }
+      status = { status: "ok", agent: name, activation_ready: true, runtime: value };
+      return status;
+    });
+    const bound = await bootstrapCodexBinding({ bind, status: () => status }, () => name, cwd, AbortSignal.timeout(2_000), client,
+      { fastAttempts: 3, fastDelayMs: 2, maxBackoffMs: 10, random: () => 1 });
+    expect(bound).toBe(true);
+    expect(bind).toHaveBeenCalledTimes(2);
+  });
+
   it("get_runtime_status reports binding_incomplete for a runtime without a live dispatcher", () => {
     const state: CodexBindingState = { readiness: "unbound_retrying", binding_attempts: 2,
       next_attempt_at: "2026-10-06T06:00:00.000Z", last_binding_outcome: "bind_failed" };

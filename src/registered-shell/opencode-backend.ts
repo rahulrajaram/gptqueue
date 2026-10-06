@@ -129,6 +129,10 @@ export const createOpenCodeBackend = async (
     const createdRuntime = await createOpenCodeRuntime(binding, options.runtimePort,
       options.runtimeOptions);
     runtime = createdRuntime;
+    // The backend owns the adapter for its whole life: a dispatcher that stops
+    // (e.g. lease lost) must not close it, or every restarted dispatcher would
+    // activate through a closed adapter while status reports ready.
+    const dispatcherRuntime: RuntimeAdapter = Object.freeze({ ...createdRuntime, close: async () => undefined });
     let runtimeTools: RuntimeTools;
     runtimeTools = {
       bind: async () => ({ status: "error", code: "runtime_binding_host_owned" }),
@@ -158,7 +162,7 @@ export const createOpenCodeBackend = async (
       if (stopping.signal.aborted) return;
       try {
         const started = await startInboxDispatcher(
-          redis.adapterConnection, agentName, createdRuntime, options.dispatcherOptions,
+          redis.adapterConnection, agentName, dispatcherRuntime, options.dispatcherOptions,
         );
         if (stopping.signal.aborted) { await started.close().catch(() => undefined); return; }
         dispatcher = started; dispatcherClosed = false; activationError = undefined; activationErrorCode = undefined;
@@ -191,10 +195,9 @@ export const createOpenCodeBackend = async (
         dispatcherClosed = true;
         stopping.abort();
         if (retryTimer) clearTimeout(retryTimer);
-        // A standby backend never handed its runtime to a dispatcher; close it here.
-        const standby = dispatcher === undefined;
+        // Dispatchers never close the shared adapter; the backend always does.
         closeResult ??= cleanup(redis, dispatcher, server, boundClient, sessionRegistered)
-          .finally(async () => { if (standby) await createdRuntime.close(); })
+          .finally(async () => { await createdRuntime.close(); })
           .finally(() => shutdown.abort());
         return closeResult;
       },
@@ -205,7 +208,7 @@ export const createOpenCodeBackend = async (
     if (retryTimer) clearTimeout(retryTimer);
     dispatcherClosed = true;
     const startupFailures: unknown[] = [];
-    if (!dispatcher && runtime) {
+    if (runtime) {
       try { await runtime.close(); } catch (runtimeError) { startupFailures.push(runtimeError); }
     }
     try { await cleanup(redis, dispatcher, server, client, sessionRegistered); }

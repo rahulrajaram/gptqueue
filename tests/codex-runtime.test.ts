@@ -141,6 +141,26 @@ describe("Codex runtime, bounded v2 history", () => {
     client.emit({ method: "thread/status/changed", params: { threadId: "thread-1", status: { type: "idle" } } });
     expect(idle).toBe(2);
   });
+  it("re-sends thread/resume after the app-server connection is replaced, and its idle notification wakes", async () => {
+    const base = v2([{ id: "t", status: "inProgress", items: [user("someone")] }]);
+    let generation = 1;
+    const client: CodexRpcClient & { calls: typeof base.calls; emit: typeof base.emit } = {
+      calls: base.calls, emit: base.emit, onNotification: base.onNotification!, close: base.close,
+      request: base.request,
+      get connectionGeneration() { return generation; },
+    };
+    const runtime = await createCodexRuntime(binding, { client });
+    let idle = 0; runtime.onIdle!(() => { idle++; });
+    const resumes = () => client.calls.filter((c) => c.method === "thread/resume").length;
+    expect(await runtime.activate({ operation_id: "op", prompt: "p" }, sig())).toEqual({ status: "busy" });
+    expect(await runtime.activate({ operation_id: "op", prompt: "p" }, sig())).toEqual({ status: "busy" });
+    expect(resumes()).toBe(1);
+    generation = 2; // the socket dropped after the first resume and reconnected
+    expect(await runtime.activate({ operation_id: "op", prompt: "p" }, sig())).toEqual({ status: "busy" });
+    expect(resumes()).toBe(2);
+    client.emit({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "t", status: "completed", items: [] } } });
+    expect(idle).toBe(1);
+  });
   it("marks itself stale on thread/closed and stops activating", async () => {
     const client = v2([]);
     const runtime = await createCodexRuntime(binding, { client });

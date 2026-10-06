@@ -41,6 +41,9 @@ export class CodexSocketClient {
   private next = 1;
   private readonly pending = new Map<number, Pending>();
   private closed = false;
+  private generation = 0;
+  /** Bumped per established connection; server-side thread attachments do not survive a reconnect. */
+  get connectionGeneration(): number { return this.generation; }
   private readonly listeners = new Set<(notification: Readonly<{ method: string; params: Record<string, unknown> }>) => void>();
 
   /** Server notifications (no `id`). Listener faults are isolated from the socket. */
@@ -111,6 +114,7 @@ export class CodexSocketClient {
     });
     await this.sendRequest("initialize", { clientInfo: { name: "gptqueue", version: VERSION }, capabilities: { experimentalApi: true } }, new AbortController().signal);
     this.write({ method: "initialized", params: {} });
+    this.generation += 1;
   }
 
   private async ready(): Promise<void> {

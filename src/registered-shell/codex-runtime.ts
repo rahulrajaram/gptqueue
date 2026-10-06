@@ -10,6 +10,11 @@ export interface CodexRpcClient {
   close(): Promise<void>;
   /** Server notifications (JSON-RPC messages without an id). Optional for older fakes and clients. */
   onNotification?(listener: (notification: CodexNotification) => void): () => void;
+  /**
+   * Bumped each time the client opens a new app-server connection. Server-side
+   * thread attachments (thread/resume) do not survive a reconnect.
+   */
+  readonly connectionGeneration?: number;
 }
 
 export interface CodexRuntimeOptions {
@@ -174,7 +179,8 @@ export const createCodexRuntime = async (
   const idleListeners = new Set<() => void>();
   const staleListeners = new Set<() => void>();
   let stale = false;
-  let subscribed = false;
+  // Connection generation the thread/resume attachment was made on, if any.
+  let subscribedOn: number | undefined;
   let hostState: string = threadStatusType(raw) ?? "unknown";
   let systemErrors: { count: number; since: number } | undefined;
   const now = options.now ?? Date.now;
@@ -202,10 +208,15 @@ export const createCodexRuntime = async (
 
   /** Attach this connection to an already loaded thread so turn notifications reach it. */
   const subscribe = async (abortSignal: AbortSignal): Promise<void> => {
-    if (subscribed || !idleListeners.size || !client.onNotification) return;
-    subscribed = true;
-    await client.request("thread/resume", { threadId: binding.runtime_id, excludeTurns: true }, abortSignal)
-      .catch(() => { subscribed = false; });
+    if (!idleListeners.size || !client.onNotification) return;
+    const generation = client.connectionGeneration ?? 0;
+    if (subscribedOn === generation) return;
+    subscribedOn = generation;
+    try {
+      await client.request("thread/resume", { threadId: binding.runtime_id, excludeTurns: true }, abortSignal);
+      // The request itself may have reconnected: record the connection it attached to.
+      subscribedOn = client.connectionGeneration ?? 0;
+    } catch { subscribedOn = undefined; }
   };
 
   const seen = new Map<string, string>();

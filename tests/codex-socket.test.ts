@@ -125,8 +125,10 @@ describe("Codex socket",()=>{
   const x = await makeBoundaryServer("close-on-request"); const c = new CodexSocketClient(x.path, 500);
   try {
    await expect(c.request("thread/read", {}, boundedSignal())).rejects.toThrow(/closed|disconnected/i);
+   expect(c.connectionGeneration).toBe(1);
    await expect(c.request("thread/read", {}, boundedSignal())).resolves.toEqual({ ok: true });
    expect(x.connectionCount).toBe(2);
+   expect(c.connectionGeneration).toBe(2);
   } finally { await c.close(); await closeServer(x.srv); await rm(x.root, { recursive: true, force: true }); }
  });
 });
