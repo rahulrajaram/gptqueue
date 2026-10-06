@@ -17,6 +17,7 @@ import { sendMessage, sendMessageSchema } from "../mcp-server/tools/send-message
 import { stableToolError } from "../mcp-server/tool-result.js";
 import { registerRuntimeTools, type RuntimeTools } from "../registered-shell/runtime-tools.js";
 import { InboxEvents } from "../core/inbox-events.js";
+import { traceReplySent } from "../mcp-server/tool-trace.js";
 import { VERSION } from "../version.js";
 import { SESSION_KEYS } from "../core/keys.js";
 
@@ -121,12 +122,7 @@ const registerBoundTools = (
         await redisClient.adapterConnection.set(SESSION_KEYS.outboundActivity(redisClient.requireRegistered()), "1", "EX", 86_400);
         const result = await sendMessage(redisClient, boundSendMessageSchema.parse(params));
         const payload = result.structuredContent as Record<string, unknown> | undefined;
-        if (payload?.status === "sent" && (params.type === "result" || params.type === "error")) {
-          await new InboxEvents(redisClient.adapterConnection).trace(redisClient.requireRegistered(), {
-            stage: "reply_sent", timestamp: new Date().toISOString(),
-            message_id: String(payload.message_id), in_reply_to: params.in_reply_to,
-          });
-        }
+        await traceReplySent(new InboxEvents(redisClient.adapterConnection), redisClient.requireRegistered(), payload, params);
         return result;
       })
   );

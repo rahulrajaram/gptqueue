@@ -37,6 +37,8 @@ import { renewClaimSchema, renewClaim } from "../mcp-server/tools/renew-claim.js
 import { dlqStatusSchema, dlqStatus } from "../mcp-server/tools/dlq-status.js";
 import { dlqRequeueSchema, dlqRequeue } from "../mcp-server/tools/dlq-requeue.js";
 import { stableToolError } from "../mcp-server/tool-result.js";
+import { InboxEvents } from "../core/inbox-events.js";
+import { traceAcknowledged, traceClaimed, traceReplySent } from "../mcp-server/tool-trace.js";
 
 /**
  * Machine-readable MCP annotations mirroring the prose [safety: ...] prefixes.
@@ -67,6 +69,8 @@ async function safeToolCall<T>(call: () => Promise<T>) {
 }
 
 export function registerTools(server: McpServer, redisClient: RedisClient): void {
+  // Same trace stages as the registered-shell runtime tools (AC-3/LT-0 parity).
+  const events = new InboxEvents(redisClient.adapterConnection);
   server.tool(
     "register_agent",
     REGISTER_AGENT_DESCRIPTION,
@@ -80,7 +84,13 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
     "[safety: writable] Send a message to another GPTQueue inbox. Supply idempotency_key for safely retryable delivery.",
     sendMessageSchema.shape,
     WRITABLE,
-    async (params) => safeToolCall(() => sendMessage(redisClient, sendMessageSchema.parse(params)))
+    async (params) => safeToolCall(async () => {
+      const parsed = sendMessageSchema.parse(params);
+      const result = await sendMessage(redisClient, parsed);
+      const sender = redisClient.agentName;
+      if (sender) await traceReplySent(events, sender, result.structuredContent as Record<string, unknown> | undefined, parsed);
+      return result;
+    })
   );
 
   server.tool(
@@ -172,7 +182,12 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
     "[safety: writable] Atomically claim up to max_batch messages from your own durable inbox as an at-least-once delivery batch for the calling session. Returns the claim (claim_id, tasks, expires_at) or an explicit empty-batch result when nothing is pending.",
     claimTasksSchema.shape,
     WRITABLE,
-    async (params) => safeToolCall(() => claimTasks(redisClient, claimTasksSchema.parse(params)))
+    async (params) => safeToolCall(async () => {
+      const result = await claimTasks(redisClient, claimTasksSchema.parse(params));
+      const claim = (result.structuredContent as Record<string, unknown> | undefined)?.claim as Record<string, unknown> | null | undefined;
+      if (claim && typeof claim.actor_id === "string") await traceClaimed(events, claim.actor_id, claim);
+      return result;
+    })
   );
 
   server.tool(
@@ -180,7 +195,13 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
     "[safety: writable] Acknowledge a claim_id returned by claim_tasks, confirming delivery of that batch. Only the claiming session may acknowledge its own claim; acknowledged tasks are not re-delivered.",
     acknowledgeTasksSchema.shape,
     WRITABLE,
-    async (params) => safeToolCall(() => acknowledgeTasks(redisClient, acknowledgeTasksSchema.parse(params)))
+    async (params) => safeToolCall(async () => {
+      const parsed = acknowledgeTasksSchema.parse(params);
+      const result = await acknowledgeTasks(redisClient, parsed);
+      const agent = redisClient.agentName;
+      if (!result.isError && agent) await traceAcknowledged(events, agent, parsed.claim_id);
+      return result;
+    })
   );
 
   server.tool(

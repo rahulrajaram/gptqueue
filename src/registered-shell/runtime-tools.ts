@@ -6,6 +6,7 @@ import { acknowledgeTasks, acknowledgeTasksSchema } from "../mcp-server/tools/ac
 import { renewClaim, renewClaimSchema } from "../mcp-server/tools/renew-claim.js";
 import { stableToolError, toolResult } from "../mcp-server/tool-result.js";
 import { InboxEvents } from "../core/inbox-events.js";
+import { traceAcknowledged, traceClaimed } from "../mcp-server/tool-trace.js";
 import { runtimeBindingSchema, type RuntimeBinding } from "./runtime.js";
 import { registerDiagnosticTools } from "./diagnostic-tools.js";
 
@@ -35,25 +36,14 @@ export const registerRuntimeTools = (server: McpServer, client: RedisClient, run
       const claim = payload.claim as Record<string, unknown> | null | undefined;
       if (!claim) return result;
       const { session_id: _privateSession, ...publicClaim } = claim;
-      const tasks = Array.isArray(claim.tasks) ? claim.tasks : [];
-      for (const raw of tasks) {
-        // The shared claim protocol preserves each queued envelope as serialized JSON.
-        let task: unknown;
-        try { task = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { continue; }
-        if (task && typeof task === "object" && "id" in task && typeof task.id === "string") {
-          await events.trace(client.requireRegistered(), {
-            stage: "task_claimed", timestamp: new Date().toISOString(),
-            claim_id: String(claim.claim_id), message_id: task.id,
-          });
-        }
-      }
+      await traceClaimed(events, client.requireRegistered(), claim);
       return toolResult({ ...payload, claim: publicClaim });
     }));
   const ackSchema = acknowledgeTasksSchema.omit({ session_id: true }).strict();
   server.tool("acknowledge_tasks", "Acknowledge your completed claim after sending any required correlated reply.",
     ackSchema.shape, WRITABLE, async (params) => safe(async () => {
       const result = await acknowledgeTasks(client, ackSchema.parse(params));
-      if (!result.isError) await events.trace(client.requireRegistered(), { stage: "task_acknowledged", timestamp: new Date().toISOString(), claim_id: params.claim_id });
+      if (!result.isError) await traceAcknowledged(events, client.requireRegistered(), params.claim_id);
       return result;
     }));
   const renewSchema = renewClaimSchema.omit({ session_id: true }).strict();
