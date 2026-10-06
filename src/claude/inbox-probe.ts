@@ -104,3 +104,23 @@ export const resolveIdentity = (dir: string | undefined, env: NodeJS.ProcessEnv 
     note,
   });
 };
+
+/**
+ * Wait up to `waitMs` (polling) for this Claude session's MCP server to
+ * publish its record: Claude runs SessionStart before the server finishes
+ * registering, so an immediate lookup would fall back to a guessed name that
+ * may be another session's. Returns the fallback identity on timeout.
+ */
+export const waitForIdentity = async (dir: string | undefined, waitMs: number, env: NodeJS.ProcessEnv = process.env, pollMs = 50): Promise<Identity> => {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const identity = resolveIdentity(dir, env);
+    if (identity.source === "session_record" || Date.now() >= deadline) return identity;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+};
+
+export const recordWaitMs = (env: NodeJS.ProcessEnv, fallback: number): number => {
+  const parsed = Number(env.GPTQ_CLAUDE_RECORD_WAIT_MS);
+  return env.GPTQ_CLAUDE_RECORD_WAIT_MS !== undefined && Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};

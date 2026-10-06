@@ -121,7 +121,8 @@ describe("hook decisions", () => {
 
   it("states when the name is unconfirmed (no session record)", () => {
     const d = decideHook(base({ event: "session-start", identity: { agent: "claude-x", gptqueue_session_id: null, source: "derived", note: "no session record" } }));
-    expect(d.kind === "context" && d.text).toMatch(/UNCONFIRMED: no session record/);
+    expect(d.kind === "context" && d.text).toMatch(/UNCONFIRMED \(no session record\)/);
+    expect(d.kind === "context" && d.text).not.toMatch(/unclaimed/);
   });
 });
 
@@ -135,7 +136,7 @@ describe("AGENT_NAME_HELD fallback (D2 contract, faked at the boundary)", () => 
 
   it("registers <name>-<session id prefix> when the name is held", async () => {
     const r = registrar(["claude-p"]);
-    await expect(registerClaudeAware(r, "claude-p", claudeEnv)).resolves.toEqual({ name: "claude-p-abcdef12", session_id: "sid-claude-p-abcdef12" });
+    await expect(registerClaudeAware(r, "claude-p", claudeEnv)).resolves.toEqual({ name: "claude-p-abcdef12", session_id: "sid-claude-p-abcdef12", origin: "session_id" });
     expect(r.calls).toEqual(["claude-p", "claude-p-abcdef12"]);
     expect(fallbackName("n", { GPTQ_CLAUDE_SESSION_RECORD: "1" }, 4242)).toBe("n-4242");
   });

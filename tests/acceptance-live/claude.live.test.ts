@@ -214,12 +214,11 @@ describe.skipIf(!LIVE)(`live Claude Code (${LIVE ? "enabled" : SKIP_REASON})`, (
     expect(ac4).toBe(true);
   }, 20 * 60_000);
 
-  // PRODUCT DEFECT (ID-2 at the real SessionStart): Claude Code runs the SessionStart hook before
-  // the MCP server (bin/gptqueue-claude-mcp) has written its session record, so the context the
-  // model receives says "UNCONFIRMED ... name re-derived" and, for a second session in the same
-  // directory, names the first session's agent (and its watcher command) instead of the
-  // AGENT_NAME_HELD fallback. Evidence: receipt criteria["ID-2"].real_session_start, hooks-*.log.
-  it.fails("ID-2 (defect): the real SessionStart hook output is confirmed for every session", () => {
+  // ID-2 at the real SessionStart: Claude Code runs the SessionStart hook before the MCP server
+  // (bin/gptqueue-claude-mcp) has written its session record. The hook now waits (bounded) for
+  // the record, and the watcher command it gives is name-free (the watcher resolves the
+  // registered name itself), so every session's context must be confirmed.
+  it("ID-2: the real SessionStart hook output is confirmed for every session", () => {
     expect(sessionStartOutputs.length).toBeGreaterThan(0);
     for (const output of sessionStartOutputs) expect(output).not.toContain("UNCONFIRMED");
   });

@@ -62,7 +62,9 @@ describe("Claude hook against Redis", { timeout: 300_000 }, () => {
     await send(held.client, held.name);
     const before = await hook("stop", { session_id: randomUUID() });
     // No record: today's resolution (claude-<basename of cwd>) is used, and said to be unconfirmed.
-    expect(before.stdout).toMatch(/UNCONFIRMED: no session record/);
+    // No record: the guessed name's counts are not presented as this session's own.
+    expect(JSON.parse(before.stdout).systemMessage).toMatch(/UNCONFIRMED \(no session record/);
+    expect(before.stdout).not.toContain("unclaimed");
     expect(before.stdout).not.toContain(held.name);
     record(held.name, held.session_id);
     const after = await hook("stop", { session_id: randomUUID() });
@@ -86,6 +88,7 @@ describe("Claude hook against Redis", { timeout: 300_000 }, () => {
 
   it("AC-4: fails closed but visible when Redis is unreachable", async () => {
     const down = { REDIS_URL: "redis://127.0.0.1:1/0" };
+    record("claude-x", "s-down");
     const sid = randomUUID();
     const stop = await hook("stop", { session_id: sid }, { ...down, GPTQ_AGENT_NAME: "claude-x" });
     expect(JSON.parse(stop.stdout)).toMatchObject({ decision: "block" });
@@ -122,7 +125,7 @@ describe("Claude hook against Redis", { timeout: 300_000 }, () => {
     const pidfile = watcherPidPath(runtime, sid);
 
     const noWatcher = await hook("stop", { session_id: sid });
-    expect(JSON.parse(noWatcher.stdout).reason).toMatch(/no background inbox watcher[\s\S]*gptqueue-inbox-peek' --watch --name '[^']+' --session/);
+    expect(JSON.parse(noWatcher.stdout).reason).toMatch(/no background inbox watcher[\s\S]*gptqueue-inbox-peek' --watch --session '[^']+' Then stop\.$/);
 
     const child = spawn(join(BIN, "gptqueue-inbox-peek"), ["--watch", "--name", me.name, "--session", sid], { env, stdio: ["ignore", "pipe", "pipe"] });
     children.push(child);

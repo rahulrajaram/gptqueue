@@ -86,6 +86,8 @@ export type ClaudeSessionRecord = Readonly<{
   /** /proc start time of server_pid, so a recycled pid never validates a stale record. */
   server_start: string;
   written_at: string;
+  /** Which candidate the name is: the requested one, or an AGENT_NAME_HELD fallback. */
+  name_origin?: "requested" | "session_id" | "pid" | "random";
 }>;
 
 const recordPath = (dir: string, key: string) => join(dir, `session-${key}.json`);
@@ -105,6 +107,7 @@ export const publishSessionRecord = (
   name: string | null,
   sessionId: string | null,
   env: NodeJS.ProcessEnv = process.env,
+  nameOrigin: NonNullable<ClaudeSessionRecord["name_origin"]> = "requested",
 ): string => {
   const path = recordPath(ensureRuntimeDir(env), processKey(claude));
   if (name === null || sessionId === null) {
@@ -120,6 +123,7 @@ export const publishSessionRecord = (
     server_pid: process.pid,
     server_start: readProcess(process.pid)?.start ?? "",
     written_at: new Date().toISOString(),
+    name_origin: nameOrigin,
   };
   writeAtomic(path, JSON.stringify(record));
   return path;

@@ -290,11 +290,19 @@ export class SessionStore {
       "shared", options.shared ? "1" : "0"
     )) as string[];
     if (claim[0] === "held") {
+      const holder = claim[1]!;
+      // Sessions registered by older code carry no pid/hostname, so their
+      // liveness can only be judged by lease expiry; tell the caller so it
+      // can wait for the lease instead of treating the holder as live (ID-3).
+      const [[pid, holderHost], ttlMs] = await Promise.all([
+        this.redis.hmget(SESSION_KEYS.session(holder), "pid", "hostname"),
+        this.redis.pttl(SESSION_KEYS.lease(holder)),
+      ]).catch(() => [[null, null], -2] as [[null, null], number]);
       throw new GptQueueError(
         "AGENT_NAME_HELD",
-        `Agent name '${agentName}' is held by a live session (${claim[1]}). ` +
+        `Agent name '${agentName}' is held by a live session (${holder}). ` +
           "Choose another name, or have both registrants opt into sharing (shared: true / GPTQ_AGENT_SHARED=1).",
-        { name: agentName, holder_session_id: claim[1]! }
+        { name: agentName, holder_session_id: holder, holder_liveness_verifiable: !!pid && !!holderHost, holder_lease_ttl_ms: ttlMs }
       );
     }
 

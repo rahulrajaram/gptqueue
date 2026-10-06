@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { RedisClient } from "./redis-client.js";
 import { GPTQUEUE_INSTRUCTIONS, registerTools } from "../transports/setup-tools.js";
 import { VERSION } from "../version.js";
-import { registerClaudeAware, startClaudeSessionRecord } from "../claude/mcp-record.js";
+import { holdToolCallsUntil, registerClaudeAware, startClaudeSessionRecord } from "../claude/mcp-record.js";
 
 // Name comes from CLI arg or env var. If neither, starts unregistered.
 const initialName = process.argv[2] || process.env.GPTQ_AGENT_NAME || null;
@@ -21,12 +21,21 @@ registerTools(server, redisClient);
 
 // Under Claude Code, publish the identity this server holds so the session's
 // hooks and inbox watcher use it instead of re-deriving a name (ID-2).
-const removeClaudeRecord = startClaudeSessionRecord(redisClient);
+const claudeRecord = startClaudeSessionRecord(redisClient);
 
-// Auto-register if name provided via CLI arg or env var (backward compat)
-if (initialName) {
-  await registerClaudeAware(redisClient, initialName);
-}
+// Auto-register if name provided via CLI arg or env var (backward compat).
+// Under Claude, registration may wait up to a lease TTL for an old-format
+// holder (ID-3), longer than Claude should wait for MCP startup, so it runs in
+// the background: initialize is answered at once and tool calls wait for it.
+const registration: Promise<unknown> = !initialName
+  ? Promise.resolve()
+  : claudeRecord
+    ? registerClaudeAware(redisClient, initialName, process.env, undefined, (origin) => claudeRecord.setOrigin(origin))
+    : registerClaudeAware(redisClient, initialName);
+if (!claudeRecord) await registration;
+registration.catch((error: unknown) => {
+  process.stderr.write(`${JSON.stringify({ event: "startup_registration_failed", code: (error as { code?: unknown }).code ?? null, message: (error as Error).message })}\n`);
+});
 
 // Graceful shutdown. Besides signals, exit when the client goes away (stdin
 // ends or the MCP connection closes): an orphaned server would otherwise keep
@@ -35,7 +44,7 @@ let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
-  removeClaudeRecord?.();
+  claudeRecord?.remove();
   // Close (not delete) the session so a restarted or resumed client can take
   // the name back at once instead of waiting for the lease TTL. Bounded: a
   // Redis outage must not block exit.
@@ -56,4 +65,5 @@ process.stdin.on("close", shutdown);
 // Start
 const transport = new StdioServerTransport();
 await server.connect(transport);
+if (claudeRecord) holdToolCallsUntil(transport, registration);
 server.server.onclose = () => void shutdown();

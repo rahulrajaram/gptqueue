@@ -4,7 +4,11 @@
  *       print the unclaimed count (or, with --json, every count and the identity)
  *   gptqueue-inbox-peek --watch [--name N] [--session ID] [--timeout S] [--block-ms MS]
  *       wait until the inbox is non-empty, print one JSON line, exit 0.
- *       Exit 3 on timeout (0 = none), 4 when Redis stays unreachable.
+ *       Without --name it resolves this session's registered name from the
+ *       session record, waiting up to GPTQ_CLAUDE_RECORD_WAIT_MS (default 40000).
+ *       Exit 3 on timeout (0 = none), 4 when Redis stays unreachable (session mode only;
+ *       with --name it retries at --interval forever, like the old script),
+ *       5 when no session record appears.
  *
  * The watcher waits on the recipient's inbox-events stream (XREAD BLOCK, the
  * stream every send appends to in the same Lua call as the RPUSH) and
@@ -15,13 +19,20 @@
 import { Redis } from "ioredis";
 import { rmSync } from "node:fs";
 import { SESSION_KEYS } from "../core/keys.js";
-import { probeClient, probeInbox, resolveIdentity } from "./inbox-probe.js";
+import { probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity } from "./inbox-probe.js";
 import { ensureRuntimeDir, readProcess, readWatcherPid, watcherPidPath, writeWatcherPid } from "./session-record.js";
 
-type PeekArgs = Readonly<{ name: string | null; dir: string | null; watch: boolean; json: boolean; session: string | null; timeoutSec: number; blockMs: number }>;
+const USAGE = `Non-consuming gptqueue inbox check; never pops a message.
+  gptqueue-inbox-peek [--name N] [--dir D] [--json]          print the pending count
+  gptqueue-inbox-peek --watch [--name N] [--session ID] [--interval S] [--timeout S]
+      wait until the inbox is non-empty, print one JSON line, exit 0.
+      Exit 3 on timeout (0 = no timeout), 2 on bad arguments.
+`;
+
+type PeekArgs = Readonly<{ intervalSec: number; name: string | null; dir: string | null; watch: boolean; json: boolean; session: string | null; timeoutSec: number; blockMs: number }>;
 
 export const parsePeekArgs = (argv: readonly string[]): PeekArgs | string => {
-  const out = { name: null as string | null, dir: null as string | null, watch: false, json: false, session: null as string | null, timeoutSec: 0, blockMs: 5000 };
+  const out = { intervalSec: 30, name: null as string | null, dir: null as string | null, watch: false, json: false, session: null as string | null, timeoutSec: 0, blockMs: 5000 };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => { const v = argv[++i]; if (v === undefined) throw new Error(`${arg} needs a value`); return v; };
@@ -34,17 +45,34 @@ export const parsePeekArgs = (argv: readonly string[]): PeekArgs | string => {
         case "--session": out.session = value(); break;
         case "--timeout": out.timeoutSec = Number(value()); break;
         case "--block-ms": out.blockMs = Number(value()); break;
-        case "--interval": value(); break; // accepted for compatibility; the watch is event-driven now
+        case "--interval": out.intervalSec = Number(value()); break; // legacy outage retry cadence; the watch itself is event-driven
+        case "-h": case "--help": return "help";
         default: return `unknown argument: ${String(arg)}`;
       }
     } catch (error) { return (error as Error).message; }
   }
-  if (!Number.isFinite(out.timeoutSec) || out.timeoutSec < 0 || !Number.isFinite(out.blockMs) || out.blockMs < 10) return "invalid --timeout or --block-ms";
+  if (!Number.isFinite(out.intervalSec) || out.intervalSec <= 0 || !Number.isFinite(out.timeoutSec) || out.timeoutSec < 0 || !Number.isFinite(out.blockMs) || out.blockMs < 10) return "invalid --timeout or --block-ms";
   return Object.freeze(out);
 };
 
 const latestId = async (redis: Redis, agent: string): Promise<string> =>
   (await redis.xrevrange(SESSION_KEYS.inboxEvents(agent), "+", "-", "COUNT", 1))[0]?.[0] ?? "0-0";
+
+/**
+ * The name-free watcher waits this long for the session record: longer than
+ * the MCP server's worst-case startup registration (lease TTL + 2 s = 32 s
+ * for an old-format holder of the name), since the watcher runs in the background.
+ */
+export const WATCH_RECORD_WAIT_MS = 40_000;
+
+/**
+ * Redis-outage policy. Legacy invocations (explicit --name) keep the old
+ * script's behaviour: retry at --interval and never exit on Redis errors.
+ * The name-free session mode gives up after 30 s (exit 4) so the woken model
+ * sees the outage.
+ */
+export const outagePolicy = (args: Pick<PeekArgs, "name" | "intervalSec">): Readonly<{ giveUpAfterMs: number | null; retryMs: number }> =>
+  args.name !== null ? { giveUpAfterMs: null, retryMs: args.intervalSec * 1000 } : { giveUpAfterMs: 30_000, retryMs: 1000 };
 
 export type WatchOutcome =
   | Readonly<{ kind: "mail"; pending: number }>
@@ -52,7 +80,7 @@ export type WatchOutcome =
   | Readonly<{ kind: "unavailable"; message: string }>;
 
 /** Wait for unclaimed mail. Non-consuming: only XREVRANGE, LLEN and XREAD. */
-export const watchInbox = async (url: string, agent: string, opts: Readonly<{ timeoutSec: number; blockMs: number; signal?: AbortSignal }>): Promise<WatchOutcome> => {
+export const watchInbox = async (url: string, agent: string, opts: Readonly<{ timeoutSec: number; blockMs: number; signal?: AbortSignal; giveUpAfterMs: number | null; retryMs: number }>): Promise<WatchOutcome> => {
   const deadline = opts.timeoutSec > 0 ? Date.now() + opts.timeoutSec * 1000 : Infinity;
   const redis = new Redis(url, { maxRetriesPerRequest: 1, connectTimeout: 2000, retryStrategy: (n) => Math.min(n * 200, 1000) });
   redis.on("error", () => undefined);
@@ -73,9 +101,9 @@ export const watchInbox = async (url: string, agent: string, opts: Readonly<{ ti
         failingSince = null;
       } catch (error) {
         failingSince ??= Date.now();
-        if (Date.now() - failingSince > 30_000) return { kind: "unavailable", message: (error as Error).message };
+        if (opts.giveUpAfterMs !== null && Date.now() - failingSince > opts.giveUpAfterMs) return { kind: "unavailable", message: (error as Error).message };
         if (Date.now() >= deadline) return { kind: "timeout" };
-        await new Promise((r) => setTimeout(r, 1000)); // LLEN fallback cadence while the stream read fails
+        await new Promise((r) => setTimeout(r, Math.max(1, Math.min(opts.retryMs, deadline - Date.now())))); // LLEN fallback cadence while Redis fails
       }
     }
     return { kind: "timeout" };
@@ -84,16 +112,22 @@ export const watchInbox = async (url: string, agent: string, opts: Readonly<{ ti
 
 export const runPeek = async (argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Promise<number> => {
   const args = parsePeekArgs(argv);
+  if (args === "help") { process.stdout.write(USAGE); return 0; }
   if (typeof args === "string") { process.stderr.write(`${args}\n`); return 2; }
   const url = env.REDIS_URL || "redis://127.0.0.1:6379/0";
   // An explicit --dir wins over the Claude project dir for the derived fallback name.
   if (args.dir) env = { ...env, CLAUDE_PROJECT_DIR: "" };
+  // A watcher without --name must watch this session's registered inbox, never
+  // a guessed one: wait (bounded) for the session record, else fail clearly.
   const identity = args.name
     ? Object.freeze({ agent: args.name, gptqueue_session_id: null, source: "env" as const, note: "name given with --name" })
-    : resolveIdentity(args.dir ?? undefined, env);
+    : args.watch ? await waitForIdentity(args.dir ?? undefined, recordWaitMs(env, WATCH_RECORD_WAIT_MS), env) : resolveIdentity(args.dir ?? undefined, env);
+  if (args.watch && !args.name && identity.source !== "session_record") {
+    process.stdout.write(`${JSON.stringify({ error: "session_identity_unconfirmed", message: `no gptqueue session record for this Claude session (${identity.note}); not watching a guessed mailbox` })}\n`);
+    return 5;
+  }
   // --name skips identity lookup, but this session's claims still need its session id.
   const sessionId = args.name ? (() => { const id = resolveIdentity(args.dir ?? undefined, env); return id.agent === args.name ? id.gptqueue_session_id : null; })() : identity.gptqueue_session_id;
-
   if (!args.watch) {
     const redis = probeClient(url);
     const probe = await probeInbox(redis, identity.agent, sessionId).finally(() => redis.disconnect());
@@ -112,9 +146,9 @@ export const runPeek = async (argv: readonly string[], env: NodeJS.ProcessEnv = 
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   try {
-    const outcome = await watchInbox(url, identity.agent, { timeoutSec: args.timeoutSec, blockMs: args.blockMs, signal: controller.signal });
+    const outcome = await watchInbox(url, identity.agent, { timeoutSec: args.timeoutSec, blockMs: args.blockMs, signal: controller.signal, ...outagePolicy(args) });
     switch (outcome.kind) {
-      case "mail": process.stdout.write(`${JSON.stringify({ agent: identity.agent, pending: outcome.pending, at: new Date().toISOString() })}\n`); return 0;
+      case "mail": process.stdout.write(`${JSON.stringify({ agent: identity.agent, pending: outcome.pending, at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z") })}\n`); return 0;
       case "timeout": process.stdout.write(`${JSON.stringify({ agent: identity.agent, pending: 0, timeout: true })}\n`); return 3;
       case "unavailable": process.stdout.write(`${JSON.stringify({ agent: identity.agent, error: "redis_unavailable", message: outcome.message })}\n`); return 4;
       default: { const unreachable: never = outcome; throw new Error(String(unreachable)); }

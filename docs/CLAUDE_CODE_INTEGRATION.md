@@ -34,6 +34,32 @@ Runtime directory: `$GPTQ_CLAUDE_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/gptqueue-c
 `<tmpdir>/gptqueue-claude-<uid>`. It is created with mode 0700. The tools refuse to use it if
 another user owns it or the group or others can access it.
 
+### Startup ordering and name collisions
+
+- Claude Code runs SessionStart before the MCP server has registered. SessionStart waits up to
+  2 s (`GPTQ_CLAUDE_RECORD_WAIT_MS`) for the session record. If none appears, it reports the name
+  as UNCONFIRMED, reports no counts for the guessed name (which may belong to another session in
+  the same directory), and still gives the watcher command.
+- The watcher command carries no name: `gptqueue-inbox-peek --watch --session S`. The watcher
+  resolves this session's registered name from the record, waiting up to 40 s (longer than the 32 s worst-case
+  registration wait below). If no record
+  appears, it exits 5 with `{"error":"session_identity_unconfirmed"}` instead of watching a
+  guessed mailbox. An explicit `--name` always wins, as in the old script.
+- A Stop hook with no record allows the stop with a visible `systemMessage` and does not gate on
+  the guessed name.
+- If the requested name is held (`AGENT_NAME_HELD`), the server tries these names in order, at
+  most four: `<name>-<first 8 chars of CLAUDE_SESSION_ID or CLAUDE_CODE_SESSION_ID>`, then
+  `<name>-<claude pid>`, then two random `<name>-<8 hex>` names. A Claude started from inside
+  another Claude inherits the parent's session id, which is why the later names do not use it.
+  If every name is held, startup fails with a clear `AGENT_NAME_HELD` error. The record's
+  `name_origin` says which kind of name was used (`requested`, `session_id`, `pid` or `random`).
+- A holder registered by older code has no pid or hostname metadata, so the core reports
+  `holder_liveness_verifiable: false` and `holder_lease_ttl_ms` in the error details. The server
+  then waits for that lease to lapse and retries the stable name, for at most lease TTL + 2 s
+  (32 s). It falls back only if the name is still held after that. Under Claude, registration
+  runs in the background: `initialize` is answered at once, and `tools/call` requests wait until
+  registration has settled.
+
 ## Stop gate
 
 - The hook counts three things separately: unclaimed messages, tasks this session has claimed
@@ -55,7 +81,8 @@ LLEN, then waits with `XREAD BLOCK` on that stream. Every send appends to the st
 Lua call as the RPUSH, so the watcher wakes on the event without polling. It rechecks LLEN at
 least every `--block-ms` (default 5000), which catches requeued mail that emits no event. While
 Redis fails it falls back to an LLEN check every second, and exits 4 after 30 s of continuous
-failure. It never pops a message. It prints one JSON line and exits 0 when mail arrives. Started
+failure. With an explicit `--name` (the legacy invocation) it keeps the old script's behaviour
+instead: it retries at `--interval` (default 30 s) and never exits on a Redis error. It never pops a message. It prints one JSON line and exits 0 when mail arrives. Started
 with `run_in_background`, its exit wakes the idle session.
 
 ## Install note (not applied)

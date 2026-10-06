@@ -18,7 +18,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureRuntimeDir, watcherPidPath, watcherRunning } from "./session-record.js";
-import { probeClient, probeInbox, resolveIdentity, type Identity, type ProbeResult } from "./inbox-probe.js";
+import { probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity, type ProbeResult } from "./inbox-probe.js";
 import { writeFileSync } from "node:fs";
 
 export type HookEvent = "session-start" | "stop";
@@ -63,6 +63,10 @@ export const decideHook = (input: HookInput): HookDecision => {
   const watchText = `To be woken when mail arrives while idle, run this with run_in_background (its exit wakes you; restart it after every wake): ${input.watchCommand}`;
   switch (input.event) {
     case "session-start": {
+      if (identity.source !== "session_record") {
+        // The guessed name may be another session's (same directory): report no counts for it.
+        return { kind: "context", text: `gptqueue: this session's agent name is UNCONFIRMED (${identity.note}). Its gptqueue MCP server registers the session itself; call get_queue_status or claim_tasks through it to see your own inbox. Use a distinct idempotency_key per recipient on send_message (keys are global). ${input.watchPolicy === "off" ? "" : watchText}`.trim() };
+      }
       const inbox = probe.ok
         ? `Inbox: ${countsText(probe)}.${actionable(probe) > 0 ? ` ${CONSUME}` : ""}`
         : `Inbox check FAILED (${probe.code}: ${probe.message}); gptqueue state is unknown, do not assume the inbox is empty.`;
@@ -74,6 +78,10 @@ export const decideHook = (input: HookInput): HookDecision => {
           return { kind: "allow", systemMessage: `gptqueue inbox check for '${identity.agent}' still failing (${probe.code}); stopping without inbox confirmation.` };
         }
         return { kind: "block", record: { reason: "error", event_id: null }, reason: `gptqueue inbox check for ${identityText(identity)} FAILED (${probe.code}: ${probe.message}). The inbox state is unknown, not empty. Tell the user gptqueue is unreachable, or retry with get_queue_status / claim_tasks, then stop.` };
+      }
+      if (identity.source !== "session_record") {
+        // Never present a guessed name's counts as this session's own.
+        return { kind: "allow", systemMessage: `gptqueue: this session's agent name is UNCONFIRMED (${identity.note}); not gating on '${identity.agent}', which may be another session's inbox. Check this session's inbox with get_queue_status or claim_tasks.` };
       }
       const pending = actionable(probe);
       const latest = probe.counts.latest_event_id;
@@ -98,8 +106,9 @@ export const decideHook = (input: HookInput): HookDecision => {
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 
-export const watchCommandFor = (binDir: string, agent: string, claudeSessionId: string): string =>
-  `${shellQuote(join(binDir, "gptqueue-inbox-peek"))} --watch --name ${shellQuote(agent)} --session ${shellQuote(claudeSessionId)}`;
+/** Name-free: the watcher resolves this session's registered name itself from the session record. */
+export const watchCommandFor = (binDir: string, claudeSessionId: string): string =>
+  `${shellQuote(join(binDir, "gptqueue-inbox-peek"))} --watch --session ${shellQuote(claudeSessionId)}`;
 
 type RawHookJson = { session_id?: unknown; cwd?: unknown; stop_hook_active?: unknown };
 
@@ -127,7 +136,9 @@ export const runClaudeHook = async (argv: readonly string[], stdin: string, binD
   let json: RawHookJson = {};
   try { json = JSON.parse(stdin || "{}") as RawHookJson; } catch { /* treat as empty input; still report inbox state */ }
   const claudeSession = typeof json.session_id === "string" && json.session_id ? json.session_id : "unknown";
-  const identity = resolveIdentity(typeof json.cwd === "string" ? json.cwd : undefined, env);
+  const cwd = typeof json.cwd === "string" ? json.cwd : undefined;
+  // SessionStart can run before the MCP server has registered; wait briefly for its record.
+  const identity = event === "session-start" ? await waitForIdentity(cwd, recordWaitMs(env, 2000), env) : resolveIdentity(cwd, env);
   const redis = probeClient(env.REDIS_URL);
   const probe = await probeInbox(redis, identity.agent, identity.gptqueue_session_id).finally(() => redis.disconnect());
 
@@ -142,7 +153,7 @@ export const runClaudeHook = async (argv: readonly string[], stdin: string, binD
     prior: statePath ? readPrior(statePath) : null,
     watcherRunning: dir ? watcherRunning(watcherPidPath(dir, claudeSession), identity.agent) : false,
     watchPolicy: env.GPTQ_CLAUDE_WATCH === "off" ? "off" : "require",
-    watchCommand: watchCommandFor(binDir, identity.agent, claudeSession),
+    watchCommand: watchCommandFor(binDir, claudeSession),
   });
   if (statePath && event === "stop") {
     if (decision.kind === "block") writeFileSync(statePath, JSON.stringify(decision.record), { mode: 0o600 });
