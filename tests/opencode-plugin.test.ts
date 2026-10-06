@@ -6,6 +6,10 @@ import {
 } from "../src/registered-shell/opencode-plugin-factory.js";
 import defaultPlugin from "../src/registered-shell/opencode-plugin.js";
 import type { OpenCodeRuntimePort } from "../src/registered-shell/opencode-runtime.js";
+import { opencodeAgentName } from "../src/registered-shell/opencode-backend.js";
+import { MailboxStore } from "../src/core/mailbox-store.js";
+import { Redis } from "ioredis";
+import { randomUUID } from "node:crypto";
 
 const identity = { sessionID: `ses-plugin-${Date.now()}`, directory: "/workspace" };
 const testRedisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
@@ -43,6 +47,40 @@ describe("OpenCode plugin frontend", () => {
     expect(port.close).not.toHaveBeenCalled();
     await plugin.event({ event: { type: "session.deleted", properties: { info: { id: identity.sessionID, directory: identity.directory } } } });
     expect(port.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("activates pending work as soon as session.idle ends a busy turn (I-7)", async () => {
+    const sessionID = `ses-idle-${randomUUID()}`;
+    let status: "busy" | "idle" = "busy";
+    const prompts: number[] = [];
+    const port: OpenCodeRuntimePort = {
+      readIdentity: vi.fn(async () => ({ runtime_id: sessionID, working_directory: identity.directory, epoch: "epoch" })),
+      status: vi.fn(async () => status), history: vi.fn(async () => []),
+      promptAsync: vi.fn(async () => { prompts.push(Date.now()); }), close: vi.fn(async () => undefined),
+    };
+    // Without the idle wake the busy retry waits out a 3 s interval/backoff.
+    const plugin = createOpenCodePlugin(clientInput(native(port)), {
+      redisUrl: testRedisUrl, epoch: "epoch", runtimePort: async () => port,
+      dispatcherOptions: { intervalMs: 3_000, maxBackoffMs: 60_000 },
+    });
+    const redis = new Redis(testRedisUrl);
+    try {
+      await plugin.event({ event: { type: "session.created", properties: { info: { id: sessionID, directory: identity.directory } } } });
+      const agent = opencodeAgentName(sessionID);
+      await new MailboxStore(redis, redis).send({ id: randomUUID(), from: "idle-sender", to: agent,
+        timestamp: new Date().toISOString(), type: "task", payload: { content: "work" } });
+      await expect.poll(() => (port.status as ReturnType<typeof vi.fn>).mock.calls.length, { timeout: 5_000 }).toBeGreaterThan(0);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(prompts).toHaveLength(0);
+      status = "idle";
+      const idleAt = Date.now();
+      await plugin.event({ event: { type: "session.idle", properties: { sessionID } } });
+      await expect.poll(() => prompts.length, { timeout: 2_000, interval: 20 }).toBe(1);
+      expect(prompts[0]! - idleAt).toBeLessThan(1_000);
+    } finally {
+      await plugin.dispose();
+      await redis.quit();
+    }
   });
 
   it("uses chat.message as the lazy exact-identity registration path", async () => {

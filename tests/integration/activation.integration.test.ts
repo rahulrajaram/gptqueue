@@ -240,8 +240,9 @@ describe("actor registration & directory (wire)", () => {
     // ownership is session-scoped, so a second session is foreign to the
     // existing profile regardless of sharing the actor name.
     const actorId = uniq("owned-act");
-    const ownerA = await connect(actorId);
-    const ownerB = await connect(actorId);
+    // Two live sessions on one name is the opt-in shared policy (D2).
+    const ownerA = await connect(actorId, { shared: true });
+    const ownerB = await connect(actorId, { shared: true });
 
     const first = await registerActor(ownerA, "store_only");
     expect(first.data.status).toBe("ok");

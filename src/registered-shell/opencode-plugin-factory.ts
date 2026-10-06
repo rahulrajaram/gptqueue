@@ -202,9 +202,29 @@ export const createOpenCodePlugin = (
   options: OpenCodePluginOptions,
 ): OpenCodePluginHooks => {
   const runtimePort = options.runtimePort ?? ((client, identity) => createOpenCodeRuntimePort(client, identity));
+  // I-7: OpenCode's session.idle event, fanned out to that session's runtime port.
+  const idleListeners = new Map<string, Set<() => void>>();
+  const withIdle = (port: OpenCodeRuntimePort, sessionID: string): OpenCodeRuntimePort => Object.freeze({
+    readIdentity: (signal: AbortSignal) => port.readIdentity(signal),
+    status: (signal: AbortSignal) => port.status(signal),
+    history: (signal: AbortSignal) => port.history(signal),
+    promptAsync: (prompt: Readonly<{ messageID: string; text: string }>, signal: AbortSignal) => port.promptAsync(prompt, signal),
+    ...(port.close ? { close: () => port.close!() } : {}),
+    onIdle: (listener: () => void) => {
+      const set = idleListeners.get(sessionID) ?? new Set<() => void>();
+      set.add(listener);
+      idleListeners.set(sessionID, set);
+      const own = port.onIdle?.(listener);
+      return () => {
+        own?.();
+        set.delete(listener);
+        if (set.size === 0 && idleListeners.get(sessionID) === set) idleListeners.delete(sessionID);
+      };
+    },
+  });
   const { owner } = createOpenCodeBackendFactory({
     redisUrl: options.redisUrl,
-    runtimePort: (identity) => runtimePort(input.client, identity),
+    runtimePort: async (identity) => withIdle(await runtimePort(input.client, identity), identity.sessionID),
     epoch: options.epoch,
     runtimeOptions: options.runtimeOptions,
     dispatcherOptions: options.dispatcherOptions,
@@ -375,6 +395,11 @@ export const createOpenCodePlugin = (
       }
       if (event.type === "session.deleted") {
         if (identity) await owner.close(identity.sessionID, identity.directory);
+        return;
+      }
+      if (event.type === "session.idle") {
+        const sessionID = record(event.properties)?.sessionID;
+        if (typeof sessionID === "string") for (const listener of [...idleListeners.get(sessionID) ?? []]) listener();
         return;
       }
       if (identity) await ensure(identity);

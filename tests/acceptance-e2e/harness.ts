@@ -419,9 +419,14 @@ export const startPiRecipient = async (): Promise<Recipient> => {
     await waitFor(() => tools.has("claim_tasks") && shells.length > 0, 5_000, "Pi binding");
   };
   await start();
+  // Peers address the Pi session's bound mailbox, which survives restarts.
+  // A restarted sidecar holds a per-startup provisional name until adoption
+  // succeeds (adoption is refused while the cut-off turn's claim is
+  // unexpired), and nothing real ever sends to that provisional name.
+  const mailbox = shells.at(-1)!.agentName;
   return {
     runtime: "pi", handled, turnStarts: runner.starts, turnErrors: runner.errors, turnRunning: () => runner.running, injections,
-    name: () => shells.at(-1)!.agentName,
+    name: () => mailbox,
     hold: () => { held = true; },
     release: async () => { held = false; const at = now(); await handlers.get("agent_end")?.({ messages: [] }, context); setImmediate(() => { void drain(); }); return at; },
     send: async (to, content) => String((await call("send_message", { to, content, type: "task" })).message_id),

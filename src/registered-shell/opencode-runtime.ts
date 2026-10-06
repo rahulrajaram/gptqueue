@@ -30,6 +30,8 @@ export interface OpenCodeRuntimePort {
   /** Mirrors OpenCode prompt_async's deterministic native messageID field. */
   promptAsync(prompt: Readonly<{ messageID: string; text: string }>, signal: AbortSignal): Promise<void>;
   close?(): Promise<void>;
+  /** Optional: OpenCode's `session.idle` event for this session (I-7). Returns an unsubscribe. */
+  onIdle?(listener: () => void): () => void;
 }
 
 export interface OpenCodeRuntimeOptions {
@@ -110,6 +112,8 @@ export const createOpenCodeRuntime = async (
   let closeResult: Promise<void> | undefined;
   return {
     binding,
+    // I-7: a turn ending wakes the dispatcher (I-4) instead of waiting out backoff.
+    ...(port.onIdle ? { onIdle: (listener: () => void) => port.onIdle!(() => { if (!closed) listener(); }) } : {}),
     activate: async (request: ActivationRequest, signal: AbortSignal): Promise<ActivationOutcome> => {
       if (closed || signal.aborted) return { status: "unavailable" };
       let identity: Awaited<ReturnType<OpenCodeRuntimePort["readIdentity"]>>;

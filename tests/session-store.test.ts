@@ -91,8 +91,8 @@ describe("SessionStore", () => {
   });
 
   it("supports multiple sessions for one agent", async () => {
-    const s1 = await store.createSession("multi-agent", "both", "session 1");
-    const s2 = await store.createSession("multi-agent", "both", "session 2");
+    const s1 = await store.createSession("multi-agent", "both", "session 1", undefined, { shared: true });
+    const s2 = await store.createSession("multi-agent", "both", "session 2", undefined, { shared: true });
 
     const presence = await store.getPresence("multi-agent");
     expect(presence.online).toBe(true);
@@ -114,8 +114,8 @@ describe("SessionStore", () => {
 
   it("computes presence for several agents in one call without pruning on read", async () => {
     const live = await store.createSession("pm-live", "both");
-    const stale = await store.createSession("pm-mixed", "both");
-    const fresh = await store.createSession("pm-mixed", "both");
+    const stale = await store.createSession("pm-mixed", "both", undefined, undefined, { shared: true });
+    const fresh = await store.createSession("pm-mixed", "both", undefined, undefined, { shared: true });
     const gone = await store.createSession("pm-gone", "both");
     await redis.del(SESSION_KEYS.lease(stale.session_id), SESSION_KEYS.lease(gone.session_id));
 
@@ -156,7 +156,7 @@ describe("SessionStore", () => {
     const sessions = await Promise.all(
       // Staggered starts make later prunes overlap earlier, still-initializing registrations.
       Array.from({ length: 20 }, (_, i) =>
-        new Promise((r) => setTimeout(r, i)).then(() => store.createSession("burst-agent", "both"))
+        new Promise((r) => setTimeout(r, i)).then(() => store.createSession("burst-agent", "both", undefined, undefined, { shared: true }))
       )
     );
     expect((await store.getPresence("burst-agent")).active_sessions.sort()).toEqual(
@@ -165,15 +165,33 @@ describe("SessionStore", () => {
   });
 
   it("prunes an agent's expired sessions when the agent registers again", async () => {
-    const live = await store.createSession("prune-agent", "both");
-    const expired = await store.createSession("prune-agent", "both");
+    const live = await store.createSession("prune-agent", "both", undefined, undefined, { shared: true });
+    const expired = await store.createSession("prune-agent", "both", undefined, undefined, { shared: true });
     await redis.del(SESSION_KEYS.lease(expired.session_id));
 
-    const next = await store.createSession("prune-agent", "both");
+    const next = await store.createSession("prune-agent", "both", undefined, undefined, { shared: true });
     expect((await redis.smembers(SESSION_KEYS.agentSessions("prune-agent"))).sort()).toEqual(
       [live.session_id, next.session_id].sort()
     );
     expect(await redis.exists(SESSION_KEYS.session(expired.session_id))).toBe(0);
     expect(await store.refreshLease(expired.session_id)).toBe(false);
+  });
+
+  it("an exclusive registration takes over and prunes every expired session of its name", async () => {
+    const first = await store.createSession("prune-x", "both");
+    await redis.del(SESSION_KEYS.lease(first.session_id));
+    const next = await store.createSession("prune-x", "both");
+    expect(await redis.smembers(SESSION_KEYS.agentSessions("prune-x"))).toEqual([next.session_id]);
+    expect(await redis.exists(SESSION_KEYS.session(first.session_id))).toBe(0);
+    expect(await store.refreshLease(first.session_id)).toBe(false);
+  });
+
+  it("an exclusive re-registration by the holder prunes its name's expired shared leftovers", async () => {
+    const holder = await store.createSession("prune-y", "both");
+    const leftover = await store.createSession("prune-y", "both", undefined, undefined, { shared: true, selfSessionId: holder.session_id });
+    await redis.del(SESSION_KEYS.lease(leftover.session_id));
+    const again = await store.createSession("prune-y", "both", undefined, undefined, { selfSessionId: holder.session_id });
+    expect((await redis.smembers(SESSION_KEYS.agentSessions("prune-y"))).sort()).toEqual([holder.session_id, again.session_id].sort());
+    expect(await redis.exists(SESSION_KEYS.session(leftover.session_id))).toBe(0);
   });
 });
