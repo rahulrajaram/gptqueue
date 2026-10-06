@@ -59,18 +59,20 @@ describe("inbox dispatcher", () => {
     const agent = `dispatcher-${randomUUID()}`; const sender = `sender-${randomUUID()}`; owned.add(agent); owned.add(sender); const mailbox = new MailboxStore(redis, redis); const claims = new TaskClaimStore(redis);
     const message = task(agent, sender); await mailbox.send(message);
     let claimId = "";
+    let acknowledged = false;
     let delivered: { operation_id: string; prompt: string; recover_only?: boolean } | undefined;
     const adapter: RuntimeAdapter = { binding: binding("runtime-claims"), activate: async (request) => {
       delivered = request;
       const result = await claims.claim({ actor_id: agent, session_id: "session-1", max_batch: 1, ttl_seconds: 30, now: new Date().toISOString() });
-      if (result.ok && result.claim) { claimId = result.claim.claim_id; await mailbox.send({ id: randomUUID(), from: agent, to: sender, timestamp: new Date().toISOString(), type: "result", payload: { content: "done", in_reply_to: message.id } }); await claims.acknowledge({ actor_id: agent, session_id: "session-1", claim_id: claimId }); }
+      if (result.ok && result.claim) { claimId = result.claim.claim_id; await mailbox.send({ id: randomUUID(), from: agent, to: sender, timestamp: new Date().toISOString(), type: "result", payload: { content: "done", in_reply_to: message.id } }); await claims.acknowledge({ actor_id: agent, session_id: "session-1", claim_id: claimId }); acknowledged = true; }
       return { status: "completed", turn_id: "turn-1" };
     }, close: async () => {} };
     const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10 }); live.push({ agent, dispatcher });
     const senderCalls: string[] = [];
     const senderAdapter: RuntimeAdapter = { binding: binding("runtime-sender"), activate: async (request) => { senderCalls.push(request.operation_id); return { status: "queued" }; }, close: async () => {} };
     const senderDispatcher = await startInboxDispatcher(redis, sender, senderAdapter, { intervalMs: 10 }); live.push({ agent: sender, dispatcher: senderDispatcher });
-    await eventually(async () => Boolean(claimId));
+    // claimId is set before the reply and the acknowledgement run; wait for both to finish.
+    await eventually(async () => Boolean(claimId) && acknowledged);
     expect(delivered?.operation_id).toMatch(/^[a-f0-9]{64}$/);
     expect(delivered?.prompt).toContain(agent);
     expect(delivered?.prompt).toContain(delivered!.operation_id);

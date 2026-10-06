@@ -42,7 +42,7 @@ describe("gptqueue-doctor CLI", () => {
   // The script imports from dist/, so build once before the suite.
   beforeAll(() => {
     execSync("npm run build", { cwd: ROOT, stdio: "inherit" });
-  });
+  }, 180_000); // tsc under full-suite load exceeds the 10 s default hookTimeout
 
   beforeEach(async () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });

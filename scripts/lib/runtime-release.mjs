@@ -3,7 +3,9 @@
 // Layout under <prefix>:
 //   releases/<id>/           read-only release: dist/, bin/, package*.json, node_modules/,
 //                            manifest.json (per-file sha256), verify.json (gate result)
-//   releases/<id>.tmp/       staging; never referenced by current/previous
+//   releases/<id>.tmp-<rand>/  per-install staging through verification; never
+//                            referenced by current/previous. Unique per install, so
+//                            concurrent installs of one source never share it.
 //   releases/<id>.rejected-<ts>/  a staged release that failed verification (kept as evidence)
 //   releases/.staging-*/     scratch copy before the id is known
 //   releases/<name>.owner    {pid, createdAt} of the install that owns a .staging-* or
@@ -20,7 +22,7 @@
 // non-reproducible native rebuild only costs a new id, never a false match.
 // manifest.json records every file so on-disk tampering stays detectable.
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
@@ -156,7 +158,7 @@ export const STALE_STAGING_MS = 60 * 60 * 1000;
 const ownerMarker = (dir) => `${dir}${OWNER_SUFFIX}`;
 const writeOwner = (dir) => writeFileSync(ownerMarker(dir), `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`);
 const dropOwner = (dir) => rmSync(ownerMarker(dir), { force: true });
-const isStagingName = (name) => (name.startsWith(".staging-") || name.endsWith(".tmp")) && !name.endsWith(OWNER_SUFFIX);
+const isStagingName = (name) => (name.startsWith(".staging-") || /\.tmp(-[^/]+)?$/.test(name)) && !name.endsWith(OWNER_SUFFIX);
 
 /** True when pid names a live process (EPERM still means it exists). */
 export const pidAlive = (pid) => {
@@ -197,7 +199,7 @@ export function reclaimStaleStaging(prefix, options = {}) {
   return Object.freeze(stale.map((r) => r.name));
 }
 
-/** Stage a release from a built checkout into releases/<id>.tmp. */
+/** Stage a release from a built checkout into a unique releases/<id>.tmp-<rand>. */
 export function stageRelease({ source, prefix, shortSha, installDependencies = npmCiInstall }) {
   const { releases } = paths(prefix);
   mkdirSync(releases, { recursive: true });
@@ -208,8 +210,7 @@ export function stageRelease({ source, prefix, shortSha, installDependencies = n
     for (const entry of STAGED_ENTRIES) cpSync(join(source, entry), join(scratch, entry), { recursive: true, verbatimSymlinks: true });
     installDependencies(scratch);
     const id = releaseId(shortSha, computeManifest(scratch).fullDigest);
-    tmp = join(releases, `${id}.tmp`);
-    removeTree(tmp);
+    tmp = join(releases, `${id}.tmp-${randomBytes(6).toString("hex")}`);
     writeOwner(tmp);
     renameSync(scratch, tmp);
     dropOwner(scratch);
@@ -403,7 +404,8 @@ export async function install({ source, prefix, allowDirty = false, installDepen
   reclaimStaleStaging(prefix);
   const staged = stageRelease({ source, prefix, shortSha, installDependencies });
   const final = join(paths(prefix).releases, staged.id);
-  if (existsSync(final)) {
+  /** Discard our staging and reuse the existing releases/<id> if it is intact and has our digests. */
+  const reuseExisting = () => {
     removeTree(staged.tmp);
     dropOwner(staged.tmp);
     const integrity = checkIntegrity(final);
@@ -414,7 +416,8 @@ export async function install({ source, prefix, allowDirty = false, installDepen
     const verify = JSON.parse(readFileSync(join(final, "verify.json"), "utf8"));
     if (!verify.ok) throw new ReleaseError("verify_failed", `release ${staged.id} exists but failed verification`);
     return Object.freeze({ id: staged.id, reused: true, verify, ...(activateRelease ? activate(prefix, staged.id) : {}) });
-  }
+  };
+  if (existsSync(final)) return reuseExisting();
   let verify;
   try {
     verify = await verifyRelease(staged.tmp, { redisUrl, initBoundMs, hookBoundMs, node });
@@ -432,7 +435,15 @@ export async function install({ source, prefix, allowDirty = false, installDepen
     throw Object.assign(new ReleaseError("verify_failed", `release ${staged.id} failed verification; kept at ${rejected}`), { verify });
   }
   setReadOnly(staged.tmp, true);
-  renameSync(staged.tmp, final);
+  try {
+    // rename(2) of a directory onto an existing non-empty directory fails, so
+    // publication is atomic and never overwrites a release another install
+    // published meanwhile; that one is reused if its digests match ours.
+    renameSync(staged.tmp, final);
+  } catch (error) {
+    if ((error?.code === "ENOTEMPTY" || error?.code === "EEXIST") && existsSync(final)) return reuseExisting();
+    throw error;
+  }
   dropOwner(staged.tmp);
   return Object.freeze({ id: staged.id, reused: false, verify, ...(activateRelease ? activate(prefix, staged.id) : {}) });
 }
@@ -448,7 +459,7 @@ export function rollback(prefix) {
   return Object.freeze({ current: previous, previous: current });
 }
 
-const isRelease = (name) => !name.startsWith(".") && !name.endsWith(".tmp") && !name.endsWith(OWNER_SUFFIX) && !name.includes(".rejected-");
+const isRelease = (name) => !name.startsWith(".") && !isStagingName(name) && !name.endsWith(OWNER_SUFFIX) && !name.includes(".rejected-");
 
 export function status(prefix) {
   const { releases } = paths(prefix);

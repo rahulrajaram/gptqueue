@@ -20,6 +20,7 @@ import { dirname, join, resolve } from "node:path";
 import { ensureRuntimeDir, watcherPidPath, watcherRunning } from "./session-record.js";
 import { confirmLegacyLiveness, isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity, type ProbeResult } from "./inbox-probe.js";
 import { sessionTag } from "../core/session-tag.js";
+import { quoteAgent } from "./session-record.js";
 import { writeFileSync } from "node:fs";
 
 export type HookEvent = "session-start" | "stop";
@@ -47,10 +48,10 @@ const CONSUME = "Consume with claim_tasks (max_batch up to 16), act on each task
 const identityText = (id: Identity): string => {
   switch (id.source) {
     // SEC-F5: the session id is a bearer credential; hook text lands in model context and transcripts.
-    case "session_record": return `agent '${id.agent}' (gptqueue session ${id.gptqueue_session_id === null ? "unknown" : sessionTag(id.gptqueue_session_id)}, as registered by this session's gptqueue MCP server)`;
-    case "legacy_env": return `agent '${id.agent}' (${id.note})`;
+    case "session_record": return `agent ${quoteAgent(id.agent)} (gptqueue session ${id.gptqueue_session_id === null ? "unknown" : sessionTag(id.gptqueue_session_id)}, as registered by this session's gptqueue MCP server)`;
+    case "legacy_env": return `agent ${quoteAgent(id.agent)} (${id.note})`;
     case "env":
-    case "derived": return `agent '${id.agent}' (UNCONFIRMED: ${id.note}; source ${id.source})`;
+    case "derived": return `agent ${quoteAgent(id.agent)} (UNCONFIRMED: ${id.note}; source ${id.source})`;
     default: { const unreachable: never = id.source; throw new Error(String(unreachable)); }
   }
 };
@@ -83,20 +84,20 @@ export const decideHook = (input: HookInput): HookDecision => {
     case "stop": {
       if (!probe.ok) {
         if (input.stopHookActive && input.prior?.reason === "error") {
-          return { kind: "allow", systemMessage: `gptqueue inbox check for '${identity.agent}' still failing (${probe.code}); stopping without inbox confirmation.` };
+          return { kind: "allow", systemMessage: `gptqueue inbox check for ${quoteAgent(identity.agent)} still failing (${probe.code}); stopping without inbox confirmation.` };
         }
         return { kind: "block", record: { reason: "error", event_id: null }, reason: `gptqueue inbox check for ${identityText(identity)} FAILED (${probe.code}: ${probe.message}). The inbox state is unknown, not empty. Tell the user gptqueue is unreachable, or retry with get_queue_status / claim_tasks, then stop.` };
       }
       if (!isConfirmed(identity)) {
         // Never present a guessed name's counts as this session's own.
-        return { kind: "allow", systemMessage: `gptqueue: this session's agent name is UNCONFIRMED (${identity.note}); not gating on '${identity.agent}', which may be another session's inbox. Check this session's inbox with get_queue_status or claim_tasks.` };
+        return { kind: "allow", systemMessage: `gptqueue: this session's agent name is UNCONFIRMED (${identity.note}); not gating on ${quoteAgent(identity.agent)}, which may be another session's inbox. Check this session's inbox with get_queue_status or claim_tasks.` };
       }
       const pending = actionable(probe);
       const latest = probe.counts.latest_event_id;
       if (pending > 0) {
         const newMail = input.prior === null || input.prior.reason !== "mail" || latest !== input.prior.event_id;
         if (input.stopHookActive && !newMail) {
-          return { kind: "allow", systemMessage: `gptqueue: '${identity.agent}' still has ${countsText(probe)}; not re-blocking (no new mail since the last reminder).` };
+          return { kind: "allow", systemMessage: `gptqueue: ${quoteAgent(identity.agent)} still has ${countsText(probe)}; not re-blocking (no new mail since the last reminder).` };
         }
         return { kind: "block", record: { reason: "mail", event_id: latest }, reason: `gptqueue inbox for ${identityText(identity)}: ${countsText(probe)}. ${CONSUME} Acknowledge or renew claims you already hold. If none need action now, say so and stop.` };
       }

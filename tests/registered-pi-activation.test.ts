@@ -129,6 +129,37 @@ describe("registered Pi activation lifecycle", () => {
     } finally { errors.mockRestore(); }
   });
 
+  it("aborts a superseded in-flight bind_runtime and binds the new session only after it settled and its client closed", async () => {
+    const first = makeClient(); const second = makeClient(); const fake = fakePi();
+    const events: string[] = [];
+    let oldSignal: AbortSignal | undefined;
+    (first.callTool as any).mockImplementation(({ name }: { name: string }, _r: unknown, opts: { signal: AbortSignal }) => {
+      if (name !== "bind_runtime") return Promise.resolve({ content: [], structuredContent: {} });
+      oldSignal = opts.signal;
+      events.push("old-bind-start");
+      return new Promise((_resolve, reject) => opts.signal.addEventListener("abort", () => {
+        setTimeout(() => { events.push("old-bind-settled"); reject(new Error("aborted")); }, 20);
+      }));
+    });
+    (first.close as any).mockImplementation(async () => { events.push("old-client-closed"); });
+    (second.callTool as any).mockImplementation(async ({ name }: { name: string }) => {
+      if (name === "bind_runtime") events.push("new-bind");
+      return { content: [{ type: "text", text: "ok" }], structuredContent: { activation_ready: true } };
+    });
+    const clients = [first, second];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await createPiExtension(async () => clients.shift()!, 5_000, { runtimeEnabled: true, retry: { baseMs: 60_000 } })(fake.pi);
+      const stale = fake.handlers.get("session_start")({}, fake.context());
+      await vi.waitFor(() => expect(events).toContain("old-bind-start"));
+      fake.switchSession("session-2");
+      await fake.handlers.get("session_start")({}, fake.context());
+      await stale;
+      expect(oldSignal?.aborted).toBe(true);
+      expect(events).toEqual(["old-bind-start", "old-client-closed", "old-bind-settled", "new-bind"]);
+    } finally { errors.mockRestore(); }
+  });
+
   it("shares one in-flight sidecar between concurrent starts of the same session", async () => {
     const only = makeClient(); const fake = fakePi();
     const factory = vi.fn(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); return only; });

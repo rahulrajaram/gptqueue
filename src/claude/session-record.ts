@@ -127,8 +127,17 @@ export const readOwnFile = (path: string, uid: number | undefined = process.getu
   } catch { return null; } finally { closeSync(fd); }
 };
 
-/** Agent names a record may carry: bounded, and no characters that could restructure hook text. */
-export const RECORD_AGENT = /^[A-Za-z0-9._:@+-]{1,128}$/;
+/**
+ * Agent names a record may carry: any name register_agent accepts (spaces,
+ * '/', non-ASCII), bounded, with no NUL or control characters. Readers and
+ * the publisher agree, so a renamed session never turns its record invalid;
+ * hook text JSON-quotes the name (quoteAgent) and commands shell-quote it.
+ */
+// eslint-disable-next-line no-control-regex
+export const RECORD_AGENT = /^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]{1,512}$/u;
+
+/** A name as it appears in hook text: JSON-quoted, so it cannot restructure the surrounding sentence. */
+export const quoteAgent = (agent: string): string => JSON.stringify(agent);
 
 /**
  * Record (or, with name === null, remove) the identity the server holds for
@@ -170,7 +179,7 @@ export const publishSessionRecord = (
 
 const isRecord = (value: unknown): value is ClaudeSessionRecord => {
   const r = value as Partial<ClaudeSessionRecord> | null;
-  return !!r && r.version === 1 && typeof r.agent === "string" && RECORD_AGENT.test(r.agent)
+  return !!r && r.version === 1 && typeof r.agent === "string" && r.agent.length <= 512 && RECORD_AGENT.test(r.agent)
     && typeof r.gptqueue_session_id === "string" && typeof r.claude_pid === "number"
     && typeof r.claude_start === "string" && typeof r.server_pid === "number"
     && typeof r.server_start === "string" && r.server_start.length > 0;

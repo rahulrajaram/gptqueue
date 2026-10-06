@@ -70,7 +70,7 @@ describe("Claude hook against Redis", { timeout: 300_000 }, () => {
     record(held.name, held.session_id);
     const after = await hook("stop", { session_id: randomUUID() });
     expect(JSON.parse(after.stdout)).toMatchObject({ decision: "block" });
-    expect(after.stdout).toContain(`agent '${held.name}' (gptqueue session ${sessionTag(held.session_id)}`);
+    expect(after.stdout).toContain(JSON.stringify(`agent ${JSON.stringify(held.name)} (gptqueue session ${sessionTag(held.session_id)}`).slice(1, -1));
     expect(after.stdout).toContain("1 unclaimed");
   });
 

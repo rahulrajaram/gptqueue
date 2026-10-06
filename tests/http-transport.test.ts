@@ -224,7 +224,7 @@ describe("HTTP transport (NXT-018)", () => {
 
     httpServer = createServer(app);
     await new Promise<void>((resolve) => httpServer.listen(TEST_PORT, resolve));
-  });
+  }, 60_000); // dynamic SDK import + listen; slow under full-suite load
 
   afterAll(async () => {
     for (const transport of Object.values(transports)) {
@@ -331,7 +331,7 @@ describe("HTTP session recovery (stale session after server restart)", () => {
   beforeAll(async () => {
     s = await spawnHttpServer({});
     await waitHealthy(s);
-  });
+  }, 60_000); // spawns the HTTP server process; slow under full-suite load
 
   afterAll(async () => {
     await killChild(s);
@@ -577,7 +577,7 @@ describe("HTTP session cap (GPTQUEUE_HTTP_MAX_SESSIONS)", () => {
   beforeAll(async () => {
     s = await spawnHttpServer({ GPTQUEUE_HTTP_MAX_SESSIONS: "2" });
     await waitHealthy(s);
-  });
+  }, 60_000); // spawns the HTTP server process; slow under full-suite load
 
   afterAll(async () => {
     await killChild(s);

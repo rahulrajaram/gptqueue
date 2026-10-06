@@ -67,7 +67,7 @@ describe("RT-1 release staging", () => {
     expect(manifest.files["bin/gptqueue-session"]).toBe(sha256(join(REPO, "bin/gptqueue-session")));
     expect(Object.keys(manifest.files).some((p) => p.startsWith("src/"))).toBe(false);
     expect(statSync(join(dir, "bin/gptqueue-session")).mode & 0o222).toBe(0);
-    expect(readdirSync(join(prefix, "releases")).filter((n) => n.endsWith(".tmp") || n.startsWith(".staging"))).toEqual([]);
+    expect(readdirSync(join(prefix, "releases")).filter((n) => n.includes(".tmp") || n.startsWith(".staging"))).toEqual([]);
     expect(readlinkSync(join(prefix, "current"))).toBe(`releases/${result.id}`);
     const verify = JSON.parse(readFileSync(join(dir, "verify.json"), "utf8"));
     expect(verify).toMatchObject({ ok: true, integrity: { ok: true }, imports: { ok: true, problems: [] } });
@@ -113,6 +113,19 @@ describe("RT-1 digest checks on an existing release id", () => {
     await expect(installInto(prefix)).rejects.toMatchObject({ code: "digest_mismatch" });
     expect(readlinkSync(join(prefix, "current"))).toBe(`releases/${first.id}`);
   }, 90_000);
+});
+
+describe("RT-1 concurrent installs of the same source", () => {
+  it("each stages into its own temporary dir; one publishes releases/<id>, the other reuses it", async () => {
+    const prefix = newPrefix();
+    const [a, b] = await Promise.all([installInto(prefix), installInto(prefix)]);
+    expect(a.id).toBe(b.id);
+    expect([a.reused, b.reused].sort()).toEqual([false, true]);
+    expect(a.verify.ok && b.verify.ok).toBe(true);
+    const left = readdirSync(join(prefix, "releases"));
+    expect(left.filter((n) => n.includes(".tmp") || n.startsWith(".staging") || n.endsWith(".owner") || n.includes(".rejected"))).toEqual([]);
+    expect(readlinkSync(join(prefix, "current"))).toBe(`releases/${a.id}`);
+  }, 180_000);
 });
 
 describe("RT-1 release id covers dependencies", () => {
@@ -265,12 +278,27 @@ describe("RT-1 staging left by a killed install (LC-F5)", () => {
     expect(rr.findStaleStaging(prefix, { now: Date.now() + rr.STALE_STAGING_MS + 1_000 }).map((r: { name: string }) => r.name)).toEqual([".staging-nomark"]);
   });
 
+  it("an in-progress <id>.tmp-<hex> with a live owner is neither listed as a release nor pruned; a dead one is reclaimed", () => {
+    const prefix = newPrefix();
+    const live = stage(prefix, "abc-def.tmp-0a1b2c3d4e5f", process.pid);
+    const dead = stage(prefix, "abc-def.tmp-ffeeddccbbaa", deadPid());
+    const s = rr.status(prefix);
+    expect(s.releases).toEqual([]);
+    expect(s.staleStaging.map((r: { name: string; reason: string }) => [r.name, r.reason])).toEqual([["abc-def.tmp-ffeeddccbbaa", "owner_dead"]]);
+    const pruned = rr.prune(prefix, 0);
+    expect(pruned.removed).toEqual([]);
+    expect(pruned.reclaimed).toEqual(["abc-def.tmp-ffeeddccbbaa"]);
+    expect(existsSync(live)).toBe(true);
+    expect(existsSync(`${live}.owner`)).toBe(true);
+    expect(existsSync(dead)).toBe(false);
+  });
+
   it("install reclaims stale staging before staging a new release", async () => {
     const prefix = newPrefix();
     const stale = stage(prefix, ".staging-dead02", deadPid());
     await installInto(prefix);
     expect(existsSync(stale)).toBe(false);
-    expect(readdirSync(join(prefix, "releases")).filter((n) => n.startsWith(".") || n.endsWith(".tmp") || n.endsWith(".owner"))).toEqual([]);
+    expect(readdirSync(join(prefix, "releases")).filter((n) => n.startsWith(".") || n.includes(".tmp") || n.endsWith(".owner"))).toEqual([]);
   }, 60_000);
 });
 

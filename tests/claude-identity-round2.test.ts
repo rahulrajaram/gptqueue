@@ -81,7 +81,7 @@ describe("ID-2/WK-1: SessionStart and the watcher before the MCP record exists",
       { GPTQ_AGENT_NAME: "claude-guess", GPTQ_CLAUDE_RECORD_WAIT_MS: "60000" },
       () => { setTimeout(() => publishSessionRecord(self(), me.name, me.session_id, env), 300); });
     const text = JSON.parse(out.stdout).hookSpecificOutput.additionalContext as string;
-    expect(text).toContain(`agent '${me.name}' (gptqueue session ${sessionTag(me.session_id)}`);
+    expect(text).toContain(`agent ${JSON.stringify(me.name)} (gptqueue session ${sessionTag(me.session_id)}`);
     expect(text).toContain("1 unclaimed");
   });
 

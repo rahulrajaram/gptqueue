@@ -6,7 +6,7 @@
  */
 import { Redis } from "ioredis";
 import { CLAIM_KEYS, SESSION_KEYS } from "../core/keys.js";
-import { ancestry, findSessionRecord, readProcess, type ClaudeProcess, type RecordLookup } from "./session-record.js";
+import { ancestry, findSessionRecord, quoteAgent, readProcess, type ClaudeProcess, type RecordLookup } from "./session-record.js";
 import { findLegacyIdentity, type LegacyLookup } from "./legacy-identity.js";
 import { resolveAgentName } from "./agent-name.js";
 
@@ -102,6 +102,8 @@ export type Identity = Readonly<{
   note: string | null;
   /** The Claude process this identity belongs to, when known (ties the watcher to it, LC-F2). */
   claude: ClaudeProcess | null;
+  /** legacy_env only: pid of the pre-record MCP server whose environ named the agent. */
+  legacy_server_pid?: number;
 }>;
 
 /**
@@ -125,9 +127,9 @@ export const resolveIdentity = (
   const old = legacy ? legacy() : env.GPTQ_CLAUDE_LEGACY_SCAN === "off" ? { kind: "none" as const } : findLegacyIdentity(chain);
   if (old.kind === "confirmed") {
     const claude = readProcess(old.claude_pid);
-    return Object.freeze({ agent: old.agent, gptqueue_session_id: null, source: "legacy_env", note: `confirmed from the environment of this session's pre-record gptqueue MCP server (pid ${old.server_pid})`, claude: claude ? Object.freeze({ pid: claude.pid, start: claude.start }) : null });
+    return Object.freeze({ agent: old.agent, gptqueue_session_id: null, source: "legacy_env", note: `confirmed from the environment of this session's pre-record gptqueue MCP server (pid ${old.server_pid})`, claude: claude ? Object.freeze({ pid: claude.pid, start: claude.start }) : null, legacy_server_pid: old.server_pid });
   }
-  const ambiguity = old.kind === "ambiguous" ? `; ${old.agents.length} legacy gptqueue MCP servers under pid ${old.claude_pid} (${old.agents.join(", ")})` : "";
+  const ambiguity = old.kind === "ambiguous" ? `; ${old.agents.length} legacy gptqueue MCP servers under pid ${old.claude_pid} (${old.agents.map(quoteAgent).join(", ")})` : "";
   const note = (found.kind === "stale"
     ? `session record ignored (${found.reason}); name re-derived`
     : "no session record from this session's gptqueue MCP server; name re-derived") + ambiguity;
@@ -142,19 +144,43 @@ export const resolveIdentity = (
 
 /**
  * BC-F2: a legacy server's environ is fixed at exec, but it may since have
- * renamed (register_agent) or closed its session. Both delete
- * gptq:heartbeat:<old name>, which a live old server refreshes, so legacy_env
- * stays confirmed only while that heartbeat exists; otherwise (or when Redis
- * cannot say) the identity is downgraded to UNCONFIRMED. Other sources pass through.
+ * renamed (register_agent) or closed its session. legacy_env stays confirmed
+ * only while (1) gptq:heartbeat:<name> exists (a live old server refreshes
+ * it; close and rename delete it) AND (2) the name still belongs to that very
+ * server: its registry entry's pid (7347a85 writes `pid` there) or the pid of
+ * one of the name's current sessions equals the legacy server's pid. Another
+ * client that took the name after a rename keeps the heartbeat alive, so (1)
+ * alone is not enough. Otherwise, or when Redis cannot say, the identity is
+ * downgraded to UNCONFIRMED. Other sources pass through.
  */
-export const confirmLegacyLiveness = async (redis: Pick<Redis, "exists">, identity: Identity, env: NodeJS.ProcessEnv = process.env): Promise<Identity> => {
+export const LEGACY_OWNER_SCRIPT = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return 'no_heartbeat' end
+local pid = ARGV[1]
+local reg = redis.call('HGET', KEYS[2], ARGV[2])
+if reg then
+  local ok, value = pcall(cjson.decode, reg)
+  if ok and type(value) == 'table' and tostring(value.pid) == pid then return 'owned' end
+end
+for _, sid in ipairs(redis.call('SMEMBERS', KEYS[3])) do
+  if redis.call('HGET', ARGV[3] .. sid, 'pid') == pid then return 'owned' end
+end
+return 'other_holder'
+`;
+
+export const confirmLegacyLiveness = async (redis: Pick<Redis, "eval">, identity: Identity, env: NodeJS.ProcessEnv = process.env): Promise<Identity> => {
   if (identity.source !== "legacy_env") return identity;
+  const name = quoteAgent(identity.agent);
   let reason: string;
   try {
-    if (await redis.exists(SESSION_KEYS.heartbeat(identity.agent)) === 1) return identity;
-    reason = `the pre-record gptqueue MCP server's startup name '${identity.agent}' has no live heartbeat (renamed or closed since)`;
+    const verdict = identity.legacy_server_pid === undefined ? "other_holder" : await redis.eval(LEGACY_OWNER_SCRIPT, 3,
+      SESSION_KEYS.heartbeat(identity.agent), SESSION_KEYS.registry, SESSION_KEYS.agentSessions(identity.agent),
+      String(identity.legacy_server_pid), identity.agent, SESSION_KEYS.session("")) as string;
+    if (verdict === "owned") return identity;
+    reason = verdict === "no_heartbeat"
+      ? `the pre-record gptqueue MCP server's startup name ${name} has no live heartbeat (renamed or closed since)`
+      : `the pre-record gptqueue MCP server's startup name ${name} is now held by another process (renamed since)`;
   } catch (error) {
-    reason = `could not check the pre-record gptqueue MCP server's name '${identity.agent}' (${(error as Error).message})`;
+    reason = `could not check the pre-record gptqueue MCP server's name ${name} (${(error as Error).message})`;
   }
   return Object.freeze({ agent: identity.agent, gptqueue_session_id: null, source: env.GPTQ_AGENT_NAME ? "env" : "derived", note: reason, claude: identity.claude });
 };

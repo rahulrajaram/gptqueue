@@ -142,6 +142,9 @@ export const createPiExtension = (
   let lifecycle = new AbortController();
   let connecting: { readonly life: AbortSignal; readonly promise: Promise<SessionClient> } | undefined;
   let starting: { readonly life: AbortSignal; readonly promise: Promise<void> } | undefined;
+  // The latest bind_runtime call, settled-or-not. A new generation's bind
+  // waits for it, so a superseded bind can never land after a newer one.
+  let bindInFlight: Promise<unknown> | undefined;
   const supersede = () => { generation += 1; lifecycle.abort(); lifecycle = new AbortController(); };
   const superseded = () => new Error("GPTQueue connection attempt superseded");
   const registered = new Set<string>();
@@ -280,7 +283,15 @@ export const createPiExtension = (
       }
       return adapter.activate(request, signal);
     });
-    const result = await withTimeout((signal) => session.callTool({ name: "bind_runtime", arguments: { ...binding } }, undefined, { signal }), timeout);
+    // Serialize binds across generations: the previous one was aborted (its
+    // lifecycle signal) and its client closed by close(); wait until it settles.
+    if (bindInFlight) await bindInFlight;
+    if (life.aborted) throw superseded();
+    // The lifecycle signal aborts this bind as soon as a newer generation starts.
+    const call = withTimeout((signal) => session.callTool({ name: "bind_runtime", arguments: { ...binding } }, undefined, { signal: AbortSignal.any([signal, life]) }), timeout);
+    const settled = call.then(() => undefined, () => undefined);
+    bindInFlight = settled;
+    const result = await call.finally(() => { if (bindInFlight === settled) bindInFlight = undefined; });
     if (life.aborted) throw superseded();
     if (result.isError) {
       const text = result.content.filter((item) => item.type === "text").map((item) => (item as { text: string }).text).join("\n");

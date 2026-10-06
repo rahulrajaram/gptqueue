@@ -103,7 +103,7 @@ describe("Codex runtime hook", () => {
     const records = (await readLog(invalidLogDir)).records;
     expect(records.filter((record) => record.event === "hook_binding_outcome").at(-1)?.outcome).toBe("invalid_hook_input");
     expect(JSON.stringify(records)).not.toContain("not-json");
-  });
+  }, 60_000); // spawns several cold node processes; the 15 s default is too tight on a loaded host
 
   it("retains durable attempt and outcome diagnostics for both hook events without leaking payloads", async () => {
     for (const hookEventName of ["SessionStart", "UserPromptSubmit"] as const) {
