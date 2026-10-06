@@ -16,9 +16,10 @@
  *   GPTQ_CLAUDE_WATCH=off disables that reminder.
  */
 import { readFileSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { ensureRuntimeDir, watcherPidPath, watcherRunning } from "./session-record.js";
-import { isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity, type ProbeResult } from "./inbox-probe.js";
+import { confirmLegacyLiveness, isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity, type ProbeResult } from "./inbox-probe.js";
+import { sessionTag } from "../core/session-tag.js";
 import { writeFileSync } from "node:fs";
 
 export type HookEvent = "session-start" | "stop";
@@ -45,7 +46,8 @@ const CONSUME = "Consume with claim_tasks (max_batch up to 16), act on each task
 
 const identityText = (id: Identity): string => {
   switch (id.source) {
-    case "session_record": return `agent '${id.agent}' (gptqueue session ${id.gptqueue_session_id}, as registered by this session's gptqueue MCP server)`;
+    // SEC-F5: the session id is a bearer credential; hook text lands in model context and transcripts.
+    case "session_record": return `agent '${id.agent}' (gptqueue session ${id.gptqueue_session_id === null ? "unknown" : sessionTag(id.gptqueue_session_id)}, as registered by this session's gptqueue MCP server)`;
     case "legacy_env": return `agent '${id.agent}' (${id.note})`;
     case "env":
     case "derived": return `agent '${id.agent}' (UNCONFIRMED: ${id.note}; source ${id.source})`;
@@ -56,12 +58,13 @@ const identityText = (id: Identity): string => {
 export const countsText = (probe: Extract<ProbeResult, { ok: true }>): string => {
   const c = probe.counts;
   const mine = c.claimed_by_session === null ? "unknown (session not identified)" : String(c.claimed_by_session);
-  return `${c.unclaimed} unclaimed; claimed by this session but not acknowledged: ${mine}; claimed by other sessions: ${c.claimed_by_others}`;
+  const expired = c.expired_by_others > 0 ? ` (${c.expired_by_others} of them in EXPIRED claims: claim_tasks recovers them now)` : "";
+  return `${c.unclaimed} unclaimed; claimed by this session but not acknowledged: ${mine}; claimed by other sessions: ${c.claimed_by_others}${expired}`;
 };
 
 /** Work this session must handle before stopping. */
 export const actionable = (probe: Extract<ProbeResult, { ok: true }>): number =>
-  probe.counts.unclaimed + (probe.counts.claimed_by_session ?? 0);
+  probe.counts.unclaimed + (probe.counts.claimed_by_session ?? 0) + probe.counts.expired_by_others;
 
 export const decideHook = (input: HookInput): HookDecision => {
   const { identity, probe } = input;
@@ -143,9 +146,12 @@ export const runClaudeHook = async (argv: readonly string[], stdin: string, binD
   const claudeSession = typeof json.session_id === "string" && json.session_id ? json.session_id : "unknown";
   const cwd = typeof json.cwd === "string" ? json.cwd : undefined;
   // SessionStart can run before the MCP server has registered; wait briefly for its record.
-  const identity = event === "session-start" ? await waitForIdentity(cwd, recordWaitMs(env, 2000), env) : resolveIdentity(cwd, env);
+  const resolved = event === "session-start" ? await waitForIdentity(cwd, recordWaitMs(env, 2000), env) : resolveIdentity(cwd, env);
   const redis = probeClient(env.REDIS_URL);
-  const probe = await probeInbox(redis, identity.agent, identity.gptqueue_session_id).finally(() => redis.disconnect());
+  const { identity, probe } = await (async () => {
+    const checked = await confirmLegacyLiveness(redis, resolved, env);
+    return { identity: checked, probe: await probeInbox(redis, checked.agent, checked.gptqueue_session_id) };
+  })().finally(() => redis.disconnect());
 
   let dir: string | null = null;
   try { dir = ensureRuntimeDir(env); } catch { /* unsafe dir: no state, no watcher detection */ }
@@ -156,7 +162,7 @@ export const runClaudeHook = async (argv: readonly string[], stdin: string, binD
     probe,
     stopHookActive: json.stop_hook_active === true,
     prior: statePath ? readPrior(statePath) : null,
-    watcherRunning: dir ? watcherRunning(watcherPidPath(dir, claudeSession), identity.agent) : false,
+    watcherRunning: dir ? watcherRunning(watcherPidPath(dir, claudeSession), identity.agent, identity.claude) : false,
     watchPolicy: env.GPTQ_CLAUDE_WATCH === "off" ? "off" : "require",
     watchCommand: watchCommandFor(binDir, claudeSession),
   });
@@ -167,4 +173,9 @@ export const runClaudeHook = async (argv: readonly string[], stdin: string, binD
   return { stdout: renderDecision(event, decision), exitCode: 0 };
 };
 
-export const hookBinDir = (scriptPath: string): string => dirname(scriptPath);
+/**
+ * BC-F6: the directory the hook was invoked from, NOT its realpath: under an
+ * installed runtime that is <prefix>/current/bin, which survives release
+ * switches and prunes, whereas the realpath pins releases/<id>/bin.
+ */
+export const hookBinDir = (scriptPath: string): string => dirname(resolve(scriptPath));

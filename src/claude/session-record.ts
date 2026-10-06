@@ -16,7 +16,7 @@
  * else `<tmpdir>/gptqueue-claude-<uid>`. Created 0700; refused when owned by
  * another user or accessible to group/other.
  */
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -61,6 +61,22 @@ export const runtimeDir = (env: NodeJS.ProcessEnv = process.env): string =>
   env.GPTQ_CLAUDE_RUNTIME_DIR
   || (env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, "gptqueue-claude") : join(tmpdir(), `gptqueue-claude-${process.getuid?.() ?? "user"}`));
 
+/**
+ * Why `dir` is not a safe runtime dir for this uid (lstat, never creates it):
+ * not a real directory, a symlink, another user's, or open to group/other.
+ * Null when safe. Readers must not trust records from an unsafe dir: another
+ * user could have pre-created a predictable <tmpdir> path (SEC-F2).
+ */
+export const unsafeRuntimeDir = (dir: string, uid: number | undefined = process.getuid?.()): string | null => {
+  let stat;
+  try { stat = lstatSync(dir); } catch { return "missing"; }
+  if (stat.isSymbolicLink()) return "is a symlink";
+  if (!stat.isDirectory()) return "not a directory";
+  if (uid !== undefined && stat.uid !== uid) return `owned by uid ${stat.uid}, not ${uid}`;
+  if ((stat.mode & 0o077) !== 0) return `mode ${(stat.mode & 0o777).toString(8)} is open to group/other`;
+  return null;
+};
+
 /** Create (0700) or validate the per-user runtime dir; throws RuntimeDirError when unsafe. */
 export const ensureRuntimeDir = (env: NodeJS.ProcessEnv = process.env): string => {
   const dir = runtimeDir(env);
@@ -68,10 +84,9 @@ export const ensureRuntimeDir = (env: NodeJS.ProcessEnv = process.env): string =
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
   }
-  const stat = lstatSync(dir);
-  const uid = process.getuid?.();
-  if (!stat.isDirectory() || (uid !== undefined && stat.uid !== uid) || (stat.mode & 0o077) !== 0) {
-    throw new RuntimeDirError("runtime_dir_unsafe", `${dir} must be a directory owned by uid ${uid} with mode 0700`);
+  const unsafe = unsafeRuntimeDir(dir);
+  if (unsafe !== null) {
+    throw new RuntimeDirError("runtime_dir_unsafe", `${dir} must be a directory owned by uid ${process.getuid?.()} with mode 0700 (${unsafe})`);
   }
   return dir;
 };
@@ -99,8 +114,28 @@ const writeAtomic = (path: string, body: string): void => {
 };
 
 /**
+ * Read a regular file owned by this uid without following a symlink at the
+ * final component. Null when absent, a symlink, another user's or unreadable.
+ */
+export const readOwnFile = (path: string, uid: number | undefined = process.getuid?.()): string | null => {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { return null; }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || (uid !== undefined && stat.uid !== uid)) return null;
+    return readFileSync(fd, "utf8");
+  } catch { return null; } finally { closeSync(fd); }
+};
+
+/** Agent names a record may carry: bounded, and no characters that could restructure hook text. */
+export const RECORD_AGENT = /^[A-Za-z0-9._:@+-]{1,128}$/;
+
+/**
  * Record (or, with name === null, remove) the identity the server holds for
- * the Claude process `claude`. Returns the record path.
+ * the Claude process `claude`. Returns the record path. Removal is
+ * compare-and-remove (BC-F4): only a record this very server process wrote
+ * (same server_pid and server_start) is deleted, so an old server's late
+ * exit never removes a newer server's record for the same Claude.
  */
 export const publishSessionRecord = (
   claude: Pick<ProcessInfo, "pid" | "start">,
@@ -110,8 +145,12 @@ export const publishSessionRecord = (
   nameOrigin: NonNullable<ClaudeSessionRecord["name_origin"]> = "requested",
 ): string => {
   const path = recordPath(ensureRuntimeDir(env), processKey(claude));
+  const serverStart = readProcess(process.pid)?.start ?? "";
   if (name === null || sessionId === null) {
-    rmSync(path, { force: true });
+    let stored: unknown = null;
+    try { stored = JSON.parse(readOwnFile(path) ?? "null"); } catch { /* unparseable: not ours to judge */ }
+    const own = stored as Partial<ClaudeSessionRecord> | null;
+    if (own && own.server_pid === process.pid && own.server_start === serverStart) rmSync(path, { force: true });
     return path;
   }
   const record: ClaudeSessionRecord = {
@@ -121,7 +160,7 @@ export const publishSessionRecord = (
     claude_pid: claude.pid,
     claude_start: claude.start,
     server_pid: process.pid,
-    server_start: readProcess(process.pid)?.start ?? "",
+    server_start: serverStart,
     written_at: new Date().toISOString(),
     name_origin: nameOrigin,
   };
@@ -131,7 +170,7 @@ export const publishSessionRecord = (
 
 const isRecord = (value: unknown): value is ClaudeSessionRecord => {
   const r = value as Partial<ClaudeSessionRecord> | null;
-  return !!r && r.version === 1 && typeof r.agent === "string" && r.agent.length > 0
+  return !!r && r.version === 1 && typeof r.agent === "string" && RECORD_AGENT.test(r.agent)
     && typeof r.gptqueue_session_id === "string" && typeof r.claude_pid === "number"
     && typeof r.claude_start === "string" && typeof r.server_pid === "number"
     && typeof r.server_start === "string" && r.server_start.length > 0;
@@ -153,10 +192,13 @@ export const findSessionRecord = (
   alive: (pid: number, start: string) => boolean = (pid, start) => processAlive(pid, start),
 ): RecordLookup => {
   const dir = runtimeDir(env);
+  const unsafe = unsafeRuntimeDir(dir);
+  if (unsafe === "missing") return { kind: "none" };
+  if (unsafe !== null) return { kind: "stale", path: dir, reason: `runtime dir ${dir} is unsafe (${unsafe})` };
   for (const info of chain) {
     const path = recordPath(dir, processKey(info));
-    let raw: string;
-    try { raw = readFileSync(path, "utf8"); } catch { continue; }
+    const raw = readOwnFile(path);
+    if (raw === null) continue;
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { return { kind: "stale", path, reason: "unparseable record" }; }
     if (!isRecord(parsed)) return { kind: "stale", path, reason: "invalid record" };
@@ -170,20 +212,37 @@ export const findSessionRecord = (
 export const watcherPidPath = (dir: string, claudeSessionId: string): string =>
   join(dir, `watch-${claudeSessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.pid`);
 
-export type WatcherPid = Readonly<{ pid: number; start: string; agent: string }>;
+/**
+ * A watcher's pidfile. claude_pid/claude_start name the Claude process the
+ * watcher serves (LC-F2): a watcher that outlived its Claude (SIGKILL, OOM)
+ * must not satisfy a resumed session's Stop gate.
+ */
+export type WatcherPid = Readonly<{ pid: number; start: string; agent: string; claude_pid: number | null; claude_start: string | null }>;
 
 export const readWatcherPid = (path: string): WatcherPid | null => {
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<WatcherPid>;
-    return typeof parsed.pid === "number" && typeof parsed.start === "string" && typeof parsed.agent === "string"
-      ? Object.freeze({ pid: parsed.pid, start: parsed.start, agent: parsed.agent }) : null;
+    const parsed = JSON.parse(readOwnFile(path) ?? "null") as Partial<WatcherPid> | null;
+    if (!parsed || typeof parsed.pid !== "number" || typeof parsed.start !== "string" || typeof parsed.agent !== "string") return null;
+    return Object.freeze({
+      pid: parsed.pid, start: parsed.start, agent: parsed.agent,
+      claude_pid: typeof parsed.claude_pid === "number" ? parsed.claude_pid : null,
+      claude_start: typeof parsed.claude_start === "string" ? parsed.claude_start : null,
+    });
   } catch { return null; }
 };
 
 export const writeWatcherPid = (path: string, value: WatcherPid): void => writeAtomic(path, JSON.stringify(value));
 
-/** A watcher counts as running only for the same agent and a live, same-start pid. */
-export const watcherRunning = (path: string, agent: string): boolean => {
+export type ClaudeProcess = Readonly<{ pid: number; start: string }>;
+
+/**
+ * A watcher counts as running only for the same agent, a live same-start
+ * pid, and the caller's own Claude process (same pid and start time). A
+ * caller that cannot name its Claude process never counts one as running.
+ */
+export const watcherRunning = (path: string, agent: string, claude: ClaudeProcess | null): boolean => {
   const pid = readWatcherPid(path);
-  return pid !== null && pid.agent === agent && processAlive(pid.pid, pid.start);
+  return pid !== null && claude !== null && pid.agent === agent
+    && pid.claude_pid === claude.pid && pid.claude_start === claude.start
+    && processAlive(pid.pid, pid.start);
 };

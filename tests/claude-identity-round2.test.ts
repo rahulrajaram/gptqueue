@@ -17,11 +17,11 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { registerTools } from "../src/transports/setup-tools.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
+import { sessionTag } from "../src/core/session-tag.js";
 import { publishSessionRecord, readProcess } from "../src/claude/session-record.js";
 import { waitForIdentity } from "../src/claude/inbox-probe.js";
 import { outagePolicy, parsePeekArgs, watchInbox, WATCH_RECORD_WAIT_MS } from "../src/claude/peek.js";
 import { GptQueueError } from "../src/mcp-server/errors.js";
-import { sessionTag } from "../src/core/session-tag.js";
 import { fallbackCandidates, holdToolCallsUntil, NameExhaustedError, registerClaudeAware, type RegisterDeps } from "../src/claude/mcp-record.js";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
@@ -81,7 +81,7 @@ describe("ID-2/WK-1: SessionStart and the watcher before the MCP record exists",
       { GPTQ_AGENT_NAME: "claude-guess", GPTQ_CLAUDE_RECORD_WAIT_MS: "60000" },
       () => { setTimeout(() => publishSessionRecord(self(), me.name, me.session_id, env), 300); });
     const text = JSON.parse(out.stdout).hookSpecificOutput.additionalContext as string;
-    expect(text).toContain(`agent '${me.name}' (gptqueue session ${me.session_id}`);
+    expect(text).toContain(`agent '${me.name}' (gptqueue session ${sessionTag(me.session_id)}`);
     expect(text).toContain("1 unclaimed");
   });
 
@@ -298,14 +298,14 @@ describe("AGENT_NAME_HELD: bounded fallback chain and old-format lease wait", ()
   };
   const code = (s: Sent) => ((s.result.structuredContent as { error: { code: string } }).error.code);
 
-  it("a registration that never settles answers held calls with AGENT_NOT_REGISTERED after the bound, in order", async () => {
+  it("a registration that never settles answers held calls with REGISTRATION_PENDING (retryable) after the bound, in order", async () => {
     const t = heldTransport();
     holdToolCallsUntil(t.transport, new Promise<void>(() => undefined), 50);
     for (const id of [1, 2, 3]) t.transport.onmessage!({ method: "tools/call", id });
     await new Promise((r) => setTimeout(r, 120));
     expect(t.delivered).toEqual([]);
     expect(t.sent.map((s) => s.id)).toEqual([1, 2, 3]);
-    expect(t.sent.map(code)).toEqual(["AGENT_NOT_REGISTERED", "AGENT_NOT_REGISTERED", "AGENT_NOT_REGISTERED"]);
+    expect(t.sent.map(code)).toEqual(["REGISTRATION_PENDING", "REGISTRATION_PENDING", "REGISTRATION_PENDING"]);
     expect(t.sent[0]!.result.isError).toBe(true);
   });
 
@@ -349,7 +349,7 @@ describe("AGENT_NAME_HELD: bounded fallback chain and old-format lease wait", ()
     holdToolCallsUntil(slow.transport, new Promise<void>((r) => { late = r; }), 30);
     await new Promise((r) => setTimeout(r, 80));
     slow.transport.onmessage!({ method: "tools/call", id: 31 });
-    expect(slow.sent.map((s) => [s.id, code(s)])).toEqual([[31, "AGENT_NOT_REGISTERED"]]);
+    expect(slow.sent.map((s) => [s.id, code(s)])).toEqual([[31, "REGISTRATION_PENDING"]]);
     expect(slow.delivered).toEqual([]);
     // A registration that completes after the timeout lets later calls through.
     late();

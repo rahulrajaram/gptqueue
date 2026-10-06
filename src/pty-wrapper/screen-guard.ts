@@ -60,10 +60,16 @@ const lastIndex = (text: string, patterns: readonly RegExp[]): number => {
   return best;
 };
 
-/** Pure classification of a stripped output tail plus the user's pending input. */
-export const classifyScreen = (tail: string, profile: ScreenProfile, userTyping: boolean): ScreenVerdict => {
+/**
+ * Pure classification of a stripped output tail plus the user's pending input.
+ * `promptFrom`: tail index of the first output drawn after the user's last
+ * keystroke. A prompt marker before it predates that keystroke (Ink redraws
+ * by erasing lines, so an old marker stays in the tail) and proves nothing.
+ */
+export const classifyScreen = (tail: string, profile: ScreenProfile, userTyping: boolean, promptFrom = 0): ScreenVerdict => {
   if (userTyping) return { safe: false, reason: "user_typing" };
-  const prompt = lastIndex(tail, profile.promptMarkers);
+  const marker = lastIndex(tail, profile.promptMarkers);
+  const prompt = marker >= promptFrom ? marker : -1;
   const dialog = lastIndex(tail, profile.dialogMarkers);
   // TUIs redraw in place, so the most recently drawn marker describes the screen.
   if (dialog > prompt) return { safe: false, reason: "dialog" };
@@ -76,9 +82,23 @@ export const classifyScreen = (tail: string, profile: ScreenProfile, userTyping:
 const hasPrintable = (text: string): boolean =>
   [...text].some((ch) => { const code = ch.codePointAt(0) ?? 0; return code >= 0x20 && code !== 0x7f; });
 
+// One user keystroke (or escape sequence) per token. CSI sequences (arrows,
+// bracketed-paste brackets) and ESC+CR (Shift+Enter after /terminal-setup)
+// must be recognised before a bare ESC or CR.
+// eslint-disable-next-line no-control-regex
+const KEY_TOKEN = /\u001b\[[0-?]*[ -/]*[@-~]|\u001bO.|\u001b\r|[\s\S]/gu;
+
 export class ScreenGuard {
   private tail = "";
+  /** Stripped output characters appended so far (monotonic; the tail is its suffix). */
+  private outputPos = 0;
+  /** outputPos at the user's last keystroke (or the last injection). */
+  private inputPos = 0;
   private typing = false;
+  /** Last key of the previous input chunk: keys usually arrive one per chunk. */
+  private lastKey = "";
+  /** Inside a user bracketed paste, CR and LF are pasted text, never a submit. */
+  private pasting = false;
 
   constructor(private readonly profile: ScreenProfile) {}
 
@@ -88,22 +108,43 @@ export class ScreenGuard {
     const cleared = data.lastIndexOf("\u001b[2J");
     const chunk = stripAnsi(cleared >= 0 ? data.slice(cleared) : data);
     this.tail = (cleared >= 0 ? chunk : this.tail + chunk).slice(-TAIL_LIMIT);
+    this.outputPos += chunk.length;
   }
 
-  /** Record keystrokes the user sent to the wrapped program. */
+  /**
+   * Record keystrokes the user sent to the wrapped program. Only a bare CR
+   * submits; backslash+CR, ESC+CR and LF (Ctrl+J) insert a newline into a
+   * multi-line draft, and a lone Esc does not clear Claude's prompt, so none
+   * of them ends `typing` (SEC-F3). Ctrl-C and Ctrl-U abandon the line.
+   */
   onUserInput(data: string): void {
-    // Enter submits, Ctrl-C / Ctrl-U / Esc abandon the line: nothing half-typed remains.
-    const last = Math.max(data.lastIndexOf("\r"), data.lastIndexOf("\n"), data.lastIndexOf("\u0003"), data.lastIndexOf("\u0015"));
-    const rest = last >= 0 ? data.slice(last + 1) : data;
-    if (last >= 0 || rest === "\u001b") this.typing = false;
-    // Only printable text (not bare cursor/escape keys) counts as typing.
-    if (hasPrintable(stripAnsi(rest === "\u001b" ? "" : rest))) this.typing = true;
+    this.inputPos = this.outputPos;
+    for (const key of data.match(KEY_TOKEN) ?? []) {
+      const previous = this.lastKey;
+      this.lastKey = key;
+      if (key === "\u001b[200~") { this.pasting = true; continue; }
+      if (key === "\u001b[201~") { this.pasting = false; continue; }
+      if (this.pasting) { if (hasPrintable(key) || key === "\r" || key === "\n") this.typing = true; continue; }
+      if (key === "\r") {
+        if (previous === "\\" || previous === "\u001b") this.typing = true; // newline insertion
+        else this.typing = false; // submit
+      } else if (key === "\u0003" || key === "\u0015") {
+        this.typing = false;
+      } else if (key === "\n" || key === "\u001b\r") {
+        this.typing = true; // newline insertion: the box is not empty
+      } else if (hasPrintable(key) && !key.startsWith("\u001b")) {
+        this.typing = true; // printable text, not bare cursor/escape keys
+      }
+    }
   }
 
   /** The injected prompt itself is submitted with CR; it leaves no pending input. */
-  onInjected(): void { this.typing = false; }
+  onInjected(): void { this.typing = false; this.lastKey = "\r"; this.inputPos = this.outputPos; }
 
-  verdict(): ScreenVerdict { return classifyScreen(this.tail, this.profile, this.typing); }
+  verdict(): ScreenVerdict {
+    const tailStart = this.outputPos - this.tail.length;
+    return classifyScreen(this.tail, this.profile, this.typing, Math.max(0, this.inputPos - tailStart));
+  }
 }
 
 export type NudgePolicy = Readonly<{ retryMs: number; renudgeMs: number; maxNudges: number }>;

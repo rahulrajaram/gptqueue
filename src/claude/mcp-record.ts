@@ -135,6 +135,35 @@ export const registerClaudeAware = async (
   throw new NameExhaustedError(tried);
 };
 
+/** Whether a registration failure is transient: the same classification (and retryable flag) a tool reply would carry. */
+export const isRetryableRegistrationError = (error: unknown): boolean =>
+  (stableToolError(error).structuredContent as { error?: { retryable?: unknown } }).error?.retryable === true;
+
+export type RetryDeps = Readonly<{ sleep: (ms: number) => Promise<void>; baseMs: number; maxMs: number }>;
+const DEFAULT_RETRY: RetryDeps = Object.freeze({ sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)), baseMs: 500, maxMs: 30_000 });
+
+/**
+ * BC-F1: run `attempt` until it succeeds or fails with a NON-retryable error
+ * (e.g. AGENT_NAME_HELD after every fallback). A retryable failure (Redis
+ * unavailable at startup) is retried in the background with capped
+ * exponential backoff, so it never becomes a permanent refusal; `onRetry`
+ * sees each such failure (the hold gate reports it to waiting calls).
+ */
+export const registerUntilFinal = async <T>(
+  attempt: () => Promise<T>,
+  onRetry: (error: unknown, delayMs: number) => void = () => undefined,
+  deps: RetryDeps = DEFAULT_RETRY,
+): Promise<T> => {
+  for (let failures = 0; ; failures += 1) {
+    try { return await attempt(); } catch (error) {
+      if (!isRetryableRegistrationError(error)) throw error;
+      const delay = Math.min(deps.maxMs, deps.baseMs * 2 ** Math.min(failures, 20));
+      onRetry(error, delay);
+      await deps.sleep(delay);
+    }
+  }
+};
+
 type HeldMessage = { readonly method?: unknown; readonly id?: unknown };
 type MessageTransport<M> = {
   onmessage?: (message: M, extra?: never) => void;
@@ -151,18 +180,24 @@ export const HOLD_TOOL_CALLS_MS = 45_000;
  * tools/list, notifications) passes straight through. Held calls keep their
  * arrival order. If registration succeeds they are delivered; if it fails,
  * or does not settle within `timeoutMs`, each held call is answered with a
- * typed tool error (the registration's own code, or AGENT_NOT_REGISTERED).
+ * typed tool error (the registration's own code, or REGISTRATION_PENDING,
+ * retryable, while no final outcome exists yet).
+ * The gate rejects only on a final (non-retryable) failure; while it keeps
+ * retrying, a timed-out call is answered with the latest transient error
+ * (`lastError`, e.g. REDIS_UNAVAILABLE, retryable: true) and a later success
+ * still turns the gate to ok.
  * If the transport closes first, held calls are dropped, never delivered.
  * Must be called after server.connect() has installed onmessage/onclose.
  */
 export const holdToolCallsUntil = <M>(
   transport: MessageTransport<M>, gate: Promise<unknown>, timeoutMs = HOLD_TOOL_CALLS_MS,
+  lastError: () => unknown = () => null,
 ): void => {
   const deliver = transport.onmessage;
   if (!deliver) return;
   // pending: hold; ok: pass through; refused: answer with the typed error.
-  // No retry happens here (the gate is one registration attempt), but a
-  // registration that completes after the timeout still turns this to ok.
+  // Retries happen behind the gate (registerUntilFinal); a registration that
+  // completes after the timeout still turns this to ok.
   let outcome: { kind: "pending" } | { kind: "ok" } | { kind: "refused"; error: unknown; final: boolean } = { kind: "pending" };
   let closed = false;
   const held: Array<{ message: M; extra?: never }> = [];
@@ -174,8 +209,8 @@ export const holdToolCallsUntil = <M>(
   };
   const timer = setTimeout(() => {
     if (outcome.kind !== "pending") return;
-    const error = new GptQueueError("AGENT_NOT_REGISTERED",
-      `GPTQueue registration did not complete within ${Math.round(timeoutMs / 1000)} s; retry the tool call.`);
+    const error = lastError() ?? new GptQueueError("REGISTRATION_PENDING",
+      `GPTQueue registration is still in progress after ${Math.round(timeoutMs / 1000)} s; retry the tool call shortly.`);
     outcome = { kind: "refused", error, final: false };
     for (const { message } of held.splice(0)) answer(message, error);
   }, timeoutMs);

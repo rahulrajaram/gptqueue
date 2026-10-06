@@ -8,25 +8,34 @@
  *       session record, waiting up to GPTQ_CLAUDE_RECORD_WAIT_MS (default 40000).
  *       Exit 3 on timeout (0 = none), 4 when Redis stays unreachable (session mode only;
  *       with --name it retries at --interval forever, like the old script),
- *       5 when no session record appears.
+ *       5 when no session record appears, 6 when the Claude process the
+ *       watcher serves has exited (checked every block period).
+ *   An explicit --dir D names the inbox derived from D (like the old script):
+ *   it skips the session record and the legacy scan.
  *
  * The watcher waits on the recipient's inbox-events stream (XREAD BLOCK, the
  * stream every send appends to in the same Lua call as the RPUSH) and
  * re-checks LLEN after each wake or block timeout, so requeued/recovered mail
- * that emits no event is still seen within one block period. With --session
+ * that emits no event is still seen within one block period. An expired
+ * claim (claim-index score < Redis TIME) also counts as mail: nothing else
+ * recovers a replaced session's expired claims while this session is idle,
+ * and claim_tasks recovers them (COR-F3). With --session
  * it writes a pidfile the Stop hook uses to tell whether a watcher is running.
  */
 import { Redis } from "ioredis";
 import { rmSync } from "node:fs";
-import { SESSION_KEYS } from "../core/keys.js";
-import { isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity } from "./inbox-probe.js";
-import { ensureRuntimeDir, readProcess, readWatcherPid, watcherPidPath, writeWatcherPid } from "./session-record.js";
+import { CLAIM_KEYS, SESSION_KEYS } from "../core/keys.js";
+import { confirmLegacyLiveness, isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity } from "./inbox-probe.js";
+import { resolveAgentName } from "./agent-name.js";
+import { ensureRuntimeDir, processAlive, readProcess, readWatcherPid, watcherPidPath, writeWatcherPid, type ClaudeProcess } from "./session-record.js";
 
 const USAGE = `Non-consuming gptqueue inbox check; never pops a message.
   gptqueue-inbox-peek [--name N] [--dir D] [--json]          print the pending count
   gptqueue-inbox-peek --watch [--name N] [--session ID] [--interval S] [--timeout S]
       wait until the inbox is non-empty, print one JSON line, exit 0.
-      Exit 3 on timeout (0 = no timeout), 2 on bad arguments.
+      Exit 3 on timeout (0 = no timeout), 2 on bad arguments, 6 when this
+      session's Claude process is gone.
+  --dir D selects the inbox derived from D, ignoring this session's record.
 `;
 
 type PeekArgs = Readonly<{ intervalSec: number; name: string | null; dir: string | null; watch: boolean; json: boolean; session: string | null; timeoutSec: number; blockMs: number }>;
@@ -74,13 +83,21 @@ export const WATCH_RECORD_WAIT_MS = 40_000;
 export const outagePolicy = (args: Pick<PeekArgs, "name" | "intervalSec">): Readonly<{ giveUpAfterMs: number | null; retryMs: number }> =>
   args.name !== null ? { giveUpAfterMs: null, retryMs: args.intervalSec * 1000 } : { giveUpAfterMs: 30_000, retryMs: 1000 };
 
+/** Queue length and expired-claim count in one atomic read, against Redis TIME. */
+const WATCH_SCRIPT = `
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+return { redis.call('LLEN', KEYS[1]), redis.call('ZCOUNT', KEYS[2], '-inf', '(' .. now) }
+`;
+
 export type WatchOutcome =
-  | Readonly<{ kind: "mail"; pending: number }>
+  | Readonly<{ kind: "mail"; pending: number; expired: number }>
+  | Readonly<{ kind: "orphaned" }>
   | Readonly<{ kind: "timeout" }>
   | Readonly<{ kind: "unavailable"; message: string }>;
 
 /** Wait for unclaimed mail. Non-consuming: only XREVRANGE, LLEN and XREAD. */
-export const watchInbox = async (url: string, agent: string, opts: Readonly<{ timeoutSec: number; blockMs: number; signal?: AbortSignal; giveUpAfterMs: number | null; retryMs: number }>): Promise<WatchOutcome> => {
+export const watchInbox = async (url: string, agent: string, opts: Readonly<{ timeoutSec: number; blockMs: number; signal?: AbortSignal; giveUpAfterMs: number | null; retryMs: number; ownerAlive?: () => boolean }>): Promise<WatchOutcome> => {
   const deadline = opts.timeoutSec > 0 ? Date.now() + opts.timeoutSec * 1000 : Infinity;
   const redis = new Redis(url, { maxRetriesPerRequest: 1, connectTimeout: 2000, retryStrategy: (n) => Math.min(n * 200, 1000) });
   redis.on("error", () => undefined);
@@ -88,12 +105,14 @@ export const watchInbox = async (url: string, agent: string, opts: Readonly<{ ti
   let after: string | null = null;
   try {
     while (!opts.signal?.aborted) {
+      // LC-F2: a watcher whose Claude process is gone wakes nobody; exit instead of lingering.
+      if (opts.ownerAlive && !opts.ownerAlive()) return { kind: "orphaned" };
       try {
         // Read the stream position BEFORE LLEN: the send appends both in one
         // Lua call, so a message is either counted or wakes the XREAD.
         after ??= await latestId(redis, agent);
-        const pending = await redis.llen(SESSION_KEYS.queue(agent));
-        if (pending > 0) return { kind: "mail", pending };
+        const [pending, expired] = await redis.eval(WATCH_SCRIPT, 2, SESSION_KEYS.queue(agent), CLAIM_KEYS.index(agent)) as [number, number];
+        if (pending > 0 || expired > 0) return { kind: "mail", pending, expired };
         const remaining = deadline - Date.now();
         if (remaining <= 0) return { kind: "timeout" };
         const result = await redis.xread("BLOCK", Math.max(1, Math.min(opts.blockMs, remaining)), "STREAMS", SESSION_KEYS.inboxEvents(agent), after) as [string, [string, string[]][]][] | null;
@@ -115,19 +134,30 @@ export const runPeek = async (argv: readonly string[], env: NodeJS.ProcessEnv = 
   if (args === "help") { process.stdout.write(USAGE); return 0; }
   if (typeof args === "string") { process.stderr.write(`${args}\n`); return 2; }
   const url = env.REDIS_URL || "redis://127.0.0.1:6379/0";
-  // An explicit --dir wins over the Claude project dir for the derived fallback name.
-  if (args.dir) env = { ...env, CLAUDE_PROJECT_DIR: "" };
-  // A watcher without --name must watch this session's registered inbox, never
-  // a guessed one: wait (bounded) for the session record, else fail clearly.
-  const identity = args.name
-    ? Object.freeze({ agent: args.name, gptqueue_session_id: null, source: "env" as const, note: "name given with --name" })
-    : args.watch ? await waitForIdentity(args.dir ?? undefined, recordWaitMs(env, WATCH_RECORD_WAIT_MS), env) : resolveIdentity(args.dir ?? undefined, env);
-  if (args.watch && !args.name && !isConfirmed(identity)) {
+  // The session's own identity (record or legacy server), used for the
+  // session id and the owning Claude process even when a name is explicit.
+  const own = (): Identity => resolveIdentity(undefined, env);
+  // An explicit --name or --dir names the inbox: like the old script, --dir
+  // derives the name from D and skips session-record and legacy resolution (BC-F3).
+  // A watcher without either must watch this session's registered inbox,
+  // never a guessed one: wait (bounded) for the session record, else fail clearly.
+  const explicitName = args.name ?? (args.dir !== null ? resolveAgentName(args.dir, { ...env, GPTQ_AGENT_NAME: "" }) : null);
+  const resolved: Identity = explicitName !== null
+    ? Object.freeze({ agent: explicitName, gptqueue_session_id: null, source: "env" as const, note: args.name !== null ? "name given with --name" : `name derived from --dir ${args.dir}`, claude: null })
+    : args.watch ? await waitForIdentity(undefined, recordWaitMs(env, WATCH_RECORD_WAIT_MS), env) : resolveIdentity(undefined, env);
+  const identity = explicitName !== null ? resolved : await (async () => {
+    const redis = probeClient(url);
+    try { return await confirmLegacyLiveness(redis, resolved, env); } finally { redis.disconnect(); }
+  })();
+  if (args.watch && explicitName === null && !isConfirmed(identity)) {
     process.stdout.write(`${JSON.stringify({ error: "session_identity_unconfirmed", message: `no gptqueue session record for this Claude session (${identity.note}); not watching a guessed mailbox` })}\n`);
     return 5;
   }
-  // --name skips identity lookup, but this session's claims still need its session id.
-  const sessionId = args.name ? (() => { const id = resolveIdentity(args.dir ?? undefined, env); return id.agent === args.name ? id.gptqueue_session_id : null; })() : identity.gptqueue_session_id;
+  // An explicit name skips identity lookup, but this session's claims (and
+  // its watcher's owner) still come from the session's own identity.
+  const self = explicitName !== null ? own() : identity;
+  const sessionId = explicitName !== null ? (self.agent === explicitName ? self.gptqueue_session_id : null) : identity.gptqueue_session_id;
+  const owner: ClaudeProcess | null = self.claude;
   if (!args.watch) {
     const redis = probeClient(url);
     const probe = await probeInbox(redis, identity.agent, sessionId).finally(() => redis.disconnect());
@@ -139,16 +169,17 @@ export const runPeek = async (argv: readonly string[], env: NodeJS.ProcessEnv = 
   let pidPath: string | null = null;
   if (args.session) {
     pidPath = watcherPidPath(ensureRuntimeDir(env), args.session);
-    writeWatcherPid(pidPath, { pid: process.pid, start: readProcess(process.pid)?.start ?? "", agent: identity.agent });
+    writeWatcherPid(pidPath, { pid: process.pid, start: readProcess(process.pid)?.start ?? "", agent: identity.agent, claude_pid: owner?.pid ?? null, claude_start: owner?.start ?? null });
   }
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   try {
-    const outcome = await watchInbox(url, identity.agent, { timeoutSec: args.timeoutSec, blockMs: args.blockMs, signal: controller.signal, ...outagePolicy(args) });
+    const outcome = await watchInbox(url, identity.agent, { timeoutSec: args.timeoutSec, blockMs: args.blockMs, signal: controller.signal, ...outagePolicy({ name: explicitName, intervalSec: args.intervalSec }), ...(owner ? { ownerAlive: () => processAlive(owner.pid, owner.start) } : {}) });
     switch (outcome.kind) {
-      case "mail": process.stdout.write(`${JSON.stringify({ agent: identity.agent, pending: outcome.pending, at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z") })}\n`); return 0;
+      case "mail": process.stdout.write(`${JSON.stringify({ agent: identity.agent, pending: outcome.pending, ...(outcome.expired > 0 ? { expired_claims: outcome.expired } : {}), at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z") })}\n`); return 0;
+      case "orphaned": process.stdout.write(`${JSON.stringify({ agent: identity.agent, error: "claude_process_gone", message: `Claude process ${owner?.pid ?? "?"} that this watcher serves has exited` })}\n`); return 6;
       case "timeout": process.stdout.write(`${JSON.stringify({ agent: identity.agent, pending: 0, timeout: true })}\n`); return 3;
       case "unavailable": process.stdout.write(`${JSON.stringify({ agent: identity.agent, error: "redis_unavailable", message: outcome.message })}\n`); return 4;
       default: { const unreachable: never = outcome; throw new Error(String(unreachable)); }

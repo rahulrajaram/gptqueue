@@ -46,7 +46,7 @@ describe("legacy identity from the old MCP server's environment", () => {
     const identity = resolveIdentity("/x", { GPTQ_AGENT_NAME: "guess" }, recordNone, () => found);
     expect(identity).toMatchObject({ agent: "claude-a", source: "legacy_env" });
     const decision = decideHook({ event: "stop", identity, stopHookActive: false, prior: null, watcherRunning: true, watchPolicy: "require", watchCommand: "w",
-      probe: { ok: true, counts: { unclaimed: 2, claimed_by_session: null, claimed_by_others: 0, latest_event_id: "1-0" } } });
+      probe: { ok: true, counts: { unclaimed: 2, claimed_by_session: null, claimed_by_others: 0, expired_by_others: 0, latest_event_id: "1-0" } } });
     expect(decision.kind).toBe("block");
     expect(decision.kind === "block" && decision.reason).toMatch(/gptqueue inbox for agent 'claude-a' \(confirmed from the environment of this session's pre-record gptqueue MCP server \(pid 110\)\): 2 unclaimed/);
   });
@@ -60,7 +60,7 @@ describe("legacy identity from the old MCP server's environment", () => {
     expect(identity.source).toBe("env");
     expect(identity.note).toMatch(/2 legacy gptqueue MCP servers/);
     const decision = decideHook({ event: "stop", identity, stopHookActive: false, prior: null, watcherRunning: true, watchPolicy: "require", watchCommand: "w",
-      probe: { ok: true, counts: { unclaimed: 2, claimed_by_session: null, claimed_by_others: 0, latest_event_id: "1-0" } } });
+      probe: { ok: true, counts: { unclaimed: 2, claimed_by_session: null, claimed_by_others: 0, expired_by_others: 0, latest_event_id: "1-0" } } });
     expect(decision.kind).toBe("allow");
   });
 

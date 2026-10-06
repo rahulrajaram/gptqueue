@@ -41,12 +41,56 @@ describe("PTY screen guard (WK-9)", () => {
     g.onUserInput("fix the te");
     expect(g.verdict()).toEqual({ safe: false, reason: "user_typing" });
     g.onUserInput("st\r");
+    // Changed for SEC-F3: the marker drawn before the keystrokes no longer
+    // proves an empty prompt; Claude must redraw it after the submit.
+    expect(g.verdict()).toEqual({ safe: false, reason: "no_prompt_marker" });
+    g.onOutput(IDLE_PROMPT);
     expect(g.verdict()).toEqual({ safe: true });
     g.onUserInput("draft");
     g.onUserInput("\u0015"); // Ctrl-U clears the line
+    g.onOutput(IDLE_PROMPT);
     expect(g.verdict().safe).toBe(true);
-    g.onUserInput(`${ESC}[A`); // arrow key is not typing
+    g.onUserInput(`${ESC}[A`); // arrow key is not typing (but may recall history: wait for a redraw)
+    expect(g.verdict()).toEqual({ safe: false, reason: "no_prompt_marker" });
+    g.onOutput(IDLE_PROMPT);
     expect(g.verdict().safe).toBe(true);
+  });
+
+  it("SEC-F3: a multi-line draft stays 'typing' across newline-insertion keys until a bare CR submits", () => {
+    for (const newline of [["\\", "\r"], ["\\\r"], [`${ESC}\r`], ["\n"]]) {
+      const g = new ScreenGuard(CLAUDE_PROFILE);
+      g.onOutput(IDLE_PROMPT);
+      g.onUserInput("refactor the auth module so that");
+      for (const key of newline) g.onUserInput(key);
+      expect(g.verdict(), JSON.stringify(newline)).toEqual({ safe: false, reason: "user_typing" });
+      g.onUserInput("\r"); // bare Enter submits
+      g.onOutput(IDLE_PROMPT);
+      expect(g.verdict(), JSON.stringify(newline)).toEqual({ safe: true });
+    }
+  });
+
+  it("SEC-F3: Esc with text pending keeps 'typing'; a pasted CR is text, not a submit", () => {
+    const g = new ScreenGuard(CLAUDE_PROFILE);
+    g.onOutput(IDLE_PROMPT);
+    g.onUserInput("half a thought");
+    g.onUserInput(ESC);
+    expect(g.verdict()).toEqual({ safe: false, reason: "user_typing" });
+    const p = new ScreenGuard(CLAUDE_PROFILE);
+    p.onOutput(IDLE_PROMPT);
+    p.onUserInput(`${ESC}[200~line one\rline two${ESC}[201~`);
+    expect(p.verdict()).toEqual({ safe: false, reason: "user_typing" });
+  });
+
+  it("SEC-F3: a prompt marker drawn before the user's last keystroke is stale, even without a full clear", () => {
+    const g = new ScreenGuard(CLAUDE_PROFILE);
+    g.onOutput(IDLE_PROMPT);
+    g.onUserInput("x");
+    g.onUserInput("\u007f"); // backspace: typing state unknown, but no redraw yet
+    g.onOutput(`${ESC}[2K${ESC}[1A${ESC}[2K│ > x                       │\r\n`); // Ink erase-lines redraw, no marker
+    g.onUserInput("\r");
+    expect(g.verdict()).toEqual({ safe: false, reason: "no_prompt_marker" });
+    g.onOutput(`${ESC}[2K  ${ESC}[2m? for shortcuts${ESC}[22m\r\n`);
+    expect(g.verdict()).toEqual({ safe: true });
   });
 
   it("an unknown CLI fails closed: a quiet unfamiliar screen is never injected", () => {

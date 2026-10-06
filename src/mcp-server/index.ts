@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { RedisClient } from "./redis-client.js";
 import { GPTQUEUE_INSTRUCTIONS, registerTools } from "../transports/setup-tools.js";
 import { VERSION } from "../version.js";
-import { holdToolCallsUntil, registerClaudeAware, startClaudeSessionRecord } from "../claude/mcp-record.js";
+import { holdToolCallsUntil, registerClaudeAware, registerUntilFinal, startClaudeSessionRecord } from "../claude/mcp-record.js";
 
 // Name comes from CLI arg or env var. If neither, starts unregistered.
 const initialName = process.argv[2] || process.env.GPTQ_AGENT_NAME || null;
@@ -27,10 +27,18 @@ const claudeRecord = startClaudeSessionRecord(redisClient);
 // Under Claude, registration may wait up to a lease TTL for an old-format
 // holder (ID-3), longer than Claude should wait for MCP startup, so it runs in
 // the background: initialize is answered at once and tool calls wait for it.
+// A transient failure (Redis unavailable) is retried in the background with
+// capped backoff, so it never becomes a permanent refusal (BC-F1).
+let lastRegistrationError: unknown = null;
 const registration: Promise<unknown> = !initialName
   ? Promise.resolve()
   : claudeRecord
-    ? registerClaudeAware(redisClient, initialName, process.env, undefined, (origin) => claudeRecord.setOrigin(origin))
+    ? registerUntilFinal(
+      () => registerClaudeAware(redisClient, initialName, process.env, undefined, (origin) => claudeRecord.setOrigin(origin)),
+      (error, delayMs) => {
+        lastRegistrationError = error;
+        process.stderr.write(`${JSON.stringify({ event: "startup_registration_retry", message: (error as Error).message, delay_ms: delayMs })}\n`);
+      })
     : registerClaudeAware(redisClient, initialName);
 if (!claudeRecord) await registration;
 registration.catch((error: unknown) => {
@@ -65,5 +73,5 @@ process.stdin.on("close", shutdown);
 // Start
 const transport = new StdioServerTransport();
 await server.connect(transport);
-if (claudeRecord) holdToolCallsUntil(transport, registration);
+if (claudeRecord) holdToolCallsUntil(transport, registration, undefined, () => lastRegistrationError);
 server.server.onclose = () => void shutdown();

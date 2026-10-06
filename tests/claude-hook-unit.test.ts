@@ -13,7 +13,7 @@ afterEach(async () => { await Promise.all(dirs.splice(0).map((d) => rm(d, { recu
 const temp = async () => { const d = await mkdtemp(join(tmpdir(), "gptq-claude-unit-")); dirs.push(d); return d; };
 
 const ok = (unclaimed: number, mine: number | null = 0, others = 0, latest: string | null = "1-0"): ProbeResult =>
-  ({ ok: true, counts: { unclaimed, claimed_by_session: mine, claimed_by_others: others, latest_event_id: latest } });
+  ({ ok: true, counts: { unclaimed, claimed_by_session: mine, claimed_by_others: others, expired_by_others: 0, latest_event_id: latest } });
 const recorded = { agent: "claude-held", gptqueue_session_id: "s-1", source: "session_record", note: null } as const;
 const base = (over: Partial<HookInput> = {}): HookInput => ({
   event: "stop", identity: recorded, probe: ok(0), stopHookActive: false, prior: null,
@@ -82,8 +82,8 @@ describe("session record (ID-2)", () => {
 describe("claim tally (AC-4)", () => {
   it("splits this session's claimed tasks from other sessions' and ignores corrupt entries", () => {
     const claims = [JSON.stringify({ session_id: "me", tasks: ["a", "b"] }), JSON.stringify({ session_id: "other", tasks: ["c"] }), "{bad", null];
-    expect(tallyClaims(claims, "me")).toEqual({ mine: 2, others: 1 });
-    expect(tallyClaims(claims, null)).toEqual({ mine: null, others: 3 });
+    expect(tallyClaims(claims, "me")).toEqual({ mine: 2, others: 1, expiredOthers: 0 });
+    expect(tallyClaims(claims, null)).toEqual({ mine: null, others: 3, expiredOthers: 0 });
   });
 });
 

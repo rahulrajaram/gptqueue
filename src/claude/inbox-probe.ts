@@ -6,7 +6,7 @@
  */
 import { Redis } from "ioredis";
 import { CLAIM_KEYS, SESSION_KEYS } from "../core/keys.js";
-import { ancestry, findSessionRecord, type RecordLookup } from "./session-record.js";
+import { ancestry, findSessionRecord, readProcess, type ClaudeProcess, type RecordLookup } from "./session-record.js";
 import { findLegacyIdentity, type LegacyLookup } from "./legacy-identity.js";
 import { resolveAgentName } from "./agent-name.js";
 
@@ -17,6 +17,12 @@ export type InboxCounts = Readonly<{
   claimed_by_session: number | null;
   /** Tasks held by unacknowledged claims of any other session (or of any session when ours is unknown). */
   claimed_by_others: number;
+  /**
+   * Tasks in other sessions' claims whose lease already expired (claim-index
+   * score < Redis TIME), included in claimed_by_others. A crashed or replaced
+   * session's work: claim_tasks recovers it now, so it is actionable (COR-F3).
+   */
+  expired_by_others: number;
   /** Newest inbox-events stream id, or null when the stream is empty. */
   latest_event_id: string | null;
 }>;
@@ -28,16 +34,18 @@ export type ProbeResult =
 
 type StoredClaim = { session_id?: unknown; tasks?: unknown };
 
-export const tallyClaims = (raw: readonly (string | null)[], sessionId: string | null): Readonly<{ mine: number | null; others: number }> => {
-  let mine = 0, others = 0;
-  for (const value of raw) {
-    if (value === null) continue;
+export const tallyClaims = (raw: readonly (string | null)[], sessionId: string | null, expired: readonly boolean[] = []): Readonly<{ mine: number | null; others: number; expiredOthers: number }> => {
+  let mine = 0, others = 0, expiredOthers = 0;
+  raw.forEach((value, index) => {
+    if (value === null) return;
     let claim: StoredClaim;
-    try { claim = JSON.parse(value) as StoredClaim; } catch { continue; }
+    try { claim = JSON.parse(value) as StoredClaim; } catch { return; }
     const size = Array.isArray(claim.tasks) ? claim.tasks.length : 0;
-    if (sessionId !== null && claim.session_id === sessionId) mine += size; else others += size;
-  }
-  return Object.freeze({ mine: sessionId === null ? null : mine, others });
+    if (sessionId !== null && claim.session_id === sessionId) { mine += size; return; }
+    others += size;
+    if (expired[index] === true) expiredOthers += size;
+  });
+  return Object.freeze({ mine: sessionId === null ? null : mine, others, expiredOthers });
 };
 
 /**
@@ -48,20 +56,25 @@ export const tallyClaims = (raw: readonly (string | null)[], sessionId: string |
  */
 export const PROBE_SCRIPT = `
 local n = redis.call('LLEN', KEYS[1])
-local ids = redis.call('ZRANGE', KEYS[2], 0, -1)
-local raws = {}
-for i, id in ipairs(ids) do raws[i] = redis.call('HGET', KEYS[3], id) or '' end
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local ids = redis.call('ZRANGE', KEYS[2], 0, -1, 'WITHSCORES')
+local raws, expired = {}, {}
+for i = 1, #ids, 2 do
+  raws[#raws + 1] = redis.call('HGET', KEYS[3], ids[i]) or ''
+  expired[#expired + 1] = (tonumber(ids[i + 1]) < now) and 1 or 0
+end
 local latest = redis.call('XREVRANGE', KEYS[4], '+', '-', 'COUNT', 1)
 local lid = ''
 if latest[1] then lid = latest[1][1] end
-return { n, lid, raws }
+return { n, lid, raws, expired }
 `;
 
 export const probeInbox = async (redis: Redis, agent: string, sessionId: string | null): Promise<ProbeResult> => {
   try {
-    const [unclaimed, latest, raw] = await redis.eval(PROBE_SCRIPT, 4, SESSION_KEYS.queue(agent), CLAIM_KEYS.index(agent), CLAIM_KEYS.claims, SESSION_KEYS.inboxEvents(agent)) as [number, string, string[]];
-    const { mine, others } = tallyClaims(raw.map((value) => value === "" ? null : value), sessionId);
-    return Object.freeze({ ok: true, counts: Object.freeze({ unclaimed, claimed_by_session: mine, claimed_by_others: others, latest_event_id: latest === "" ? null : latest }) });
+    const [unclaimed, latest, raw, expiredFlags] = await redis.eval(PROBE_SCRIPT, 4, SESSION_KEYS.queue(agent), CLAIM_KEYS.index(agent), CLAIM_KEYS.claims, SESSION_KEYS.inboxEvents(agent)) as [number, string, string[], number[]];
+    const { mine, others, expiredOthers } = tallyClaims(raw.map((value) => value === "" ? null : value), sessionId, expiredFlags.map((flag) => flag === 1));
+    return Object.freeze({ ok: true, counts: Object.freeze({ unclaimed, claimed_by_session: mine, claimed_by_others: others, expired_by_others: expiredOthers, latest_event_id: latest === "" ? null : latest }) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const unavailable = /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|Connection is closed|max retries|connect/i.test(message);
@@ -87,6 +100,8 @@ export type Identity = Readonly<{
   source: IdentitySource;
   /** Why no session record was used, when source is not session_record. */
   note: string | null;
+  /** The Claude process this identity belongs to, when known (ties the watcher to it, LC-F2). */
+  claude: ClaudeProcess | null;
 }>;
 
 /**
@@ -103,13 +118,14 @@ export const resolveIdentity = (
   const chain = lookup && legacy ? [] : ancestry(env.GPTQ_CLAUDE_PID ? Number(env.GPTQ_CLAUDE_PID) : process.pid);
   const found = lookup ?? findSessionRecord(chain, env);
   if (found.kind === "found") {
-    return Object.freeze({ agent: found.record.agent, gptqueue_session_id: found.record.gptqueue_session_id, source: "session_record", note: null });
+    return Object.freeze({ agent: found.record.agent, gptqueue_session_id: found.record.gptqueue_session_id, source: "session_record", note: null, claude: Object.freeze({ pid: found.record.claude_pid, start: found.record.claude_start }) });
   }
   // A running session started before session records existed: its old MCP
   // server (a direct child of this Claude) carries the name it registered.
   const old = legacy ? legacy() : env.GPTQ_CLAUDE_LEGACY_SCAN === "off" ? { kind: "none" as const } : findLegacyIdentity(chain);
   if (old.kind === "confirmed") {
-    return Object.freeze({ agent: old.agent, gptqueue_session_id: null, source: "legacy_env", note: `confirmed from the environment of this session's pre-record gptqueue MCP server (pid ${old.server_pid})` });
+    const claude = readProcess(old.claude_pid);
+    return Object.freeze({ agent: old.agent, gptqueue_session_id: null, source: "legacy_env", note: `confirmed from the environment of this session's pre-record gptqueue MCP server (pid ${old.server_pid})`, claude: claude ? Object.freeze({ pid: claude.pid, start: claude.start }) : null });
   }
   const ambiguity = old.kind === "ambiguous" ? `; ${old.agents.length} legacy gptqueue MCP servers under pid ${old.claude_pid} (${old.agents.join(", ")})` : "";
   const note = (found.kind === "stale"
@@ -120,7 +136,27 @@ export const resolveIdentity = (
     gptqueue_session_id: null,
     source: env.GPTQ_AGENT_NAME ? "env" : "derived",
     note,
+    claude: null,
   });
+};
+
+/**
+ * BC-F2: a legacy server's environ is fixed at exec, but it may since have
+ * renamed (register_agent) or closed its session. Both delete
+ * gptq:heartbeat:<old name>, which a live old server refreshes, so legacy_env
+ * stays confirmed only while that heartbeat exists; otherwise (or when Redis
+ * cannot say) the identity is downgraded to UNCONFIRMED. Other sources pass through.
+ */
+export const confirmLegacyLiveness = async (redis: Pick<Redis, "exists">, identity: Identity, env: NodeJS.ProcessEnv = process.env): Promise<Identity> => {
+  if (identity.source !== "legacy_env") return identity;
+  let reason: string;
+  try {
+    if (await redis.exists(SESSION_KEYS.heartbeat(identity.agent)) === 1) return identity;
+    reason = `the pre-record gptqueue MCP server's startup name '${identity.agent}' has no live heartbeat (renamed or closed since)`;
+  } catch (error) {
+    reason = `could not check the pre-record gptqueue MCP server's name '${identity.agent}' (${(error as Error).message})`;
+  }
+  return Object.freeze({ agent: identity.agent, gptqueue_session_id: null, source: env.GPTQ_AGENT_NAME ? "env" : "derived", note: reason, claude: identity.claude });
 };
 
 /**

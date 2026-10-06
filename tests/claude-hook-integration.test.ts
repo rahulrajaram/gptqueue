@@ -13,6 +13,7 @@ import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { publishSessionRecord, readProcess, watcherPidPath } from "../src/claude/session-record.js";
 import { probeClient, probeInbox } from "../src/claude/inbox-probe.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
+import { sessionTag } from "../src/core/session-tag.js";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 const BIN = resolve(__dirname, "..", "bin");
@@ -69,7 +70,7 @@ describe("Claude hook against Redis", { timeout: 300_000 }, () => {
     record(held.name, held.session_id);
     const after = await hook("stop", { session_id: randomUUID() });
     expect(JSON.parse(after.stdout)).toMatchObject({ decision: "block" });
-    expect(after.stdout).toContain(`agent '${held.name}' (gptqueue session ${held.session_id}`);
+    expect(after.stdout).toContain(`agent '${held.name}' (gptqueue session ${sessionTag(held.session_id)}`);
     expect(after.stdout).toContain("1 unclaimed");
   });
 
