@@ -6,7 +6,7 @@ const makeClient = () => {
   let handler: any;
   const client: SessionClient & { handler?: any } = {
     listTools: vi.fn(async () => catalog),
-    callTool: vi.fn(async () => ({ content: [{ type: "text", text: "ok" }], structuredContent: { activation_ready: true } })),
+    callTool: vi.fn(async () => ({ content: [{ type: "text", text: "ok" }], structuredContent: { activation_ready: true } })) as unknown as SessionClient["callTool"],
     getInstructions: () => "instructions",
     setActivationHandler: (value) => { handler = value; client.handler = handler; },
     close: vi.fn(async () => {}),
@@ -18,7 +18,7 @@ const fakePi = () => {
   const handlers = new Map<string, any>(); const entries: any[] = []; let current = { cwd: "/tmp/project", sessionManager: { getSessionId: () => "session-1", getEntries: () => entries } };
   const pi = {
     registerTool: vi.fn(), on: vi.fn((name, handler) => handlers.set(name, handler)), getActiveTools: vi.fn(() => [...GPTQUEUE_TOOLS, ...SHELL_TOOLS]), setActiveTools: vi.fn(),
-    sendMessage: vi.fn(), appendEntry: vi.fn(), getContext: () => current,
+    sendMessage: vi.fn(), appendEntry: vi.fn(),
   } satisfies PiAPI;
   return { pi, handlers, context: () => current, entries, switchSession: (id: string, cwd = current.cwd) => { current = { ...current, cwd, sessionManager: { ...current.sessionManager, getSessionId: () => id } }; }, setCwd: (cwd: string) => { current = { ...current, cwd }; } };
 };

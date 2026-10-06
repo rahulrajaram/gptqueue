@@ -161,7 +161,7 @@ describe("Codex runtime hook", () => {
   });
 
   it("reports a legacy loaded connection without retrying or echoing payloads, with the exact RPC contract", async () => {
-    const request = vi.fn(async () => ({ isError: true, content: [{ type: "text", text: "Tool bind_runtime not found" }] }));
+    const request = vi.fn(async (_method: string, _params: unknown) => ({ isError: true, content: [{ type: "text", text: "Tool bind_runtime not found" }] }));
     const unavailable = vi.fn();
     expect(await bindCodexHook({ session_id: session, cwd: "/tmp", hook_event_name: "UserPromptSubmit" },
       { request, close: async () => {} }, { onUnavailable: unavailable })).toBe(false);

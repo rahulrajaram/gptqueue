@@ -158,7 +158,7 @@ export class CodexSocketClient {
       if (message.id === undefined && typeof message.method === "string") {
         // Notifications are delivered to current listeners only, never buffered.
         const params = message.params && typeof message.params === "object" ? message.params as Record<string, unknown> : {};
-        for (const listener of [...this.listeners]) { try { listener({ method: message.method, params }); } catch { /* isolated */ } }
+        for (const listener of Array.from(this.listeners)) { try { listener({ method: message.method, params }); } catch { /* isolated */ } }
         continue;
       }
       if (typeof message.id !== "number") continue;

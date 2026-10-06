@@ -35,9 +35,14 @@ export async function startOwnedRedis({ readyTimeoutMs = 10_000, stderr = "inher
     "--dir", dir, "--protected-mode", "yes",
   ], { stdio: ["ignore", "pipe", stderr] });
   const stop = () => {
+    process.off("exit", stop);
     if (redis.exitCode === null && redis.signalCode === null) redis.kill("SIGTERM");
     rmSync(dir, { recursive: true, force: true });
   };
+  // No redis-server outlives its owner: any process.exit() (or a natural exit
+  // with stop() never called) still stops it. Signals need their own handlers
+  // in the owner; a default-action signal skips "exit".
+  process.once("exit", stop);
   try {
     await waitForReady(redis, readyTimeoutMs);
   } catch (error) {

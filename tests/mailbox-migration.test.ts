@@ -501,7 +501,7 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
     // The just-created replacement session was rolled back.
     expect(createdSessionId).not.toBeNull();
     expect(
-      await client.sessions.getSession(createdSessionId as string)
+      await client.sessions.getSession(createdSessionId as unknown as string)
     ).toBeNull();
     expect(await redis.smembers(SESSION_KEYS.agentSessions("new-name"))).toEqual(
       []

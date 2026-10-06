@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { CodexThreadReader, userMessageMatches } from "../src/registered-shell/codex-history.js";
 
+/** The shape these tests read from CodexThreadReader.read (typed as a plain record). */
+type ReadTurns = { turns: Array<{ status?: string; items?: unknown[] }> };
+
 const dirs: string[] = [];
 const binding = (path: string, id = "thread-1") => ({ id, path, cwd: "/workspace" });
 const rpc = (responses: Array<unknown>) => ({ calls: [] as Array<{ method: string; params: unknown }>, request: async function (method: string, params: unknown) { this.calls.push({ method, params }); const value = responses.length > 1 ? responses.shift() : responses[0]; if (value instanceof Error) throw value; return value; } });
@@ -46,7 +49,7 @@ describe("Codex thread history", () => {
     const partialReader = new CodexThreadReader(partialClient as never);
     const partial = await partialReader.read("thread-1", new AbortController().signal);
     expect(partial.turns).toEqual([]); await appendFile(path, "{\"turn_id\":\"t\",\"type\":\"task_started\"}}\n");
-    expect((await partialReader.read("thread-1", new AbortController().signal)).turns?.[0]?.status).toBe("inProgress");
+    expect(((await partialReader.read("thread-1", new AbortController().signal)) as ReadTurns).turns?.[0]?.status).toBe("inProgress");
     const malformed = join(dir, "malformed.jsonl"); await writeFile(malformed, meta() + "not-json\n");
     const malformedClient = rpc([new Error("list_turns is not supported"), { thread: binding(malformed) }]);
     await expect(new CodexThreadReader(malformedClient as never).read("thread-1", new AbortController().signal)).rejects.toThrow(/Invalid/u);
@@ -60,7 +63,7 @@ describe("Codex thread history", () => {
     const client = rpc([new Error("list_turns is not supported"), { thread: binding(path) }]); const reader = new CodexThreadReader(client as never); const signal = new AbortController().signal;
     expect((await reader.read("thread-1", signal)).turns).toEqual([{ id: "t", status: "inProgress", items: [] }]);
     await appendFile(path, event("t", "item_completed", item("u", "UserMessage", [{ type: "Text", text: "prompt" }])));
-    const twice = await reader.read("thread-1", signal); expect(twice.turns[0]?.items).toHaveLength(1); expect((await reader.read("thread-1", signal)).turns[0]?.items).toHaveLength(1);
+    const twice = await reader.read("thread-1", signal) as ReadTurns; expect(twice.turns[0]?.items).toHaveLength(1); expect(((await reader.read("thread-1", signal)) as ReadTurns).turns[0]?.items).toHaveLength(1);
     const prompt = "full controller prompt";
     expect(userMessageMatches({ type: "userMessage", content: [{ type: "text", text: prompt }] }, "operation", prompt)).toBe(true);
     expect(userMessageMatches({ type: "userMessage", content: [{ type: "text", text: `prefix ${prompt}` }] }, "operation", prompt)).toBe(false);

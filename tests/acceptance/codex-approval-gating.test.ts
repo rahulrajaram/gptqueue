@@ -33,7 +33,7 @@ const runCodex = async (mode: Mode): Promise<{ events: Json[]; output: string }>
   if (mode === 'approve') config['mcp_servers.gptqueue-shared.default_tools_approval_mode'] = 'approve';
   const overrides = Object.entries(config).flatMap(([name, value]) => ['-c', `${name}=${JSON.stringify(value)}`]);
   const prompt = 'Call the MCP tool list_agents on server gptqueue-shared with no arguments. Then reply with just the number of agents returned, or the exact error you got.';
-  return await new Promise<Json[]>((resolve, reject) => {
+  return await new Promise<{ events: Json[]; output: string }>((resolve, reject) => {
     let stdout = '';
     const child = spawn(process.env.GPTQUEUE_CODEX_BIN || 'codex',
       ['exec', '--ignore-user-config', '--json', '--ephemeral', '--skip-git-repo-check', '-C', directory, ...overrides, prompt],

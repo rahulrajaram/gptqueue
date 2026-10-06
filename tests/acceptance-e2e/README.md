@@ -4,7 +4,12 @@ Real gptqueue components against the owned Redis, with protocol-faithful fake
 native hosts (see `harness.ts`): Codex app-server v2 JSON-RPC, the Pi extension
 API driving the real registered Pi sidecar, the OpenCode SDK client driving the
 real plugin, and, for Claude, the real event-driven watcher (`watchInbox`) and
-Stop hook (`runClaudeHook`). Run one file at a time:
+Stop hook (`runClaudeHook`). The Claude stand-in publishes a real session record
+for its own pid (legacy /proc scan off), so the Stop hook resolves a confirmed
+identity and blocks a finished turn while mail is pending; each Claude injection
+records whether a Stop-hook block or the idle watcher made it, and Claude WK-2 and
+LT-4 require the Stop-hook block. WK-1/DL-5 and DL-8 read consumption from server
+state (inbox trace rows, claims index and claim records). Run one file at a time:
 
     node scripts/with-owned-redis.mjs -- npx --no-install vitest run tests/acceptance-e2e/wake.test.ts
 

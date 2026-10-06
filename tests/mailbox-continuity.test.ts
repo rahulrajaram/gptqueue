@@ -144,13 +144,15 @@ describe("mailbox continuity operator API", () => {
     await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
     const client = new RedisClient(null, redisUrl); clients.push(client); await client.register("both", provisional);
     const existing = { id: "already-bound", from: "peer", to: canonical, timestamp: "t0", type: "task", payload: { content: "first" } };
-    const sent = { id: "sent-to-provisional", from: "peer", to: provisional, timestamp: "t1", type: "task", payload: { content: "x", n: 12345678901234567 } };
+    const sent = { id: "sent-to-provisional", from: "peer", to: provisional, timestamp: "t1", type: "task", payload: { content: "x", n: 0 } };
+    // An integer beyond 2^53, written into the raw JSON exactly: a re-encoding move would change it.
+    const raw = (value: object) => JSON.stringify(value).replace('"n":0', '"n":12345678901234567');
     await redis.rpush(SESSION_KEYS.queue(canonical), JSON.stringify(existing));
-    await redis.rpush(SESSION_KEYS.queue(provisional), JSON.stringify(sent));
+    await redis.rpush(SESSION_KEYS.queue(provisional), raw(sent));
     await expect(restoreRuntimeMailbox(client, b)).resolves.toBe(canonical);
     expect(await redis.exists(SESSION_KEYS.queue(provisional))).toBe(0);
     // FIFO after existing work; only the address changes, byte for byte.
-    expect(await redis.lrange(SESSION_KEYS.queue(canonical), 0, -1)).toEqual([JSON.stringify(existing), JSON.stringify({ ...sent, to: canonical })]);
+    expect(await redis.lrange(SESSION_KEYS.queue(canonical), 0, -1)).toEqual([JSON.stringify(existing), raw({ ...sent, to: canonical })]);
   });
   it.each(["claim", "outbound"])("refused adoption with %s leaves durable ownership unchanged", async cause => {
     const { redis, canonical, provisional, b } = await setup();

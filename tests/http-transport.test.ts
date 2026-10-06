@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import type { AddressInfo } from "node:net";
 import { createServer, type Server } from "node:http";
 import { execSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -56,7 +57,7 @@ async function getFreePort(): Promise<number> {
     srv.unref();
     srv.once("error", reject);
     srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address() as net.AddressInfo;
+      const addr = srv.address() as AddressInfo;
       const port = addr.port;
       srv.close(() => resolve(port));
     });

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { OpenCodeSessionStatus } from "../src/registered-shell/opencode-runtime.js";
 import {
   createOpenCodePlugin,
   createOpenCodeRuntimePort,
@@ -14,7 +15,7 @@ import { randomUUID } from "node:crypto";
 const identity = { sessionID: `ses-plugin-${Date.now()}`, directory: "/workspace" };
 const testRedisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 
-const native = (port: OpenCodeRuntimePort): OpenCodeNativeClient => ({
+const native = (_port: OpenCodeRuntimePort): OpenCodeNativeClient => ({
   session: {
     get: vi.fn(async () => ({ id: identity.sessionID, directory: identity.directory })),
     status: vi.fn(async () => ({ type: "idle" })),
@@ -27,7 +28,7 @@ describe("OpenCode plugin frontend", () => {
   it("keeps a created session through idle and retires only on deletion", async () => {
     const port: OpenCodeRuntimePort = {
       readIdentity: vi.fn(async () => ({ runtime_id: identity.sessionID, working_directory: identity.directory, epoch: "epoch" })),
-      status: vi.fn(async () => "idle"),
+      status: vi.fn(async (): Promise<OpenCodeSessionStatus> => "idle"),
       history: vi.fn(async () => []),
       promptAsync: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined),
@@ -61,7 +62,7 @@ describe("OpenCode plugin frontend", () => {
     // Without the idle wake the busy retry waits out a 3 s interval/backoff.
     const plugin = createOpenCodePlugin(clientInput(native(port)), {
       redisUrl: testRedisUrl, epoch: "epoch", runtimePort: async () => port,
-      dispatcherOptions: { intervalMs: 3_000, maxBackoffMs: 60_000 },
+      dispatcherOptions: { intervalMs: 3_000 }, // the plugin's dispatcher options have no maxBackoffMs
     });
     const redis = new Redis(testRedisUrl);
     try {
@@ -86,7 +87,7 @@ describe("OpenCode plugin frontend", () => {
   it("uses chat.message as the lazy exact-identity registration path", async () => {
     const port: OpenCodeRuntimePort = {
       readIdentity: vi.fn(async () => ({ runtime_id: identity.sessionID, working_directory: identity.directory, epoch: "epoch" })),
-      status: vi.fn(async () => "idle"), history: vi.fn(async () => []),
+      status: vi.fn(async (): Promise<OpenCodeSessionStatus> => "idle"), history: vi.fn(async () => []),
       promptAsync: vi.fn(async () => undefined), close: vi.fn(async () => undefined),
     };
     const plugin = createOpenCodePlugin(clientInput(native(port)), {
@@ -102,7 +103,7 @@ describe("OpenCode plugin frontend", () => {
   it("exposes only identity-bound gptqueue tools and system guidance", async () => {
     const port: OpenCodeRuntimePort = {
       readIdentity: vi.fn(async () => ({ runtime_id: identity.sessionID, working_directory: identity.directory, epoch: "epoch" })),
-      status: vi.fn(async () => "idle"), history: vi.fn(async () => []),
+      status: vi.fn(async (): Promise<OpenCodeSessionStatus> => "idle"), history: vi.fn(async () => []),
       promptAsync: vi.fn(async () => undefined), close: vi.fn(async () => undefined),
     };
     const plugin = createOpenCodePlugin(clientInput(native(port)), {
@@ -114,11 +115,11 @@ describe("OpenCode plugin frontend", () => {
       "gptqueue_send_message", "gptqueue_receive_message", "gptqueue_get_queue_status", "gptqueue_list_agents",
       "gptqueue_get_runtime_status", "gptqueue_find_agents", "gptqueue_get_agent_details", "gptqueue_get_delivery_status",
     ]);
-    expect(plugin.tool.gptqueue_claim_tasks.args).not.toHaveProperty("session_id");
+    expect(plugin.tool.gptqueue_claim_tasks!.args).not.toHaveProperty("session_id");
     const output = { system: [] as string[] };
     await plugin["experimental.chat.system.transform"]({ sessionID: identity.sessionID }, output);
     expect(output.system[0]).toContain("already registered");
-    const toolResult = await plugin.tool.gptqueue_get_queue_status.execute({}, {
+    const toolResult = await plugin.tool.gptqueue_get_queue_status!.execute({}, {
       sessionID: identity.sessionID, directory: identity.directory, abort: new AbortController().signal,
     });
     expect(toolResult).toMatchObject({ output: expect.stringContaining("queues") });
@@ -128,7 +129,7 @@ describe("OpenCode plugin frontend", () => {
   it("disposes all retained sessions on the supported server disposal event", async () => {
     const port: OpenCodeRuntimePort = {
       readIdentity: vi.fn(async () => ({ runtime_id: identity.sessionID, working_directory: identity.directory, epoch: "epoch" })),
-      status: vi.fn(async () => "idle"), history: vi.fn(async () => []),
+      status: vi.fn(async (): Promise<OpenCodeSessionStatus> => "idle"), history: vi.fn(async () => []),
       promptAsync: vi.fn(async () => undefined), close: vi.fn(async () => undefined),
     };
     const plugin = createOpenCodePlugin(clientInput(native(port)), {

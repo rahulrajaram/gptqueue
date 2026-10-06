@@ -30,6 +30,14 @@ import {
 } from "../src/mcp-server/tools/register-agent.js";
 import type { RuntimeLaunchContract } from "../src/core/actor-directory.js";
 
+/** register_agent returns a CallToolResult (session id in structuredContent); RedisClient.register returns it directly. */
+const sessionOf = (result: object): string => {
+  const r = result as { session_id?: unknown; structuredContent?: { session_id?: unknown } };
+  const id = r.session_id ?? r.structuredContent?.session_id;
+  if (typeof id !== "string" || !id) throw new Error(`register_agent returned no session_id: ${JSON.stringify(r.structuredContent)}`);
+  return id;
+};
+
 const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 
 // wake_if_offline admission now requires an operator allowlist with EXACT
@@ -64,7 +72,7 @@ const inboxDepth = async (redis: Redis, actorId: string) =>
 const expectOk = <T extends { ok: boolean }>(r: T): Extract<T, { ok: true }> => {
   expect(r.ok).toBe(true);
   if (!r.ok) throw new Error("expected ok result");
-  return r;
+  return r as Extract<T, { ok: true }>;
 };
 
 describe("TaskClaimStore", () => {
@@ -146,8 +154,7 @@ describe("TaskClaimStore", () => {
 
   it("returns claim:null when the inbox is empty", async () => {
     const res = await store.claim(claimReq());
-    expectOk(res);
-    expect(res.claim).toBeNull();
+    expect(expectOk(res).claim).toBeNull();
   });
 
   it("claims N <= max_batch messages in pop order", async () => {
@@ -213,7 +220,7 @@ describe("TaskClaimStore", () => {
   });
 
   it("get returns the claim, null when absent, and store_corrupt on malformed JSON", async () => {
-    expect((await store.get("missing-claim")).claim).toBeNull();
+    expect(expectOk(await store.get("missing-claim")).claim).toBeNull();
 
     await pushTasks(redis, actorId, ["z"]);
     const claimed = expectOk(await store.claim(claimReq()));
@@ -344,8 +351,7 @@ describe("TaskClaimStore", () => {
 
     // Advance past expiry and recover.
     const rec = await store.recoverExpired({ actor_id: actorId, now: "2030-01-01T00:00:02.000Z" });
-    expectOk(rec);
-    expect(rec.recovered).toBe(2);
+    expect(expectOk(rec).recovered).toBe(2);
     expect(await inboxDepth(redis, actorId)).toBe(2);
     expect(await redis.hget(CLAIM_KEYS.claims, claimId)).toBeNull();
     expect(await redis.zscore(CLAIM_KEYS.index(actorId), claimId)).toBeNull();
@@ -361,8 +367,7 @@ describe("TaskClaimStore", () => {
     expectOk(await store.claim(claimReq({ ttl_seconds: 300 })));
 
     const rec = await store.recoverExpired({ actor_id: actorId, now: T0 });
-    expectOk(rec);
-    expect(rec.recovered).toBe(0);
+    expect(expectOk(rec).recovered).toBe(0);
     // The live, unexpired claim still exists.
     expect(await redis.zcard(CLAIM_KEYS.index(actorId))).toBe(1);
   });
@@ -603,7 +608,7 @@ describe("task claim tools + workload derivation", () => {
         max_concurrency: 1,
       },
       launch: launchOf(),
-      registered_by: reg.session_id,
+      registered_by: sessionOf(reg),
       registered_at: T0,
     });
     expect(result.ok).toBe(true);
@@ -636,7 +641,7 @@ describe("task claim tools + workload derivation", () => {
       const claim = await claimTasks(
         runtime,
         claimTasksSchema.parse({
-          session_id: reg.session_id,
+          session_id: sessionOf(reg),
           max_batch: 2,
           ttl_seconds: 300,
         })
@@ -662,7 +667,7 @@ describe("task claim tools + workload derivation", () => {
       // Acknowledge -> claim removed -> back to idle.
       const ack = await acknowledgeTasks(
         runtime,
-        acknowledgeTasksSchema.parse({ session_id: reg.session_id, claim_id: claimPayload.claim.claim_id })
+        acknowledgeTasksSchema.parse({ session_id: sessionOf(reg), claim_id: claimPayload.claim.claim_id })
       );
       expect(ack.structuredContent).toMatchObject({ status: "ok", acknowledged: 2 });
 
@@ -683,7 +688,7 @@ describe("task claim tools + workload derivation", () => {
 
       const empty = await claimTasks(
         runtime,
-        claimTasksSchema.parse({ session_id: reg.session_id, max_batch: 1, ttl_seconds: 300 })
+        claimTasksSchema.parse({ session_id: sessionOf(reg), max_batch: 1, ttl_seconds: 300 })
       );
       expect(empty.structuredContent).toMatchObject({ status: "ok", claimed: false });
       expect((empty.structuredContent as { claim: unknown }).claim).toBeNull();
@@ -691,7 +696,7 @@ describe("task claim tools + workload derivation", () => {
       // Acknowledging a claim that does not exist is a structured error.
       const badAck = await acknowledgeTasks(
         runtime,
-        acknowledgeTasksSchema.parse({ session_id: reg.session_id, claim_id: "does-not-exist" })
+        acknowledgeTasksSchema.parse({ session_id: sessionOf(reg), claim_id: "does-not-exist" })
       );
       expect(badAck.isError).toBe(true);
       expect(badAck.structuredContent).toMatchObject({
@@ -724,7 +729,7 @@ describe("claim_tasks concurrency enforcement (directory max_concurrency)", () =
         max_concurrency,
       },
       launch: null,
-      registered_by: reg.session_id,
+      registered_by: sessionOf(reg),
       registered_at: T0,
     });
     expect(result.ok).toBe(true);
@@ -815,8 +820,8 @@ describe("claim_tasks concurrency enforcement (directory max_concurrency)", () =
         registerAgentSchema.parse({ name: "plain-claim", role: "both", description: "no record" })
       );
       await pushTasks(redis, "plain-claim", ["p1", "p2", "p3"]);
-      const a = await claimTasks(plain, claimTasksSchema.parse({ session_id: reg.session_id, max_batch: 1, ttl_seconds: 300 }));
-      const b = await claimTasks(plain, claimTasksSchema.parse({ session_id: reg.session_id, max_batch: 1, ttl_seconds: 300 }));
+      const a = await claimTasks(plain, claimTasksSchema.parse({ session_id: sessionOf(reg), max_batch: 1, ttl_seconds: 300 }));
+      const b = await claimTasks(plain, claimTasksSchema.parse({ session_id: sessionOf(reg), max_batch: 1, ttl_seconds: 300 }));
       expect(a.structuredContent).toMatchObject({ status: "ok", claimed: true });
       expect(b.structuredContent).toMatchObject({ status: "ok", claimed: true });
     } finally {
@@ -894,7 +899,7 @@ describe("attachSpawn (wake lease spawn evidence)", () => {
         max_concurrency: 1,
       },
       launch: launchOf(),
-      registered_by: reg.session_id,
+      registered_by: sessionOf(reg),
       registered_at: T0,
     });
 
@@ -905,7 +910,7 @@ describe("attachSpawn (wake lease spawn evidence)", () => {
 
     const acquired = await client.wakeLease.acquire({
       actor_id: actorId,
-      issued_by_session: reg.session_id,
+      issued_by_session: sessionOf(reg),
       lease_seconds: 300,
       now: T0,
     });
@@ -952,7 +957,7 @@ describe("attachSpawn (wake lease spawn evidence)", () => {
         max_concurrency: 1,
       },
       launch: launchOf(),
-      registered_by: reg.session_id,
+      registered_by: sessionOf(reg),
       registered_at: T0,
     });
 
@@ -963,7 +968,7 @@ describe("attachSpawn (wake lease spawn evidence)", () => {
 
     const acquired = await client.wakeLease.acquire({
       actor_id: actorId,
-      issued_by_session: reg.session_id,
+      issued_by_session: sessionOf(reg),
       lease_seconds: 300,
       now: T0,
     });
@@ -1102,9 +1107,9 @@ describe("dead-letter queue (tranche 2)", () => {
       await store.deadLetterEntries({ actor_id: actorId })
     );
     expect(listed.entries.length).toBe(1);
-    expect(listed.entries[0].message_id).toBe("m1");
-    expect(listed.entries[0].deadlettered_at).toBe("2030-01-01T00:00:00.000Z");
-    expect(JSON.parse(listed.entries[0].payload).id).toBe("m1");
+    expect(listed.entries[0]!.message_id).toBe("m1");
+    expect(listed.entries[0]!.deadlettered_at).toBe("2030-01-01T00:00:00.000Z");
+    expect(JSON.parse(listed.entries[0]!.payload).id).toBe("m1");
 
     // Requeue moves the raw payload back to the inbox tail and deletes the counter.
     const requeued = expectOk(
@@ -1291,8 +1296,8 @@ describe("dead-letter queue (tranche 2)", () => {
     expect(await redis.llen(DLQ_KEYS.list(actorId))).toBe(2);
     const kept = await redis.lrange(DLQ_KEYS.list(actorId), 0, -1);
     // LPUSH keeps newest at the head: [d3, d2]; d1 was trimmed (dropped).
-    expect(JSON.parse(kept[0]).id).toBe("d3");
-    expect(JSON.parse(kept[1]).id).toBe("d2");
+    expect(JSON.parse(kept[0]!).id).toBe("d3");
+    expect(JSON.parse(kept[1]!).id).toBe("d2");
   });
 
   it("concurrent recovery never double-counts a shared message id", async () => {

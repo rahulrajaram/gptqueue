@@ -11,6 +11,7 @@
   },
   "scripts": {
     "build": "tsc && cp -r src/mcp-server/lua dist/mcp-server/",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
     "prepare": "npm run build && if command -v python3 >/dev/null 2>&1; then scripts/install-commithooks; else echo 'python3 not found; skipping optional commithooks install'; fi",
     "dev": "tsc --watch",
     "test": "vitest run",

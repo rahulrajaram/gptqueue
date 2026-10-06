@@ -168,11 +168,7 @@ const track = (pid: number | undefined) => {
 };
 
 /** Track, dispatch, and return a wake payload from a real wire send. */
-async function sendAndTrack(
-  sender: Agent,
-  to: string,
-  content: string
-): Promise<{
+type SentResult = {
   status: string;
   message_id: string;
   wake?: {
@@ -181,7 +177,13 @@ async function sendAndTrack(
     pid?: number;
     error_message?: string;
   };
-}> {
+};
+
+async function sendAndTrack(
+  sender: Agent,
+  to: string,
+  content: string
+): Promise<SentResult> {
   const res = await sender.call("send_message", {
     session_id: sender.sessionId,
     to,
@@ -190,7 +192,7 @@ async function sendAndTrack(
   });
   expect(res.data.status).toBe("sent");
   if (res.data.wake?.pid) track(res.data.wake.pid);
-  return res.data;
+  return res.data as SentResult;
 }
 
 // ---------------------------------------------------------------------------

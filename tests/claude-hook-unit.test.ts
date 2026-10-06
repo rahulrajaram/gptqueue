@@ -14,7 +14,7 @@ const temp = async () => { const d = await mkdtemp(join(tmpdir(), "gptq-claude-u
 
 const ok = (unclaimed: number, mine: number | null = 0, others = 0, latest: string | null = "1-0"): ProbeResult =>
   ({ ok: true, counts: { unclaimed, claimed_by_session: mine, claimed_by_others: others, expired_by_others: 0, latest_event_id: latest } });
-const recorded = { agent: "claude-held", gptqueue_session_id: "s-1", source: "session_record", note: null } as const;
+const recorded = { agent: "claude-held", gptqueue_session_id: "s-1", source: "session_record", note: null, claude: { pid: 4242, start: "100" } } as const;
 const base = (over: Partial<HookInput> = {}): HookInput => ({
   event: "stop", identity: recorded, probe: ok(0), stopHookActive: false, prior: null,
   watcherRunning: true, watchPolicy: "require", watchCommand: "peek --watch", ...over,
@@ -120,7 +120,7 @@ describe("hook decisions", () => {
   });
 
   it("states when the name is unconfirmed (no session record)", () => {
-    const d = decideHook(base({ event: "session-start", identity: { agent: "claude-x", gptqueue_session_id: null, source: "derived", note: "no session record" } }));
+    const d = decideHook(base({ event: "session-start", identity: { agent: "claude-x", gptqueue_session_id: null, source: "derived", note: "no session record", claude: null } }));
     expect(d.kind === "context" && d.text).toMatch(/UNCONFIRMED \(no session record\)/);
     expect(d.kind === "context" && d.text).not.toMatch(/unclaimed/);
   });

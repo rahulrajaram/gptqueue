@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { checkExchangeEvidence } from "../acceptance/oracle.js";
 import {
-  ALL_RUNTIMES, expectedAnswer, startRecipient, startSender, taskContent, waitFor,
+  ALL_RUNTIMES, expectedAnswer, startRecipient, startSender, taskContent, traceConsumption, waitFor,
   type Recipient, type Runtime, type Sender,
 } from "./harness.js";
 
@@ -33,12 +33,19 @@ describe.each(ALL_RUNTIMES)("%s recipient", (runtime) => {
     await awaitReplies(sender, [request.message_id]);
     const handled = recipient.handled.find(({ message }) => message.id === request.message_id)!;
     const reply = sender.received.find(({ message }) => message.payload.in_reply_to === request.message_id)!;
+    // Consumption comes from server state (inbox trace rows), not from what the harness believes it did.
+    const requestTrace = await traceConsumption(recipient.name(), request.message_id);
+    const replyTrace = await traceConsumption(sender.name, reply.message.id);
+    expect(requestTrace.claim_id).toBe(handled.claim_id);
+    expect(replyTrace.claim_id).toBe(reply.claim_id);
+    const consumption = (messageId: string, actor: string, trace: typeof requestTrace) => trace.claim_id === undefined ? undefined
+      : { message_id: messageId, actor, consumed: true, claim_id: trace.claim_id, acknowledged: trace.acknowledged };
     const verdict = checkExchangeEvidence({
       sender: sender.name, recipient: recipient.name(),
       request: { id: request.message_id, from: handled.message.from, to: handled.message.to },
       reply: { id: reply.message.id, from: reply.message.from, to: reply.message.to, in_reply_to: reply.message.payload.in_reply_to, content: reply.message.payload.content },
-      request_consumption: { message_id: handled.message.id, actor: recipient.name(), consumed: true, claim_id: handled.claim_id, acknowledged: handled.acknowledged },
-      reply_consumption: { message_id: reply.message.id, actor: sender.name, consumed: true, claim_id: reply.claim_id, acknowledged: true },
+      request_consumption: consumption(handled.message.id, recipient.name(), requestTrace),
+      reply_consumption: consumption(reply.message.id, sender.name, replyTrace),
       expected_reply_content: expectedAnswer(20, 22),
       execution: { status: "completed" },
     });
@@ -56,6 +63,7 @@ describe.each(ALL_RUNTIMES)("%s recipient", (runtime) => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(recipient.handled).toHaveLength(0);
     const turnsBefore = recipient.turnStarts.length;
+    const injectionsBefore = recipient.injections.length;
     const endedAt = await recipient.release();
     await awaitReplies(sender, [request.message_id]);
     const handled = recipient.handled.find(({ message }) => message.id === request.message_id)!;
@@ -63,6 +71,10 @@ describe.each(ALL_RUNTIMES)("%s recipient", (runtime) => {
     // Handled in a new model turn that began after the busy turn ended.
     expect(recipient.turnStarts.length).toBeGreaterThan(turnsBefore);
     expect(recipient.turnStarts.at(-1)!).toBeGreaterThanOrEqual(endedAt);
+    if (runtime === "claude") {
+      // The busy turn's own Stop hook must continue the session (decision: block), not the idle watcher.
+      expect(recipient.injectionVia!.slice(injectionsBefore)[0]).toBe("stop_hook");
+    }
     expect(sender.received.find(({ message }) => message.payload.in_reply_to === request.message_id)!.message.payload.content).toBe(expectedAnswer(1, 2));
   });
 

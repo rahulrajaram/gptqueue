@@ -209,8 +209,10 @@ describe("BC-F1: a transient startup registration failure is retried, not final"
   const transport = () => {
     const delivered: Msg[] = [];
     const sent: Sent[] = [];
-    const t: { onmessage?: (m: Msg) => void; onclose?: () => void; send: (m: Sent) => Promise<void> } = {
-      onmessage: (m) => delivered.push(m), onclose: () => undefined, send: async (m) => { sent.push(m); },
+    // send takes the JSON-RPC response shape holdToolCallsUntil writes; assertions read it as Sent.
+    type Response = { jsonrpc: "2.0"; id: string | number; result: Record<string, unknown> };
+    const t: { onmessage?: (m: Msg) => void; onclose?: () => void; send: (m: Response) => Promise<void> } = {
+      onmessage: (m) => delivered.push(m), onclose: () => undefined, send: async (m) => { sent.push(m as unknown as Sent); },
     };
     return { t, delivered, sent };
   };

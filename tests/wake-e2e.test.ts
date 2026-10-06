@@ -28,6 +28,14 @@ import {
 import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
 import { WAKE_SLEEPY_SCRIPT, WAKE_EXIT_SCRIPT } from "./helpers/wake-launch.js";
 
+/** register_agent returns a CallToolResult (session id in structuredContent); RedisClient.register returns it directly. */
+const sessionOf = (result: object): string => {
+  const r = result as { session_id?: unknown; structuredContent?: { session_id?: unknown } };
+  const id = r.session_id ?? r.structuredContent?.session_id;
+  if (typeof id !== "string" || !id) throw new Error(`register_agent returned no session_id: ${JSON.stringify(r.structuredContent)}`);
+  return id;
+};
+
 // wake_if_offline admission + dispatch now require an operator launch
 // allowlist with EXACT argv templates (v2). Scaffold one (temp dir +
 // GPTQUEUE_LAUNCH_ALLOWLIST) permitting process.execPath pointed at the
@@ -151,7 +159,7 @@ describe("wake-on-send e2e", () => {
     await flushTestKeys(redis, TEST_REDIS_URL);
     sender = new RedisClient(null, TEST_REDIS_URL);
     const reg = await sender.register("publisher", "wake-sender", "sends");
-    expect(reg.session_id).toBeTruthy();
+    expect(sessionOf(reg)).toBeTruthy();
   });
 
   afterEach(async () => {
@@ -162,7 +170,7 @@ describe("wake-on-send e2e", () => {
 
   it("end-to-end: wake_if_offline durable actor is dispatched and the lease clears on runtime_ready", async () => {
     const reg = await sender.register("publisher", "wake-sender-2", "sends");
-    const registeredBy = reg.session_id;
+    const registeredBy = sessionOf(reg);
     await registerActor(sender, "wakee", "wake_if_offline", sleepyLaunch(), registeredBy);
 
     // No session exists for "wakee" -> offline_launchable -> dispatch.
@@ -214,7 +222,7 @@ describe("wake-on-send e2e", () => {
       "coalesce",
       "wake_if_offline",
       sleepyLaunch(),
-      reg.session_id
+      sessionOf(reg)
     );
 
     const first = parseText(
@@ -250,7 +258,7 @@ describe("wake-on-send e2e", () => {
       "storeonly",
       "store_only",
       sleepyLaunch(),
-      reg.session_id
+      sessionOf(reg)
     );
 
     const res = parseText(
@@ -266,7 +274,7 @@ describe("wake-on-send e2e", () => {
 
   it("policy flipped to store_only during a delayed send: wake uses the post-enqueue record and does not launch", async () => {
     const reg = await sender.register("publisher", "wake-sender-flip", "sends");
-    await registerActor(sender, "flipper", "wake_if_offline", sleepyLaunch(), reg.session_id);
+    await registerActor(sender, "flipper", "wake_if_offline", sleepyLaunch(), sessionOf(reg));
 
     // Inject the policy change between resolve and wake: while the enqueue is
     // in flight (e.g. retrying a full inbox) the owner updates the actor to
@@ -274,7 +282,7 @@ describe("wake-on-send e2e", () => {
     const enqueue = sender.sendMessage.bind(sender);
     sender.sendMessage = async (message) => {
       const sent = await enqueue(message);
-      await registerActor(sender, "flipper", "store_only", sleepyLaunch(), reg.session_id);
+      await registerActor(sender, "flipper", "store_only", sleepyLaunch(), sessionOf(reg));
       return sent;
     };
 
@@ -292,7 +300,7 @@ describe("wake-on-send e2e", () => {
 
   it("policy flipped to wake_if_offline during a delayed send: wake uses the post-enqueue record and launches (FIX4)", async () => {
     const reg = await sender.register("publisher", "wake-sender-unflip", "sends");
-    await registerActor(sender, "unflipper", "store_only", sleepyLaunch(), reg.session_id);
+    await registerActor(sender, "unflipper", "store_only", sleepyLaunch(), sessionOf(reg));
 
     // The reverse flip: the record read before the enqueue is store_only,
     // and the owner enables waking while the enqueue is in flight. The
@@ -300,7 +308,7 @@ describe("wake-on-send e2e", () => {
     const enqueue = sender.sendMessage.bind(sender);
     sender.sendMessage = async (message) => {
       const sent = await enqueue(message);
-      await registerActor(sender, "unflipper", "wake_if_offline", sleepyLaunch(), reg.session_id);
+      await registerActor(sender, "unflipper", "wake_if_offline", sleepyLaunch(), sessionOf(reg));
       return sent;
     };
 
@@ -351,7 +359,7 @@ describe("wake-on-send e2e", () => {
       "badlaunch",
       "wake_if_offline",
       deadLaunch(),
-      reg.session_id
+      sessionOf(reg)
     );
 
     const res = parseText(
@@ -374,7 +382,7 @@ describe("wake-on-send e2e", () => {
       "storeoffline",
       "store_only",
       sleepyLaunch(),
-      reg.session_id
+      sessionOf(reg)
     );
     const store = parseText(
       await sendMessage(
@@ -402,7 +410,7 @@ describe("wake-on-send e2e", () => {
           max_concurrency: 1,
         },
         launch: null,
-        registered_by: reg.session_id,
+        registered_by: sessionOf(reg),
         registered_at: T0,
       })
     );
@@ -442,7 +450,7 @@ describe("task claim e2e (at-least-once delivery)", () => {
     await flushTestKeys(redis, TEST_REDIS_URL);
     sender = new RedisClient(null, TEST_REDIS_URL);
     const reg = await sender.register("publisher", "e2e-sender", "sends");
-    expect(reg.session_id).toBeTruthy();
+    expect(sessionOf(reg)).toBeTruthy();
   });
 
   afterEach(async () => {
@@ -453,7 +461,7 @@ describe("task claim e2e (at-least-once delivery)", () => {
 
   it("send 2 messages -> runtime registers -> claim both -> ack -> inbox empty and actor_status idle", async () => {
     const reg = await sender.register("publisher", "e2e-sender-2", "sends");
-    await registerActorProfile(reg.session_id);
+    await registerActorProfile(sessionOf(reg));
 
     // The runtime comes online under the durable actor id (live session). This
     // makes the actor idle at send time, so dispatch is skipped entirely.
@@ -464,7 +472,7 @@ describe("task claim e2e (at-least-once delivery)", () => {
         worker,
         registerAgentSchema.parse({ name: actorId, role: "both", description: "runtime" })
       );
-      workerSession = wreg.session_id;
+      workerSession = sessionOf(wreg);
 
       // Send two messages to the (idle, live) actor.
       const r1 = parseText(
@@ -521,7 +529,7 @@ describe("task claim e2e (at-least-once delivery)", () => {
 
   it("crash path: claim without ack, expire, recover, and re-claim returns the messages", async () => {
     const reg = await sender.register("publisher", "e2e-sender-3", "sends");
-    await registerActorProfile(reg.session_id);
+    await registerActorProfile(sessionOf(reg));
 
     const worker = new RedisClient(null, TEST_REDIS_URL);
     let workerSession: string;
@@ -530,7 +538,7 @@ describe("task claim e2e (at-least-once delivery)", () => {
         worker,
         registerAgentSchema.parse({ name: actorId, role: "both", description: "runtime" })
       );
-      workerSession = wreg.session_id;
+      workerSession = sessionOf(wreg);
 
       await sendMessage(
         sender,
@@ -589,7 +597,7 @@ describe("pid-liveness reconciliation", () => {
     await flushTestKeys(redis, TEST_REDIS_URL);
     sender = new RedisClient(null, TEST_REDIS_URL);
     const reg = await sender.register("publisher", "recon-sender", "sends");
-    expect(reg.session_id).toBeTruthy();
+    expect(sessionOf(reg)).toBeTruthy();
   });
 
   afterEach(async () => {
@@ -605,7 +613,7 @@ describe("pid-liveness reconciliation", () => {
       "deadpid-act",
       "wake_if_offline",
       liveSleeperLaunch(),
-      reg.session_id
+      sessionOf(reg)
     );
 
     // A definitely-dead pid: spawn a child that exits immediately, then wait.
@@ -615,7 +623,7 @@ describe("pid-liveness reconciliation", () => {
 
     const acquired = await sender.wakeLease.acquire({
       actor_id: "deadpid-act",
-      issued_by_session: reg.session_id,
+      issued_by_session: sessionOf(reg),
       lease_seconds: 300,
       now: T0,
     });
@@ -644,7 +652,7 @@ describe("pid-liveness reconciliation", () => {
       "livepid-act",
       "wake_if_offline",
       liveSleeperLaunch(),
-      reg.session_id
+      sessionOf(reg)
     );
 
     const sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)"]);
@@ -652,7 +660,7 @@ describe("pid-liveness reconciliation", () => {
     try {
       const acquired = await sender.wakeLease.acquire({
         actor_id: "livepid-act",
-        issued_by_session: reg.session_id,
+        issued_by_session: sessionOf(reg),
         lease_seconds: 300,
         now: T0,
       });
@@ -689,12 +697,12 @@ describe("pid-liveness reconciliation", () => {
       "nopid-act",
       "wake_if_offline",
       liveSleeperLaunch(),
-      reg.session_id
+      sessionOf(reg)
     );
 
     const acquired = await sender.wakeLease.acquire({
       actor_id: "nopid-act",
-      issued_by_session: reg.session_id,
+      issued_by_session: sessionOf(reg),
       lease_seconds: 300,
       now: T0,
     });
@@ -718,7 +726,7 @@ describe("pid-liveness reconciliation", () => {
       "revenge-act",
       "wake_if_offline",
       immediateExitLaunch(),
-      reg.session_id
+      sessionOf(reg)
     );
 
     // First send dispatches a runtime that exits immediately (dead pid).

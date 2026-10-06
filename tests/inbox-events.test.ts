@@ -21,7 +21,7 @@ describe("InboxEvents", () => {
     await expect(store.send(message())).resolves.toBe(true);
     expect(await redis.xlen("gptq:inbox-events:b")).toBe(1);
     expect(await redis.get("gptq:outstanding:a:task-1")).toBe("b");
-    expect((await events.pending("b"))[0].id).toBe("task-1");
+    expect((await events.pending("b"))[0]!.id).toBe("task-1");
   });
 
   it("only notifies a correlated reply from the expected peer", async () => {

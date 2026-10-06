@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
-import { SESSION_KEYS } from "../src/core/keys.js";
+import { SESSION_KEYS, SYSTEM_SENDER } from "../src/core/keys.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import {
   probeActivationReady,
@@ -267,6 +267,19 @@ describe("gptqueue-doctor CLI", () => {
     it("does not gate on --agent when it was not supplied", () => {
       expect(probeActivationReady(false, ready, undefined, binding)).toBe(true);
     });
+  });
+  it("sweep-provisional reports registrations that claim the reserved system sender (SEC-F4)", async () => {
+    const clean = run(["sweep-provisional", "--redis-url", TEST_REDIS_URL]);
+    expect(clean.status, clean.stderr).toBe(0);
+    expect(JSON.parse(clean.stdout)).toEqual({ swept: [], reserved_sender: { registry: false, sessions: 0 } });
+    // State an older server could have written before the name was reserved.
+    await redis.hset(SESSION_KEYS.registry, SYSTEM_SENDER, JSON.stringify({ name: SYSTEM_SENDER }));
+    await redis.sadd(SESSION_KEYS.agentSessions(SYSTEM_SENDER), "legacy-session-1", "legacy-session-2");
+    const dirty = run(["sweep-provisional", "--redis-url", TEST_REDIS_URL]);
+    expect(dirty.status, dirty.stderr).toBe(0);
+    expect(JSON.parse(dirty.stdout).reserved_sender).toEqual({ registry: true, sessions: 2 });
+    await redis.hdel(SESSION_KEYS.registry, SYSTEM_SENDER);
+    await redis.del(SESSION_KEYS.agentSessions(SYSTEM_SENDER));
   });
 });
 

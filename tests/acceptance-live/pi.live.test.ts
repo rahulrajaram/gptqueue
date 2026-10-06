@@ -17,7 +17,17 @@ import {
 } from "./support.js";
 
 type Json = Record<string, unknown>;
-type PiEvent = Readonly<{ at: number; type: string }>;
+/** text: the final assistant text of a run, on agent_end only. */
+type PiEvent = Readonly<{ at: number; type: string; text?: string }>;
+/** The last assistant message's text in an agent_end event's messages. */
+const finalAssistantText = (event: Json): string | undefined => {
+  const messages = Array.isArray(event.messages) ? event.messages as Json[] : [];
+  const last = messages.filter((m) => m && m.role === "assistant").at(-1);
+  if (!last) return undefined;
+  const content = last.content;
+  return typeof content === "string" ? content
+    : Array.isArray(content) ? (content as Json[]).filter((c) => c?.type === "text").map((c) => String(c.text ?? "")).join("") : undefined;
+};
 const MODEL = "zai/glm-5.3-flash";
 const repo = resolve(import.meta.dirname, "../..");
 const receipt: Json = { runtime: "pi", model: MODEL, criteria: {}, model_runs: 0 };
@@ -44,7 +54,7 @@ const startPi = (dir: string, label: string, redisUrl: string, work: string): Pi
     buffer += String(chunk);
     const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
     for (const line of lines) {
-      try { const event = JSON.parse(line) as Json; if (typeof event.type === "string" && !String(event.type).endsWith("_delta") && event.type !== "message_update") events.push({ at, type: event.type }); } catch { /* non-JSON */ }
+      try { const event = JSON.parse(line) as Json; if (typeof event.type === "string" && !String(event.type).endsWith("_delta") && event.type !== "message_update") events.push(event.type === "agent_end" ? { at, type: event.type, text: finalAssistantText(event) } : { at, type: event.type }); } catch { /* non-JSON */ }
     }
   });
   child.stderr!.on("data", (chunk: Buffer) => { raw = (raw + String(chunk)).slice(-400_000); });
@@ -117,13 +127,18 @@ describe.skipIf(!LIVE)(`live Pi (${LIVE ? "enabled" : SKIP_REASON})`, () => {
     const trace2 = await consumption(redis, target, sent2.message_id);
     const claimedAt = trace2.claim ? Number(String(trace2.claim.stream_id).split("-")[0]) : Number.NaN;
     const after = pi.events.slice(mark);
-    const nextStart = after.filter((e) => e.type === "turn_start" && e.at <= claimedAt).at(-1);
-    const busyEnd = nextStart && after.filter((e) => e.type === "turn_end" && e.at <= nextStart.at).at(-1);
+    // The busy run ends at its own agent_end (Pi runs a queued follow-up as a new run after it,
+    // docs/extensions.md); steering would claim inside the busy run, before this agent_end.
+    const busyEnd = after.find((e) => e.type === "agent_end" && e.at >= busyStart.at);
+    const busyCompleted = /(?:^|\D)300\W*$/u.test(busyEnd?.text?.trim() ?? "");
+    const nextStart = busyEnd && after.filter((e) => e.type === "turn_start" && e.at >= busyEnd.at && e.at <= claimedAt).at(-1);
     const verdict2 = exchangeVerdict({ sender: sender.name, recipient: target, requestId: sent2.message_id, reply: reply2,
       claim: trace2.claim, acked: trace2.ack !== undefined, expected: task2.expected });
     const midTurn = sent2.sent_at >= busyStart.at && busyEnd !== undefined && sent2.sent_at < busyEnd.at;
-    const wk2 = midTurn && nextStart !== undefined && busyEnd !== undefined && nextStart.at >= busyEnd.at && verdict2.outcome === "meets";
-    criteria["WK-2"] = { outcome: wk2 ? "pass" : "fail", request_id: sent2.message_id, sent_mid_turn: midTurn, busy_turn_start: busyStart.at,
+    const claimedAfterBusyRun = busyEnd !== undefined && claimedAt > busyEnd.at;
+    const wk2 = midTurn && busyCompleted && claimedAfterBusyRun && nextStart !== undefined && verdict2.outcome === "meets";
+    criteria["WK-2"] = { outcome: wk2 ? "pass" : "fail", request_id: sent2.message_id, sent_mid_turn: midTurn, busy_output_completed: busyCompleted,
+      claimed_after_busy_run: claimedAfterBusyRun, busy_turn_start: busyStart.at,
       busy_turn_end: busyEnd?.at, next_turn_start: nextStart?.at, claim_stream_id: trace2.claim?.stream_id, verdict: verdict2 };
     criteria["LT-4"] = { turn_end_to_next_turn_start_ms: nextStart && busyEnd ? nextStart.at - busyEnd.at : null, target_p95_ms: 300, samples: 1 };
     receipt.events_after_busy = after.map((e) => [e.type, Math.round(e.at)]);

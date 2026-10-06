@@ -51,7 +51,7 @@ const expectOk = <T extends { ok: boolean }>(
 ): Extract<T, { ok: true }> => {
   expect(result.ok).toBe(true);
   if (!result.ok) throw new Error("expected ok result");
-  return result;
+  return result as Extract<T, { ok: true }>;
 };
 
 describe("ActorDirectory", () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+// @ts-expect-error untyped .mjs tooling module
 import { verificationChecks } from "../scripts/wrapper-verification-checks.mjs";
 
 const baseline = () => ({

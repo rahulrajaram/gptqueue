@@ -399,7 +399,7 @@ export const createOpenCodePlugin = (
       }
       if (event.type === "session.idle") {
         const sessionID = record(event.properties)?.sessionID;
-        if (typeof sessionID === "string") for (const listener of [...idleListeners.get(sessionID) ?? []]) listener();
+        if (typeof sessionID === "string") for (const listener of Array.from(idleListeners.get(sessionID) ?? [])) listener();
         return;
       }
       if (identity) await ensure(identity);

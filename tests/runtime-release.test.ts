@@ -231,10 +231,46 @@ describe("RT-1 switch, rollback and prune", () => {
     expect(rr.status(prefix)).toMatchObject({ current: ids[2], previous: ids[1] });
     rr.rollback(prefix); rr.rollback(prefix); // C -> B -> C: previous is B
     rr.setPointer(prefix, "previous", ids[0]); // make the OLDEST release previous
-    expect(rr.prune(prefix, 1)).toEqual({ removed: [ids[1]], kept: [ids[0], ids[2]] });
+    expect(rr.prune(prefix, 1)).toEqual({ removed: [ids[1]], reclaimed: [], kept: [ids[0], ids[2]] });
     expect(rr.prune(prefix, 0).removed).toEqual([]);
-    expect(existsSync(join(prefix, "releases", ids[0]))).toBe(true);
-    expect(existsSync(join(prefix, "releases", ids[2]))).toBe(true);
+    expect(existsSync(join(prefix, "releases", ids[0]!))).toBe(true);
+    expect(existsSync(join(prefix, "releases", ids[2]!))).toBe(true);
+  }, 60_000);
+});
+
+describe("RT-1 staging left by a killed install (LC-F5)", () => {
+  // A pid that cannot be alive: a child that already exited and was reaped.
+  const deadPid = () => spawnSync(process.execPath, ["-e", ""]).pid!;
+  const stage = (prefix: string, name: string, owner?: number) => {
+    const dir = join(prefix, "releases", name);
+    mkdirSync(join(dir, "node_modules/x"), { recursive: true });
+    writeFileSync(join(dir, "node_modules/x/index.js"), "partial");
+    if (owner !== undefined) writeFileSync(`${dir}.owner`, JSON.stringify({ pid: owner, createdAt: new Date().toISOString() }));
+    return dir;
+  };
+
+  it("status reports, and prune reclaims, staging owned by a dead pid; a live owner's staging is kept", () => {
+    const prefix = newPrefix();
+    const stale = stage(prefix, ".staging-dead01", deadPid());
+    const staleTmp = stage(prefix, "abc-def.tmp", deadPid());
+    const live = stage(prefix, ".staging-live01", process.pid);
+    const fresh = stage(prefix, ".staging-nomark"); // no marker, younger than the threshold
+    const reported = rr.status(prefix).staleStaging.map((r: { name: string; reason: string }) => [r.name, r.reason]);
+    expect(reported.sort()).toEqual([[".staging-dead01", "owner_dead"], ["abc-def.tmp", "owner_dead"]]);
+    expect(rr.status(prefix).releases).toEqual([]); // markers are never mistaken for releases
+    expect([...rr.prune(prefix, 5).reclaimed].sort()).toEqual([".staging-dead01", "abc-def.tmp"]);
+    for (const gone of [stale, staleTmp, `${stale}.owner`, `${staleTmp}.owner`]) expect(existsSync(gone), gone).toBe(false);
+    for (const kept of [live, fresh]) expect(existsSync(kept), kept).toBe(true);
+    // Without a marker, only the age threshold reclaims it.
+    expect(rr.findStaleStaging(prefix, { now: Date.now() + rr.STALE_STAGING_MS + 1_000 }).map((r: { name: string }) => r.name)).toEqual([".staging-nomark"]);
+  });
+
+  it("install reclaims stale staging before staging a new release", async () => {
+    const prefix = newPrefix();
+    const stale = stage(prefix, ".staging-dead02", deadPid());
+    await installInto(prefix);
+    expect(existsSync(stale)).toBe(false);
+    expect(readdirSync(join(prefix, "releases")).filter((n) => n.startsWith(".") || n.endsWith(".tmp") || n.endsWith(".owner"))).toEqual([]);
   }, 60_000);
 });
 

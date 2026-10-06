@@ -13,7 +13,7 @@ import { RedisClient } from "../src/mcp-server/redis-client.js";
 
 const URL15 = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 const live: Array<{ shell: Awaited<ReturnType<typeof startRegisteredShell>>; client: Client; peer: Transport; redis: Redis }> = [];
-const result = (value: unknown) => JSON.parse((value as { content: Array<{ text: string }> }).content[0].text) as any;
+const result = (value: unknown) => JSON.parse((value as { content: Array<{ text: string }> }).content[0]!.text) as any;
 let logDir: string;
 beforeEach(async () => {
   logDir = await mkdtemp(join(tmpdir(), "gptqueue-discovery-"));

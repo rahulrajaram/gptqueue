@@ -87,7 +87,7 @@ describe("handoff record admission", () => {
 
   it("rejects a wrong or missing schema_version as invalid_version", () => {
     for (const candidate of [
-      handoff({ schema_version: 2 }),
+      handoff({ schema_version: 2 } as unknown as HandoffRecordV1),
       {},
       "not-an-object",
       null,
@@ -101,7 +101,7 @@ describe("handoff record admission", () => {
 
   it("rejects an empty or non-string repo_head as missing_head", () => {
     for (const repo_head of ["", 42, undefined]) {
-      const result = admitHandoffRecord(handoff({ repo_head } as HandoffRecordV1));
+      const result = admitHandoffRecord(handoff({ repo_head } as unknown as HandoffRecordV1));
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("expected missing_head");
       expect(result.error.code).toBe("missing_head");
@@ -110,7 +110,7 @@ describe("handoff record admission", () => {
 
   it("rejects an unknown tracked_tree_state as invalid_tree_state", () => {
     const result = admitHandoffRecord(
-      handoff({ tracked_tree_state: "partially_dirty" } as HandoffRecordV1)
+      handoff({ tracked_tree_state: "partially_dirty" } as unknown as HandoffRecordV1)
     );
 
     expect(result.ok).toBe(false);
@@ -124,7 +124,7 @@ describe("handoff record admission", () => {
         handoff({
           tracked_tree_state: "dirty",
           untracked_inventory,
-        } as HandoffRecordV1)
+        } as unknown as HandoffRecordV1)
       );
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("expected dirty_tree_without_inventory");
@@ -140,7 +140,7 @@ describe("handoff record admission", () => {
       ["ok", 7],
     ]) {
       const result = admitHandoffRecord(
-        handoff({ untracked_inventory } as HandoffRecordV1)
+        handoff({ untracked_inventory } as unknown as HandoffRecordV1)
       );
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("expected invalid_inventory");
@@ -150,7 +150,7 @@ describe("handoff record admission", () => {
 
   it("rejects malformed hazards as invalid_inventory", () => {
     for (const hazards of ["oops", [5]]) {
-      const result = admitHandoffRecord(handoff({ hazards } as HandoffRecordV1));
+      const result = admitHandoffRecord(handoff({ hazards } as unknown as HandoffRecordV1));
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("expected invalid_inventory");
       expect(result.error.code).toBe("invalid_inventory");
@@ -167,7 +167,7 @@ describe("handoff record admission", () => {
   it("rejects missing unfinished_work as missing_unfinished_work", () => {
     for (const unfinished_work of ["", 0]) {
       const result = admitHandoffRecord(
-        handoff({ unfinished_work } as HandoffRecordV1)
+        handoff({ unfinished_work } as unknown as HandoffRecordV1)
       );
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("expected missing_unfinished_work");
@@ -177,7 +177,7 @@ describe("handoff record admission", () => {
 
   it("rejects an unknown authored_by as invalid_authored_by", () => {
     const result = admitHandoffRecord(
-      handoff({ authored_by: "god" } as HandoffRecordV1)
+      handoff({ authored_by: "god" } as unknown as HandoffRecordV1)
     );
 
     expect(result.ok).toBe(false);

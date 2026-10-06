@@ -10,6 +10,7 @@ import { RedisClient } from "../../src/mcp-server/redis-client.js";
 import { claimTasks, claimTasksSchema } from "../../src/mcp-server/tools/claim-tasks.js";
 import { acknowledgeTasks, acknowledgeTasksSchema } from "../../src/mcp-server/tools/acknowledge-tasks.js";
 import { sendMessage, sendMessageSchema } from "../../src/mcp-server/tools/send-message.js";
+import { CLAIM_KEYS } from "../../src/core/keys.js";
 import { parseToolResult, REDIS_URL, startSender, waitFor, type QueuedMessage, type Sender } from "./harness.js";
 
 const SENDERS = 4, RECIPIENTS = 3, PER_PAIR = 25, WORKERS_PER_RECIPIENT = 3;
@@ -38,6 +39,7 @@ describe("DL-8 concurrency stress", () => {
     const claimedBy = new Map<string, Set<string>>();       // message id -> recipients that claimed it
     const crossDelivered: string[] = [];
     const abandoned = new Set<string>();
+    const claimIds = new Map(recipients.map((r) => [r.name, new Set<string>()])); // every claim each recipient took
     let sendingDone = false;
 
     // Concurrent sending: every sender to every recipient, interleaved.
@@ -52,7 +54,11 @@ describe("DL-8 concurrency stress", () => {
 
     // One abandoned claim per recipient, with a 1 s lease, once mail exists: recovery must redeliver it.
     await waitFor(async () => (await Promise.all(recipients.map((r) => r.client.adapterConnection.llen(`gptq:q:${r.name}`)))).every((n) => n >= 2), 10_000, "initial mail");
-    for (const r of recipients) { const c = await claim(r, 2, 1); for (const t of c?.tasks ?? []) abandoned.add(t.id); }
+    for (const r of recipients) {
+      const c = await claim(r, 2, 1);
+      if (c) claimIds.get(r.name)!.add(c.claim_id);
+      for (const t of c?.tasks ?? []) abandoned.add(t.id);
+    }
 
     // Concurrent workers per recipient, sharing the recipient's session, racing on claim/ack.
     const done = (r: Worker) => sendingDone && [...expected.get(r.name)!].every((id) => (acks.get(id) ?? 0) > 0);
@@ -61,6 +67,7 @@ describe("DL-8 concurrency stress", () => {
       while (!done(r) && Date.now() < deadline) {
         const c = await claim(r, 4, 30);
         if (!c) { await new Promise((resolve) => setTimeout(resolve, 20)); continue; }
+        claimIds.get(r.name)!.add(c.claim_id);
         for (const task of c.tasks) {
           if (task.to !== r.name) crossDelivered.push(`${task.id}:${task.to}->${r.name}`);
           claimedBy.set(task.id, (claimedBy.get(task.id) ?? new Set()).add(r.name));
@@ -92,6 +99,12 @@ describe("DL-8 concurrency stress", () => {
       expect({ recipient: r.name, lost, duplicated }).toEqual({ recipient: r.name, lost: [], duplicated: [] });
       for (const id of ids) expect([...claimedBy.get(id)!]).toEqual([r.name]);
       expect(await r.client.adapterConnection.llen(`gptq:q:${r.name}`)).toBe(0);
+      // Server state, not the client's ack count: no outstanding claim and no claim record survives.
+      expect(await r.client.adapterConnection.zcard(CLAIM_KEYS.index(r.name))).toBe(0);
+      const taken = [...claimIds.get(r.name)!];
+      expect(taken.length).toBeGreaterThan(0);
+      const records = await r.client.adapterConnection.hmget(CLAIM_KEYS.claims, ...taken);
+      expect(taken.filter((_, i) => records[i] !== null)).toEqual([]);
     }
     // No acknowledgement for anything that was never sent.
     const all = new Set(recipients.flatMap((r) => [...expected.get(r.name)!]));

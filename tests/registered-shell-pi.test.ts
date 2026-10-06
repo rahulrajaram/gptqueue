@@ -125,5 +125,5 @@ it("accepts previous runtime catalogs and optional diagnostics without accepting
   expect(validateCatalog({ tools }, true)).toHaveLength(9);
   expect(validateCatalog({ tools: [...tools, { name: "find_agents", inputSchema: { type: "object" } }] }, true)).toHaveLength(10);
   expect(() => validateCatalog({ tools: [...tools, { name: "foreign_tool", inputSchema: { type: "object" } }] }, true)).toThrow(/mismatch/);
-  expect(() => validateCatalog({ tools: [...tools, tools[0]] }, true)).toThrow(/mismatch/);
+  expect(() => validateCatalog({ tools: [...tools, tools[0]!] }, true)).toThrow(/mismatch/);
 });

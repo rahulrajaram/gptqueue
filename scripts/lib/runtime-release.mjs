@@ -5,6 +5,10 @@
 //                            manifest.json (per-file sha256), verify.json (gate result)
 //   releases/<id>.tmp/       staging; never referenced by current/previous
 //   releases/<id>.rejected-<ts>/  a staged release that failed verification (kept as evidence)
+//   releases/.staging-*/     scratch copy before the id is known
+//   releases/<name>.owner    {pid, createdAt} of the install that owns a .staging-* or
+//                            <id>.tmp entry; install and prune reclaim entries whose
+//                            owner is dead (or, without a marker, older than a threshold)
 //   current -> releases/<id> atomic symlink (rename of current.new over current)
 //   previous -> releases/<id>
 //
@@ -144,23 +148,78 @@ export function setPointer(prefix, name, id) {
   renameSync(staging, link);
 }
 
+// ---------------------------------------------------------------- staging ownership
+
+const OWNER_SUFFIX = ".owner";
+/** Staging entries without a readable owner marker are reclaimed only after this age. */
+export const STALE_STAGING_MS = 60 * 60 * 1000;
+const ownerMarker = (dir) => `${dir}${OWNER_SUFFIX}`;
+const writeOwner = (dir) => writeFileSync(ownerMarker(dir), `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`);
+const dropOwner = (dir) => rmSync(ownerMarker(dir), { force: true });
+const isStagingName = (name) => (name.startsWith(".staging-") || name.endsWith(".tmp")) && !name.endsWith(OWNER_SUFFIX);
+
+/** True when pid names a live process (EPERM still means it exists). */
+export const pidAlive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
+};
+
+const readOwner = (dir) => {
+  try {
+    const owner = JSON.parse(readFileSync(ownerMarker(dir), "utf8"));
+    return Number.isInteger(owner?.pid) && owner.pid > 0 ? owner : undefined;
+  } catch { return undefined; }
+};
+
+/**
+ * Staging entries (.staging-* and <id>.tmp) left by installs that are no
+ * longer running. An entry is stale when its owner marker names a dead pid,
+ * or when it has no usable marker and is older than staleAfterMs. A live
+ * owner is never reclaimed.
+ */
+export function findStaleStaging(prefix, { now = Date.now(), staleAfterMs = STALE_STAGING_MS, isAlive = pidAlive } = {}) {
+  const { releases } = paths(prefix);
+  if (!existsSync(releases)) return Object.freeze([]);
+  const rows = readdirSync(releases).filter(isStagingName).flatMap((name) => {
+    const dir = join(releases, name);
+    const owner = readOwner(dir);
+    const ageMs = Math.max(0, now - lstatSync(dir).mtimeMs);
+    if (owner) return isAlive(owner.pid) ? [] : [{ name, ownerPid: owner.pid, ageMs, reason: "owner_dead" }];
+    return ageMs > staleAfterMs ? [{ name, ownerPid: undefined, ageMs, reason: "no_owner_expired" }] : [];
+  });
+  return Object.freeze(rows.map((r) => Object.freeze(r)));
+}
+
+/** Remove the entries findStaleStaging reports, with their markers; returns their names. */
+export function reclaimStaleStaging(prefix, options = {}) {
+  const { releases } = paths(prefix);
+  const stale = findStaleStaging(prefix, options);
+  for (const { name } of stale) { removeTree(join(releases, name)); dropOwner(join(releases, name)); }
+  return Object.freeze(stale.map((r) => r.name));
+}
+
 /** Stage a release from a built checkout into releases/<id>.tmp. */
 export function stageRelease({ source, prefix, shortSha, installDependencies = npmCiInstall }) {
   const { releases } = paths(prefix);
   mkdirSync(releases, { recursive: true });
   const scratch = mkdtempSync(join(releases, ".staging-"));
+  writeOwner(scratch);
+  let tmp;
   try {
     for (const entry of STAGED_ENTRIES) cpSync(join(source, entry), join(scratch, entry), { recursive: true, verbatimSymlinks: true });
     installDependencies(scratch);
     const id = releaseId(shortSha, computeManifest(scratch).fullDigest);
-    const tmp = join(releases, `${id}.tmp`);
+    tmp = join(releases, `${id}.tmp`);
     removeTree(tmp);
+    writeOwner(tmp);
     renameSync(scratch, tmp);
+    dropOwner(scratch);
     const manifest = { id, shortSha, createdAt: new Date().toISOString(), ...computeManifest(tmp) };
     writeFileSync(join(tmp, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
     return Object.freeze({ id, tmp, manifest });
   } catch (error) {
     removeTree(scratch);
+    dropOwner(scratch);
+    if (tmp) { removeTree(tmp); dropOwner(tmp); }
     throw error;
   }
 }
@@ -237,9 +296,19 @@ const traceEscapes = (root, traceFile) => {
   return { loaded: urls.length, escapes };
 };
 
+/** Verification children still running, so a signalled installer can kill them. */
+const verificationChildren = new Set();
+
+/** Kill every running verification child (used by install-runtime's signal handlers). */
+export function killVerificationChildren(signal = "SIGKILL") {
+  for (const child of verificationChildren) { try { child.kill(signal); } catch { /* already gone */ } }
+}
+
 const timedChild = ({ command, args, cwd, env, input, boundMs, until }) => new Promise((resolvePromise) => {
   const started = process.hrtime.bigint();
   const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+  verificationChildren.add(child);
+  child.once("close", () => verificationChildren.delete(child));
   let stdout = ""; let stderr = ""; let settled = false;
   const finish = (ok, reason) => {
     if (settled) return;
@@ -331,10 +400,12 @@ export function activate(prefix, id) {
  */
 export async function install({ source, prefix, allowDirty = false, installDependencies = npmCiInstall, redisUrl, initBoundMs, hookBoundMs, node, activateRelease = true }) {
   const { shortSha } = checkSource(source, { allowDirty });
+  reclaimStaleStaging(prefix);
   const staged = stageRelease({ source, prefix, shortSha, installDependencies });
   const final = join(paths(prefix).releases, staged.id);
   if (existsSync(final)) {
     removeTree(staged.tmp);
+    dropOwner(staged.tmp);
     const integrity = checkIntegrity(final);
     if (!integrity.ok) throw new ReleaseError("tampered_release", `release ${staged.id} differs from its manifest: ${integrity.changed.slice(0, 5).join(", ")}`);
     if (integrity.recorded.sourceDigest !== staged.manifest.sourceDigest || integrity.recorded.fullDigest !== staged.manifest.fullDigest) {
@@ -344,15 +415,25 @@ export async function install({ source, prefix, allowDirty = false, installDepen
     if (!verify.ok) throw new ReleaseError("verify_failed", `release ${staged.id} exists but failed verification`);
     return Object.freeze({ id: staged.id, reused: true, verify, ...(activateRelease ? activate(prefix, staged.id) : {}) });
   }
-  const verify = await verifyRelease(staged.tmp, { redisUrl, initBoundMs, hookBoundMs, node });
+  let verify;
+  try {
+    verify = await verifyRelease(staged.tmp, { redisUrl, initBoundMs, hookBoundMs, node });
+  } catch (error) {
+    // A verifier that throws (rather than returning ok=false) leaves no <id>.tmp behind.
+    removeTree(staged.tmp);
+    dropOwner(staged.tmp);
+    throw error;
+  }
   writeFileSync(join(staged.tmp, "verify.json"), `${JSON.stringify(verify, null, 2)}\n`);
   if (!verify.ok) {
     const rejected = `${final}.rejected-${Date.now()}`;
     renameSync(staged.tmp, rejected);
+    dropOwner(staged.tmp);
     throw Object.assign(new ReleaseError("verify_failed", `release ${staged.id} failed verification; kept at ${rejected}`), { verify });
   }
   setReadOnly(staged.tmp, true);
   renameSync(staged.tmp, final);
+  dropOwner(staged.tmp);
   return Object.freeze({ id: staged.id, reused: false, verify, ...(activateRelease ? activate(prefix, staged.id) : {}) });
 }
 
@@ -367,7 +448,7 @@ export function rollback(prefix) {
   return Object.freeze({ current: previous, previous: current });
 }
 
-const isRelease = (name) => !name.startsWith(".") && !name.endsWith(".tmp") && !name.includes(".rejected-");
+const isRelease = (name) => !name.startsWith(".") && !name.endsWith(".tmp") && !name.endsWith(OWNER_SUFFIX) && !name.includes(".rejected-");
 
 export function status(prefix) {
   const { releases } = paths(prefix);
@@ -381,17 +462,21 @@ export function status(prefix) {
       verified: verify?.ok ?? false, mcpInitializeMs: verify?.mcpInitialize?.ms, claudeHookMs: verify?.claudeHook?.ms,
     };
   }).sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.mtimeMs - b.mtimeMs);
-  return Object.freeze({ prefix, current: pointerTarget(prefix, "current"), previous: pointerTarget(prefix, "previous"), releases: rows.map(({ mtimeMs: _m, ...r }) => r) });
+  return Object.freeze({
+    prefix, current: pointerTarget(prefix, "current"), previous: pointerTarget(prefix, "previous"),
+    releases: rows.map(({ mtimeMs: _m, ...r }) => r), staleStaging: findStaleStaging(prefix),
+  });
 }
 
 /** Delete the oldest releases beyond `keep`; never current or previous. */
 export function prune(prefix, keep) {
   if (!Number.isInteger(keep) || keep < 0) throw new ReleaseError("bad_argument", "--keep must be a non-negative integer");
+  const reclaimed = reclaimStaleStaging(prefix);
   const s = status(prefix);
   const protectedIds = new Set([s.current, s.previous].filter(Boolean));
   const candidates = s.releases.map((r) => r.id).filter((id) => !protectedIds.has(id));
   const excess = Math.max(0, s.releases.length - Math.max(keep, protectedIds.size));
   const removed = candidates.slice(0, excess);
   for (const id of removed) removeTree(join(paths(prefix).releases, id));
-  return Object.freeze({ removed, kept: s.releases.map((r) => r.id).filter((id) => !removed.includes(id)) });
+  return Object.freeze({ removed, reclaimed, kept: s.releases.map((r) => r.id).filter((id) => !removed.includes(id)) });
 }

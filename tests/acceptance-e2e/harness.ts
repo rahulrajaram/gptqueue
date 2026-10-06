@@ -15,9 +15,12 @@
  *   followUp, isIdle, hasPendingMessages, agent_end, appendEntry).
  * - OpenCode: the real plugin (createOpenCodePlugin) and SDK port against a
  *   fake OpenCode SDK client (session.get/status/messages/promptAsync).
- * - Claude: no turn injection. The real event-driven watcher (watchInbox, the
- *   body of `gptqueue-inbox-peek --watch`) exiting is the wake, and the real
- *   Stop hook (runClaudeHook) decides whether a finished turn must continue.
+ * - Claude: no turn injection. The stand-in publishes a real session record
+ *   for its own process (as the Claude MCP server does), so the real Stop hook
+ *   (runClaudeHook) resolves a confirmed identity and blocks a finished turn
+ *   when mail is pending; that block is the next turn. While idle, the real
+ *   event-driven watcher (watchInbox, the body of `gptqueue-inbox-peek
+ *   --watch`) exiting is the wake. Each injection records which path made it.
  *
  * Every fake "model" is cooperative: given a turn, it claims, answers each
  * task with a correlated result, and acknowledges, until its inbox is empty.
@@ -27,12 +30,11 @@ import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Redis } from "ioredis";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 import { RedisClient } from "../../src/mcp-server/redis-client.js";
-import { sendMessage, sendMessageSchema } from "../../src/mcp-server/tools/send-message.js";
-import { claimTasks, claimTasksSchema } from "../../src/mcp-server/tools/claim-tasks.js";
-import { acknowledgeTasks, acknowledgeTasksSchema } from "../../src/mcp-server/tools/acknowledge-tasks.js";
 import { createBoundMcpServer } from "../../src/experimental-wrapper/bridge.js";
 import { createRuntimeController } from "../../src/registered-shell/runtime-controller.js";
 import { createCodexRuntime, type CodexNotification, type CodexRpcClient } from "../../src/registered-shell/codex-runtime.js";
@@ -43,6 +45,8 @@ import { opencodeAgentName } from "../../src/registered-shell/opencode-backend.j
 import { runtimeBindingSchema, type ActivationOutcome, type ActivationRequest, type RuntimeBinding } from "../../src/registered-shell/runtime.js";
 import { watchInbox } from "../../src/claude/peek.js";
 import { runClaudeHook } from "../../src/claude/hook.js";
+import { publishSessionRecord, readProcess } from "../../src/claude/session-record.js";
+import { registerTools } from "../../src/transports/setup-tools.js";
 import { SESSION_KEYS } from "../../src/core/keys.js";
 
 export const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
@@ -145,21 +149,27 @@ export interface Sender {
   close(): Promise<void>;
 }
 
-const directToolCall = (client: RedisClient): ToolCall => async (name, args) => {
-  const session_id = client.sessionId ?? undefined;
-  switch (name) {
-    case "send_message": return parseToolResult(await sendMessage(client, sendMessageSchema.parse({ ...args, session_id })));
-    case "claim_tasks": return parseToolResult(await claimTasks(client, claimTasksSchema.parse({ ...args, session_id })));
-    case "acknowledge_tasks": return parseToolResult(await acknowledgeTasks(client, acknowledgeTasksSchema.parse({ ...args, session_id })));
-    default: { const unreachable: never = name; throw new Error(String(unreachable)); }
-  }
+/**
+ * The generic gptqueue MCP tool layer (registerTools, as the stdio and HTTP
+ * servers use) for a registered client, over an in-memory transport. It writes
+ * the same inbox trace stages as production (task_claimed, task_acknowledged).
+ */
+const genericToolCall = async (client: RedisClient): Promise<Readonly<{ call: ToolCall; close: () => Promise<void> }>> => {
+  const server = new McpServer({ name: "gptqueue-e2e", version: "0.0.0" });
+  registerTools(server, client);
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const mcp = new Client({ name: "e2e-generic", version: "0.0.0" });
+  await mcp.connect(clientTransport);
+  const call: ToolCall = (name, args) => mcpToolCall(() => mcp)(name, { ...args, session_id: client.sessionId ?? undefined });
+  return { call, close: async () => { await mcp.close().catch(() => undefined); await server.close().catch(() => undefined); } };
 };
 
 export const startSender = async (label = "sender"): Promise<Sender> => {
   const client = new RedisClient(null, REDIS_URL);
   const name = `e2e-${label}-${randomUUID()}`;
   await client.register("both", name);
-  const call = directToolCall(client);
+  const { call, close: closeTools } = await genericToolCall(client);
   const received: Array<Readonly<{ message: QueuedMessage; claim_id: string }>> = [];
   return {
     name, received,
@@ -183,7 +193,7 @@ export const startSender = async (label = "sender"): Promise<Sender> => {
       received.push(...batch);
       return batch;
     },
-    close: async () => { await client.closeCurrentSession().catch(() => undefined); await client.shutdown().catch(() => undefined); },
+    close: async () => { await closeTools(); await client.closeCurrentSession().catch(() => undefined); await client.shutdown().catch(() => undefined); },
   };
 };
 
@@ -197,6 +207,8 @@ export interface Recipient {
   readonly handled: Handled[];
   /** Native host receipt time of every injected turn (Claude: watcher exit or Stop-hook block). */
   readonly injections: number[];
+  /** Claude only: which path made each injection, index-aligned with injections. */
+  readonly injectionVia?: readonly ClaudeWake[];
   /** Start time of every model turn (Pi queues a mid-turn follow-up at receipt and runs it after the turn). */
   readonly turnStarts: number[];
   /** Turns that ended on a tool error. */
@@ -245,16 +257,19 @@ class FakeCodexAppServer {
   readonly injections: number[] = [];
   private readonly listeners = new Set<(n: CodexNotification) => void>();
   private held: CodexTurn | undefined;
+  /** Codex 0.160.1 materializes a thread at its first user message (turn/start or a user turn). */
+  private materialized = false;
   onTurn: () => Promise<void> = async () => undefined;
   constructor(readonly threadId: string, readonly cwd: string) {}
   private active(): boolean { return this.turns.some((turn) => turn.status === "inProgress"); }
-  private emit(method: string, params: Record<string, unknown>): void { for (const l of [...this.listeners]) l({ method, params }); }
+  private emit(method: string, params: Record<string, unknown>): void { for (const l of Array.from(this.listeners)) l({ method, params }); }
   private complete(turn: CodexTurn): void {
     turn.status = "completed";
     this.emit("turn/completed", { threadId: this.threadId, turn: { id: turn.id, status: "completed" } });
     this.emit("thread/status/changed", { threadId: this.threadId, status: { type: this.active() ? "active" : "idle" } });
   }
   hold(): void {
+    this.materialized = true;
     this.held = { id: `turn-user-${randomUUID()}`, status: "inProgress", items: [{ type: "userMessage", id: randomUUID(), content: [{ type: "text", text: "user work" }] }] };
     this.turns.push(this.held);
   }
@@ -274,6 +289,11 @@ class FakeCodexAppServer {
       case "thread/read":
         return { thread: { id: this.threadId, cwd: this.cwd, status: this.active() ? { type: "active", activeFlags: [] } : { type: "idle" } } };
       case "thread/turns/list":
+        // Real Codex 0.160.1 rejects this on a never-prompted thread (live probe 2026-10-06).
+        if (!this.materialized) {
+          throw new Error(`Codex RPC rejected: ${JSON.stringify({ code: -32600,
+            message: `thread ${this.threadId} is not materialized yet; thread/turns/list is unavailable before first user message` })}`);
+        }
         return { data: [...this.turns].reverse().slice(0, Number(params.limit ?? 16)).map(({ id, status }) => ({ id, status, items: [], itemsView: "notLoaded" })), nextCursor: null, backwardsCursor: null };
       case "thread/items/list": {
         const turn = this.turns.find((t) => t.id === params.turnId);
@@ -283,6 +303,7 @@ class FakeCodexAppServer {
       case "turn/start": {
         if (this.active()) throw new Error("Codex RPC rejected: a turn is already in progress");
         this.injections.push(now());
+        this.materialized = true;
         const input = params.input as Array<{ type: string; text: string }>;
         const turn: CodexTurn = { id: `turn-${randomUUID()}`, status: "inProgress",
           items: [{ type: "userMessage", id: randomUUID(), clientId: params.clientUserMessageId, content: input }] };
@@ -498,6 +519,9 @@ export const startOpenCodeRecipient = async (): Promise<Recipient> => {
 
 // ---- Claude: watcher exit is the wake; the Stop hook decides continuation
 
+/** stop_hook: the Stop hook blocked a finished turn; watcher: the idle watcher exited on mail. */
+export type ClaudeWake = "stop_hook" | "watcher";
+
 export const startClaudeRecipient = async (options: Readonly<{ name?: string; claudeSessionId?: string }> = {}): Promise<Recipient> => {
   const redis = new RedisClient(null, REDIS_URL);
   await redis.register("both", options.name ?? `e2e-claude-${randomUUID()}`);
@@ -506,32 +530,42 @@ export const startClaudeRecipient = async (options: Readonly<{ name?: string; cl
   const claudeSession = options.claudeSessionId ?? randomUUID();
   const handled: Handled[] = [];
   const injections: number[] = [];
-  const call = directToolCall(redis);
+  const injectionVia: ClaudeWake[] = [];
+  const inject = (via: ClaudeWake) => { injections.push(now()); injectionVia.push(via); };
+  const { call, close: closeTools } = await genericToolCall(redis);
   const runner = new TurnRunner(() => call, () => redis.requireRegistered(), handled);
   let held = false;
   let closed = false;
   let watcher: AbortController | undefined;
   let loop: Promise<void> = Promise.resolve();
   let generation = 0;
-  const env = (): NodeJS.ProcessEnv => ({ ...process.env, REDIS_URL, GPTQ_AGENT_NAME: redis.requireRegistered(),
-    GPTQ_CLAUDE_RUNTIME_DIR: runtimeDir, GPTQ_CLAUDE_WATCH: "off", CLAUDE_PROJECT_DIR: "" });
+  // This process stands in for the Claude process: the hook resolves identity
+  // from the record keyed by this pid, never from the environment or /proc scan.
+  const env = (): NodeJS.ProcessEnv => ({ ...process.env, REDIS_URL, GPTQ_AGENT_NAME: "", GPTQ_CLAUDE_PID: String(process.pid),
+    GPTQ_CLAUDE_LEGACY_SCAN: "off", GPTQ_CLAUDE_RUNTIME_DIR: runtimeDir, GPTQ_CLAUDE_WATCH: "off", CLAUDE_PROJECT_DIR: "" });
+  const self = readProcess(process.pid);
+  if (!self) throw new Error("cannot read /proc for the Claude stand-in");
+  if (!redis.sessionId) throw new Error("Claude stand-in has no gptqueue session");
+  publishSessionRecord(self, redis.requireRegistered(), redis.sessionId, env());
   /** The real Stop hook: "block" means Claude continues with another turn. */
-  const stopHookBlocks = async (): Promise<boolean> => {
-    const result = await runClaudeHook(["stop"], JSON.stringify({ session_id: claudeSession, cwd: runtimeDir, stop_hook_active: false }), runtimeDir, env());
+  const stopHookBlocks = async (stopHookActive: boolean): Promise<boolean> => {
+    const result = await runClaudeHook(["stop"], JSON.stringify({ session_id: claudeSession, cwd: runtimeDir, stop_hook_active: stopHookActive }), runtimeDir, env());
     return result.stdout !== null && (JSON.parse(result.stdout) as { decision?: string }).decision === "block";
   };
-  /** One model turn, then the Stop hook; a block is an immediate next turn. */
-  const turnAndStop = async () => {
-    await runner.run();
-    while (!held && await stopHookBlocks()) { injections.push(now()); await runner.run(); }
+  /** Turns ended by the Stop hook: each block is an immediate next turn (stop_hook_active, as Claude sends it). */
+  const continueWhileBlocked = async (stopHookActive: boolean) => {
+    let active = stopHookActive;
+    while (!held && await stopHookBlocks(active)) { inject("stop_hook"); await runner.run(); active = true; }
   };
+  /** One model turn, then the Stop hook. */
+  const turnAndStop = async () => { await runner.run(); await continueWhileBlocked(false); };
   /** Idle: run the event-driven watcher in the background; its exit wakes the session. */
   const idleLoop = async (mine: number) => {
     while (!closed && !held && mine === generation) {
       watcher = new AbortController();
-      const outcome = await watchInbox(REDIS_URL, redis.requireRegistered(), { timeoutSec: 0, blockMs: 5_000, signal: watcher.signal });
+      const outcome = await watchInbox(REDIS_URL, redis.requireRegistered(), { timeoutSec: 0, blockMs: 5_000, signal: watcher.signal, giveUpAfterMs: null, retryMs: 50 });
       if (outcome.kind !== "mail" || closed || held || mine !== generation) return;
-      injections.push(now());
+      inject("watcher");
       await turnAndStop();
     }
   };
@@ -539,20 +573,23 @@ export const startClaudeRecipient = async (options: Readonly<{ name?: string; cl
   const stopWatcher = async () => { generation += 1; watcher?.abort(); await loop; };
   startWatcher();
   return {
-    runtime: "claude", handled, turnStarts: runner.starts, turnErrors: runner.errors, turnRunning: () => runner.running, injections,
+    runtime: "claude", handled, turnStarts: runner.starts, turnErrors: runner.errors, turnRunning: () => runner.running, injections, injectionVia,
     name: () => redis.requireRegistered(),
     hold: () => { held = true; generation += 1; watcher?.abort(); },
     release: async () => {
       await loop; held = false; const at = now();
       // The user's turn ends: the Stop hook runs, and either continues with mail or the session idles with its watcher.
-      if (await stopHookBlocks()) { injections.push(now()); await turnAndStop(); }
+      await continueWhileBlocked(false);
       startWatcher();
       return at;
     },
     send: async (to, content) => String((await call("send_message", { to, content, type: "task" })).message_id),
     // A restarted watcher re-checks LLEN first, so mail that arrived while it was down still wakes the session.
     restart: async () => { await stopWatcher(); startWatcher(); },
-    close: async () => { closed = true; watcher?.abort(); await loop.catch(() => undefined); await redis.closeCurrentSession().catch(() => undefined); await redis.shutdown().catch(() => undefined); },
+    close: async () => {
+      closed = true; watcher?.abort(); await loop.catch(() => undefined); await closeTools();
+      publishSessionRecord(self, null, null, env());
+      await redis.closeCurrentSession().catch(() => undefined); await redis.shutdown().catch(() => undefined); },
   };
 };
 
@@ -569,12 +606,32 @@ export const startRecipient = (runtime: Runtime): Promise<Recipient> => {
 // ---------------------------------------------------------------- trace reading
 
 export type TraceEntry = Readonly<Record<string, string>>;
-export const readTrace = async (redis: RedisClient, agent: string): Promise<readonly TraceEntry[]> =>
-  (await redis.adapterConnection.xrange(SESSION_KEYS.inboxTrace(agent), "-", "+")).map(([, fields]) => {
+type XRange = Pick<Redis, "xrange">;
+const readTraceFrom = async (conn: XRange, agent: string): Promise<readonly TraceEntry[]> =>
+  (await conn.xrange(SESSION_KEYS.inboxTrace(agent), "-", "+")).map(([, fields]) => {
     const out: Record<string, string> = {};
     for (let i = 0; i < fields.length; i += 2) out[fields[i]!] = fields[i + 1]!;
     return Object.freeze(out);
   });
+export const readTrace = (redis: RedisClient, agent: string): Promise<readonly TraceEntry[]> => readTraceFrom(redis.adapterConnection, agent);
+
+/** Server-side consumption of one message: its task_claimed row and the task_acknowledged row for that claim. */
+export type TraceConsumption = Readonly<{ claim_id: string | undefined; acknowledged: boolean }>;
+export const traceConsumption = async (agent: string, messageId: string, timeoutMs = 5_000): Promise<TraceConsumption> => {
+  const conn = new Redis(REDIS_URL, { maxRetriesPerRequest: 3 });
+  const look = async (): Promise<TraceConsumption> => {
+    const rows = await readTraceFrom(conn, agent);
+    const claim = rows.find((row) => row.stage === "task_claimed" && row.message_id === messageId);
+    const acknowledged = claim !== undefined && rows.some((row) => row.stage === "task_acknowledged" && row.claim_id === claim.claim_id);
+    return { claim_id: claim?.claim_id, acknowledged };
+  };
+  try {
+    let found = await look();
+    const deadline = Date.now() + timeoutMs;
+    while (!found.acknowledged && Date.now() < deadline) { await sleep(10); found = await look(); }
+    return found;
+  } finally { conn.disconnect(); }
+};
 
 export const percentile = (values: readonly number[], p: number): number => {
   if (!values.length) return Number.NaN;

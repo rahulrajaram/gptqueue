@@ -61,7 +61,7 @@ describe("claim core semantics", () => {
     } finally {
       waiter.close();
     }
-    const [[, fields]] = await redis.xrevrange(SESSION_KEYS.inboxEvents(actor), "+", "-", "COUNT", 1);
+    const [[, fields] = ['', []]] = await redis.xrevrange(SESSION_KEYS.inboxEvents(actor), "+", "-", "COUNT", 1);
     expect(fields).toEqual(expect.arrayContaining(["message_id", "t1", "type", "task"]));
     expect(await redis.hget(SESSION_KEYS.mailboxMeta(actor), "current_size")).toBe("1");
   });
@@ -142,7 +142,7 @@ describe("claim core semantics", () => {
     const entries = await store.deadLetterEntries({ actor_id: actor });
     expect(entries.ok && entries.dropped).toBe(1);
     const tool = dlqStatusResult(entries);
-    const text = (tool as { content: { text: string }[] }).content[0].text;
+    const text = (tool as { content: { text: string }[] }).content[0]!.text;
     expect(JSON.parse(text)).toMatchObject({ status: "ok", count: 2, dropped: 1 });
   });
 
@@ -155,7 +155,7 @@ describe("claim core semantics", () => {
       const result = await store.deadLetterEntries({ actor_id: actor });
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error.code).toBe("store_corrupt");
-      const text = (dlqStatusResult(result) as { content: { text: string }[] }).content[0].text;
+      const text = (dlqStatusResult(result) as { content: { text: string }[] }).content[0]!.text;
       expect(JSON.parse(text)).toMatchObject({ status: "error", error: { code: "store_corrupt" } });
     }
   });

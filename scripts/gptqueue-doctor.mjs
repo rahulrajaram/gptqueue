@@ -8,7 +8,7 @@ import { SESSION_KEYS } from '../dist/core/keys.js';
 import { AgentDiagnostics } from '../dist/core/agent-diagnostics.js';
 import { prepareContinuity, applyContinuity } from '../dist/core/mailbox-continuity.js';
 import { probeActivationReady, bindingAgrees } from '../dist/core/doctor-probe.js';
-import { sweepProvisional } from '../dist/core/provisional-sweeper.js';
+import { reservedSenderRegistrations, sweepProvisional } from '../dist/core/provisional-sweeper.js';
 import { CodexSocketClient } from '../dist/registered-shell/codex-socket.js';
 
 const [command, ...args] = process.argv.slice(2);
@@ -128,7 +128,7 @@ try {
     }
     // DL-2: retire crashed sidecars' provisional names (idempotent; never touches live or claimed names).
     case 'sweep-provisional':
-      result = { swept: await sweepProvisional(redis, Number(options['--limit'] ?? 1000)) };
+      result = { swept: await sweepProvisional(redis, Number(options['--limit'] ?? 1000)), reserved_sender: await reservedSenderRegistrations(redis) };
       break;
     case 'continuity-apply':
       if (options['--apply'] !== 'yes') throw new Error('Operator approval required: --apply yes');

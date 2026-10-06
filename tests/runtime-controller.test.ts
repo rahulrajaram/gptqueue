@@ -102,7 +102,7 @@ describe("runtime controller (bind_runtime)", () => {
     await controller.bind(binding());
     expect(await controller.bind(binding({ runtime_id: otherRuntimeId }))).toEqual({ status: "error", code: "runtime_rebind_requires_new_connection" });
     expect(await controller.bind(binding({ working_directory: "/elsewhere" }))).toEqual({ status: "error", code: "runtime_binding_mismatch" });
-    expect(await controller.bind({ client: "codex" })).toEqual({ status: "error", code: "invalid_runtime_binding" });
+    expect(await controller.bind({ client: "codex" } as unknown as Parameters<typeof controller.bind>[0])).toEqual({ status: "error", code: "invalid_runtime_binding" });
     await controller.close();
     expect(await controller.bind(binding({ epoch: "e3" }))).toEqual({ status: "error", code: "runtime_controller_closed" });
   });

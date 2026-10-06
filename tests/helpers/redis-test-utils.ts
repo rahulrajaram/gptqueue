@@ -23,7 +23,7 @@ const DEFAULT_URL = "redis://127.0.0.1:6379";
 /** Extract the database index from a Redis URL; 0 when no db is specified. */
 export function dbIndexOf(url: string): number {
   const m = url.match(/\/(\d+)(?:[?#].*)?$/);
-  return m ? Number.parseInt(m[1], 10) : 0;
+  return m ? Number.parseInt(m[1]!, 10) : 0;
 }
 
 /**

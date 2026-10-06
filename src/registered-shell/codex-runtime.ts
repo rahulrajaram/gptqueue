@@ -187,7 +187,7 @@ export const createCodexRuntime = async (
   const errorThreshold = options.systemErrorThreshold ?? 3;
   const errorWindowMs = options.systemErrorWindowMs ?? 120_000;
   const emit = (listeners: ReadonlySet<() => void>): void => {
-    for (const listener of [...listeners]) { try { listener(); } catch { /* listener faults never reach the socket */ } }
+    for (const listener of Array.from(listeners)) { try { listener(); } catch { /* listener faults never reach the socket */ } }
   };
   const markStale = (): void => { if (!stale) { stale = true; emit(staleListeners); } };
   // v2 ServerNotification.json: turn/completed {threadId, turn}, thread/status/changed {threadId, status},

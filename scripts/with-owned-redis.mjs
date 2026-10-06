@@ -39,6 +39,12 @@ const forward = (signal) => () => {
 process.on("SIGINT", forward("SIGINT"));
 process.on("SIGTERM", forward("SIGTERM"));
 process.on("SIGHUP", forward("SIGHUP"));
+// A command that cannot be spawned (ENOENT, EACCES) emits only "error".
+child.once("error", (error) => {
+  console.error(`with-owned-redis: cannot run ${command[0]}: ${error.message}`);
+  cleanup();
+  process.exit(127);
+});
 child.once("exit", (code, signal) => {
   // Reap any descendants the command left behind before stopping Redis.
   signalGroup("SIGTERM");

@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { startOwnedRedis } from "./lib/owned-redis.mjs";
-import { ReleaseError, install, prune, rollback, status } from "./lib/runtime-release.mjs";
+import { ReleaseError, install, killVerificationChildren, prune, rollback, status } from "./lib/runtime-release.mjs";
 import { buildPlan, renderPlan } from "./lib/runtime-plan.mjs";
 
 const DEFAULT_PREFIX = join(homedir(), ".local", "share", "gptqueue");
@@ -37,6 +37,13 @@ async function main(command) {
   switch (command) {
     case "install": {
       const redis = await startOwnedRedis({ stderr: "ignore" });
+      // A signal aimed at this pid alone must not orphan Redis or the
+      // verification children (the default action skips finally and "exit").
+      // A signal that arrives during the synchronous npm install is handled
+      // once it returns; the staging it leaves is reclaimed by the next run.
+      for (const [signal, number] of [["SIGTERM", 15], ["SIGINT", 2], ["SIGHUP", 1]]) {
+        process.once(signal, () => { killVerificationChildren(); redis.stop(); process.exit(128 + number); });
+      }
       try {
         return await install({
           source: resolve(values.source), prefix, allowDirty: values["allow-dirty"], redisUrl: redis.url,

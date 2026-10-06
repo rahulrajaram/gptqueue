@@ -6,7 +6,8 @@
  *   persisted_to_notified  LT-2  -> dispatcher activation_requested trace (Claude: watcher exit)
  *   send_to_injected       LT-3  -> native host receipt of the turn (turn/start, sendMessage, promptAsync; Claude: watcher exit)
  * Per busy iteration:
- *   turn_end_to_next_turn  LT-4  busy turn ends -> next model turn starts
+ *   turn_end_to_next_turn  LT-4  busy turn ends -> next model turn starts (Claude: the turn the
+ *                                busy turn's Stop-hook block started; a watcher wake fails the run)
  *
  * Env: GPTQUEUE_LATENCY_ITERATIONS (default 50), GPTQUEUE_LATENCY_OUT (merge JSON results
  * there; default: no file), GPTQUEUE_LATENCY_ASSERT=1 (enforce provisional targets).
@@ -14,7 +15,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { expect } from "vitest";
 import { RedisClient } from "../../src/mcp-server/redis-client.js";
-import { now, percentile, readTrace, REDIS_URL, sleep, startRecipient, startSender, taskContent, waitFor, type Recipient, type Runtime, type Sender } from "./harness.js";
+import { percentile, readTrace, REDIS_URL, sleep, startRecipient, startSender, taskContent, waitFor, type Recipient, type Runtime, type Sender } from "./harness.js";
 
 export const ITERATIONS = Number(process.env.GPTQUEUE_LATENCY_ITERATIONS ?? 50);
 export const ASSERT = process.env.GPTQUEUE_LATENCY_ASSERT === "1";
@@ -61,6 +62,7 @@ export const measureRuntime = async (runtime: Runtime): Promise<LatencyResult> =
       await settle();
       recipient.hold();
       const turnsBefore = recipient.turnStarts.length;
+      const injectionsBefore = recipient.injections.length;
       const sent = await sender.send(recipient.name(), taskContent(i, 9));
       // Let the busy outcome register: a deferral trace (Codex/OpenCode), a queued follow-up (Pi).
       if (runtime === "codex" || runtime === "opencode") {
@@ -78,6 +80,9 @@ export const measureRuntime = async (runtime: Runtime): Promise<LatencyResult> =
       await awaitReply(sender, sent.message_id);
       const next = firstAfter(recipient.turnStarts, ended, turnsBefore);
       if (next === undefined) throw new Error(`${runtime}: no turn after busy end in iteration ${i}`);
+      if (runtime === "claude" && recipient.injectionVia!.slice(injectionsBefore)[0] !== "stop_hook") {
+        throw new Error(`claude: busy iteration ${i} continued via ${recipient.injectionVia!.slice(injectionsBefore)[0] ?? "nothing"}, not a Stop-hook block`);
+      }
       hops.turn_end_to_next_turn!.push(next - ended);
     }
   } finally {

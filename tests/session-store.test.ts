@@ -159,7 +159,7 @@ describe("SessionStore", () => {
         new Promise((r) => setTimeout(r, i)).then(() => store.createSession("burst-agent", "both", undefined, undefined, { shared: true }))
       )
     );
-    expect((await store.getPresence("burst-agent")).active_sessions.sort()).toEqual(
+    expect([...(await store.getPresence("burst-agent")).active_sessions].sort()).toEqual(
       sessions.map((s) => s.session_id).sort()
     );
   });

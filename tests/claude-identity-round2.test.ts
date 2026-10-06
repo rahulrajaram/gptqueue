@@ -16,7 +16,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { registerTools } from "../src/transports/setup-tools.js";
-import { SESSION_KEYS } from "../src/core/keys.js";
+import { SESSION_DEFAULTS, SESSION_KEYS } from "../src/core/keys.js";
 import { sessionTag } from "../src/core/session-tag.js";
 import { publishSessionRecord, readProcess } from "../src/claude/session-record.js";
 import { waitForIdentity } from "../src/claude/inbox-probe.js";
@@ -139,9 +139,12 @@ describe("watcher record wait and Redis-outage policy", () => {
   const DEAD = "redis://127.0.0.1:1/0";
   const args = (argv: string[]) => { const a = parsePeekArgs(argv); if (typeof a === "string") throw new Error(a); return a; };
 
-  it("the name-free watcher waits 40 s for the record, outlasting the 32 s held-name registration wait", () => {
-    expect(WATCH_RECORD_WAIT_MS).toBe(40_000);
-    expect(WATCH_RECORD_WAIT_MS).toBeGreaterThan(32_000);
+  it("the name-free watcher's record wait outlasts the held-name registration wait plus fallback attempts", () => {
+    // Production registration wait (mcp-record.ts DEFAULT_DEPS.maxLeaseWaitMs), derived from the
+    // same SESSION_DEFAULTS, so raising the lease TTL fails here instead of stranding the watcher.
+    const registrationWaitMs = (SESSION_DEFAULTS.LEASE_TTL_SECONDS + 2) * 1000;
+    const FALLBACK_MARGIN_MS = 5_000; // fallback-name registrations and record publication after the wait
+    expect(WATCH_RECORD_WAIT_MS).toBeGreaterThan(registrationWaitMs + FALLBACK_MARGIN_MS);
   });
 
   it("legacy --name mode retries at --interval and never gives up on Redis errors", async () => {
