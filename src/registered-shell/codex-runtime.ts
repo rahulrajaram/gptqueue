@@ -59,6 +59,27 @@ const outcomeForTurn = (turn: Record_): ActivationOutcome | undefined => {
 const unsupportedMethod = (error: unknown): boolean =>
   /-32601|method not found|unknown variant|unknown method|not supported/i.test(String(error));
 
+/** The JSON-RPC error a rejected Codex request carries ("Codex RPC rejected: {code, message}"). */
+const rpcError = (error: unknown): Readonly<{ code?: unknown; message?: unknown }> | undefined => {
+  const text = error instanceof Error ? error.message : String(error);
+  const at = text.indexOf("Codex RPC rejected: ");
+  if (at < 0) return undefined;
+  try { return JSON.parse(text.slice(at + "Codex RPC rejected: ".length)) as Record_; } catch { return undefined; }
+};
+
+/**
+ * Codex 0.160.1 before a thread's first user message (live probe 2026-10-06):
+ * {"code":-32600,"message":"thread <id> is not materialized yet; thread/turns/list
+ * is unavailable before first user message"}. Such a thread has no turns, so no
+ * earlier submission can exist in it.
+ */
+const NOT_MATERIALIZED = /^thread \S+ is not materialized yet; thread\/turns\/list is unavailable before first user message$/;
+const notMaterialized = (error: unknown, threadId: string): boolean => {
+  const rpc = rpcError(error);
+  return rpc?.code === -32600 && typeof rpc.message === "string" && NOT_MATERIALIZED.test(rpc.message) &&
+    rpc.message.startsWith(`thread ${threadId} `);
+};
+
 type Lookup =
   | Readonly<{ kind: "match"; outcome: ActivationOutcome }>
   | Readonly<{ kind: "none"; busy: boolean; complete: boolean }>
@@ -74,6 +95,7 @@ const lookupRecent = async (
       threadId, limit: CODEX_TURN_WINDOW, sortDirection: "desc", itemsView: "notLoaded",
     }, signal);
   } catch (error) {
+    if (notMaterialized(error, threadId)) return { kind: "none", busy: false, complete: true };
     if (unsupportedMethod(error)) return { kind: "unsupported" };
     throw error;
   }

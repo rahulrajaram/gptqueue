@@ -34,7 +34,11 @@ export const CLAUDE_PROFILE: ScreenProfile = Object.freeze({
   dialogMarkers: Object.freeze([/Do you want to/i, /❯\s*\d+\./, /Esc to cancel/i, /\(y\/n\)/i, /Press Enter to continue/i, /esc to interrupt/i]),
 });
 
-/** Other CLIs: no known positive marker; only dialogs and typing veto injection. */
+/**
+ * Other CLIs: no known positive empty-prompt marker, so the guard can never
+ * prove the screen safe and never auto-injects (fail closed). Dialog markers
+ * still classify the reason when one is visible.
+ */
 export const GENERIC_PROFILE: ScreenProfile = Object.freeze({
   promptMarkers: Object.freeze([]),
   dialogMarkers: CLAUDE_PROFILE.dialogMarkers,
@@ -45,7 +49,7 @@ export const profileFor = (cmd: string): ScreenProfile =>
 
 export type ScreenVerdict =
   | Readonly<{ safe: true }>
-  | Readonly<{ safe: false; reason: "user_typing" | "dialog" | "no_prompt_marker" }>;
+  | Readonly<{ safe: false; reason: "user_typing" | "dialog" | "no_prompt_marker" | "no_known_prompt" }>;
 
 const lastIndex = (text: string, patterns: readonly RegExp[]): number => {
   let best = -1;
@@ -63,7 +67,9 @@ export const classifyScreen = (tail: string, profile: ScreenProfile, userTyping:
   const dialog = lastIndex(tail, profile.dialogMarkers);
   // TUIs redraw in place, so the most recently drawn marker describes the screen.
   if (dialog > prompt) return { safe: false, reason: "dialog" };
-  if (profile.promptMarkers.length > 0 && prompt < 0) return { safe: false, reason: "no_prompt_marker" };
+  // Fail closed: only a positively recognised empty prompt is safe.
+  if (profile.promptMarkers.length === 0) return { safe: false, reason: "no_known_prompt" };
+  if (prompt < 0) return { safe: false, reason: "no_prompt_marker" };
   return { safe: true };
 };
 

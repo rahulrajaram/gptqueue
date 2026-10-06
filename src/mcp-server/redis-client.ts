@@ -309,7 +309,6 @@ export class RedisClient {
       }
     }
 
-    if (options.provisional) await this.redis.sadd(SESSION_KEYS.provisional, name);
 
     // Create a new session
     let session: Awaited<ReturnType<SessionStore["createSession"]>>;
@@ -319,7 +318,7 @@ export class RedisClient {
         role as "publisher" | "consumer" | "both",
         description,
         undefined,
-        { shared, selfSessionId: this._sessionId }
+        { shared, selfSessionId: this._sessionId, provisional: options.provisional }
       );
     } catch (error) {
       // D4: the old identity keeps serving — restore the heartbeat the

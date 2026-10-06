@@ -49,11 +49,24 @@ describe("PTY screen guard (WK-9)", () => {
     expect(g.verdict().safe).toBe(true);
   });
 
-  it("generic profile vetoes only dialogs and typing", () => {
+  it("an unknown CLI fails closed: a quiet unfamiliar screen is never injected", () => {
     expect(profileFor("/usr/bin/claude")).toBe(CLAUDE_PROFILE);
-    expect(profileFor("codex")).toBe(GENERIC_PROFILE);
-    expect(classifyScreen("$ ", GENERIC_PROFILE, false)).toEqual({ safe: true });
-    expect(classifyScreen("Do you want to continue? (y/n)", GENERIC_PROFILE, false).safe).toBe(false);
+    expect(profileFor("some-unknown-cli")).toBe(GENERIC_PROFILE);
+    const unfamiliar = "Apply these 3 changes? [Enter] confirm";
+    expect(classifyScreen(unfamiliar, GENERIC_PROFILE, false)).toEqual({ safe: false, reason: "no_known_prompt" });
+    expect(classifyScreen("$ ", GENERIC_PROFILE, false)).toEqual({ safe: false, reason: "no_known_prompt" });
+    expect(classifyScreen("Do you want to continue? (y/n)", GENERIC_PROFILE, false)).toEqual({ safe: false, reason: "dialog" });
+    const g = new ScreenGuard(profileFor("some-unknown-cli"));
+    g.onOutput(unfamiliar);
+    const pending = onArrival(NUDGE_IDLE);
+    expect(decideNudge(pending, true, g.verdict(), 0)).toMatchObject({ kind: "wait", reason: "no_known_prompt" });
+  });
+
+  it("Claude at its empty prompt still injects", () => {
+    const g = new ScreenGuard(profileFor("claude"));
+    g.onOutput("> \n  ? for shortcuts");
+    expect(g.verdict()).toEqual({ safe: true });
+    expect(decideNudge(onArrival(NUDGE_IDLE), true, g.verdict(), 0)).toEqual({ kind: "inject" });
   });
 });
 

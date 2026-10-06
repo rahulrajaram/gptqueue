@@ -123,6 +123,58 @@ describe("provisional identity sweeper (DL-2 / AC-1)", () => {
     expect(await redis.llen(SESSION_KEYS.queue(sender.agentName!))).toBe(1);
   });
 
+  it("a provisional registration refused with AGENT_NAME_HELD leaves no mark; the real holder survives a sweep", async () => {
+    const sender = client(); await sender.register("both", `sender-${randomUUID()}`);
+    const holder = client();
+    const name = `real-agent-${randomUUID()}`;
+    const { session_id } = await holder.register("both", name, "real identity");
+    await expect(client().register("both", name, "late sidecar", undefined, { provisional: true }))
+      .rejects.toMatchObject({ code: "AGENT_NAME_HELD" });
+    expect(await redis.sismember(SESSION_KEYS.provisional, name)).toBe(0);
+
+    await send(sender, name, "task");
+    holder.forceDisconnect();
+    await redis.del(SESSION_KEYS.lease(session_id), SESSION_KEYS.heartbeat(name));
+    await sweepProvisional(redis);
+    expect(await retireProvisional(redis, name)).toMatchObject({ outcome: "unmarked" });
+    expect(await redis.hexists(SESSION_KEYS.registry, name)).toBe(1);
+    expect(await redis.llen(SESSION_KEYS.queue(name))).toBe(1);
+  });
+
+  it("a successful provisional claim is marked in the same step (crash-safe)", async () => {
+    const sidecar = client();
+    const name = `gptqueue-shell-pi-x-${randomUUID()}`;
+    await sidecar.sessions.createSession(name, "both", undefined, undefined, { provisional: true });
+    expect(await redis.sismember(SESSION_KEYS.provisional, name)).toBe(1);
+  });
+
+  it("a provisional name can never be shared", async () => {
+    const name = `gptqueue-shell-pi-x-${randomUUID()}`;
+    await expect(client().register("both", name, "sidecar", undefined, { provisional: true, shared: true }))
+      .rejects.toMatchObject({ code: "AGENT_REGISTRATION_INVALID" });
+    const previous = process.env.GPTQ_AGENT_SHARED;
+    process.env.GPTQ_AGENT_SHARED = "1";
+    try {
+      await expect(client().register("both", name, "sidecar", undefined, { provisional: true }))
+        .rejects.toMatchObject({ code: "AGENT_REGISTRATION_INVALID" });
+    } finally {
+      if (previous === undefined) delete process.env.GPTQ_AGENT_SHARED; else process.env.GPTQ_AGENT_SHARED = previous;
+    }
+    expect(await redis.sismember(SESSION_KEYS.provisional, name)).toBe(0);
+    expect(await redis.exists(SESSION_KEYS.agentSessions(name))).toBe(0);
+  });
+
+  it("a shared claimant onto a live provisional holder is refused; the name is still swept after expiry", async () => {
+    const sender = client(); await sender.register("both", `sender-${randomUUID()}`);
+    const { name, expire } = await crashed({ provisional: true });
+    await expect(client().register("both", name, "joiner", undefined, { shared: true }))
+      .rejects.toMatchObject({ code: "AGENT_NAME_HELD" });
+    expect(await redis.sismember(SESSION_KEYS.provisional, name)).toBe(1);
+    await send(sender, name, "task");
+    await expire();
+    expect(await retireProvisional(redis, name)).toMatchObject({ outcome: "retired", moved: 1, errors_sent: 1 });
+  });
+
   it("reserves the system sender name", async () => {
     await expect(client().register("both", SYSTEM_SENDER)).rejects.toMatchObject({ code: "AGENT_NAME_RESERVED" });
   });

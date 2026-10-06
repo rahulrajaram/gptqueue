@@ -90,10 +90,11 @@ for _, r in ipairs(removals) do
   table.insert(taken, r[1])
 end
 local fields = {}
-for i = 7, #ARGV do table.insert(fields, ARGV[i]) end
+for i = 8, #ARGV do table.insert(fields, ARGV[i]) end
 redis.call('HSET', KEYS[2], unpack(fields))
 redis.call('SET', KEYS[3], 'alive', 'EX', ARGV[4])
 redis.call('SADD', KEYS[1], ARGV[2])
+if ARGV[7] == '1' then redis.call('SADD', KEYS[5], ARGV[1]) else redis.call('SREM', KEYS[5], ARGV[1]) end
 return taken
 `;
 
@@ -126,6 +127,12 @@ export interface ClaimOptions {
   readonly shared?: boolean;
   /** The caller's own current session, which never blocks its re-registration. */
   readonly selfSessionId?: string | null;
+  /**
+   * DL-2: mark the name as a sidecar's provisional identity, atomically with a
+   * successful claim (never on a refused one). A non-provisional claim clears
+   * any mark, so a sweep can only ever retire a name its holder declared.
+   */
+  readonly provisional?: boolean;
 }
 
 /*
@@ -223,6 +230,12 @@ export class SessionStore {
     transport?: string,
     options: ClaimOptions = {}
   ): Promise<CreatedSession> {
+    if (options.provisional && options.shared) {
+      // A provisional name is one sidecar's own startup identity: sharing it
+      // would let another session clear its mark and hide an abandoned queue.
+      throw new GptQueueError("AGENT_REGISTRATION_INVALID",
+        `Agent name '${agentName}' cannot be both provisional and shared.`, { name: agentName });
+    }
     if (agentName === SYSTEM_SENDER) {
       throw new GptQueueError("AGENT_NAME_RESERVED", `Agent name '${agentName}' is reserved for gptqueue's own messages.`, { name: agentName });
     }
@@ -251,17 +264,19 @@ export class SessionStore {
     const deadHolders = await this.deadLocalHolders(agentName, host, pidns);
     const claim = (await this.redis.eval(
       CLAIM_NAME_SCRIPT,
-      4,
+      5,
       SESSION_KEYS.agentSessions(agentName),
       SESSION_KEYS.session(sessionId),
       SESSION_KEYS.lease(sessionId),
       SESSION_KEYS.identityAudit,
+      SESSION_KEYS.provisional,
       agentName,
       sessionId,
       options.shared ? "1" : "0",
       SESSION_DEFAULTS.LEASE_TTL_SECONDS,
       options.selfSessionId ?? "",
       deadHolders.join(" "),
+      options.provisional ? "1" : "0",
       "session_id", sessionId,
       "agent_name", agentName,
       "role", role,
@@ -308,6 +323,12 @@ export class SessionStore {
         .srem(SESSION_KEYS.agentSessions(agentName), sessionId)
         .exec()
         .catch(() => {}); // a lease-bounded leftover expires and is pruned
+      // A mark this failed attempt set must not outlive it unless another
+      // provisional session still holds the name. If this cleanup is lost,
+      // the sweep still sees no live session and the empty name retires harmlessly.
+      if (options.provisional && (await this.redis.scard(SESSION_KEYS.agentSessions(agentName)).catch(() => 1)) === 0) {
+        await this.redis.srem(SESSION_KEYS.provisional, agentName).catch(() => 0);
+      }
       throw error;
     }
 

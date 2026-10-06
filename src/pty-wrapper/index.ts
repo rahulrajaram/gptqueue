@@ -88,6 +88,7 @@ const schedule = (ms: number) => {
   if (nudgeTimer) clearTimeout(nudgeTimer);
   nudgeTimer = setTimeout(() => void step(), ms);
 };
+let warnedNoKnownPrompt = false;
 const step = async (): Promise<void> => {
   nudgeTimer = null;
   if (nudge.nudges > 0) {
@@ -107,7 +108,13 @@ const step = async (): Promise<void> => {
       schedule(DEFAULT_NUDGE_POLICY.renudgeMs);
       return;
     }
-    case "wait": schedule(action.ms); return;
+    case "wait":
+      if (action.reason === "no_known_prompt" && !warnedNoKnownPrompt) {
+        warnedNoKnownPrompt = true;
+        process.stderr.write("[gptqueue] not injecting inbox prompts: this CLI has no known empty-prompt marker, so the screen can never be proven safe; mail stays queued for the agent to claim\n");
+      }
+      schedule(action.ms);
+      return;
     case "give_up": nudge = NUDGE_IDLE; return; // new mail re-arms
     case "none": return;
     default: { const unreachable: never = action; throw new Error(String(unreachable)); }

@@ -153,3 +153,71 @@ describe("Codex runtime, bounded v2 history", () => {
   });
 });
 
+
+// Exact rejections from the live Codex 0.160.1 probe (live/codex-history-probe.txt
+// and the codex-2026-10-06T03-17-00-951Z receipt).
+const rejected = (code: number, message: string) => new Error(`Codex RPC rejected: ${JSON.stringify({ code, message })}`);
+const NOT_MATERIALIZED = (id: string) => rejected(-32600, `thread ${id} is not materialized yet; thread/turns/list is unavailable before first user message`);
+const EPHEMERAL = rejected(-32600, "ephemeral threads do not support includeTurns");
+
+describe("Codex runtime on a never-prompted or ephemeral thread (live 0.160.1)", () => {
+  const unprompted = (opts: { ephemeral: boolean; turnsList: "not_materialized" | "unsupported" }) => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const client: CodexRpcClient & { calls: typeof calls } = {
+      calls, close: async () => {},
+      request: async (method, params) => {
+        calls.push({ method, params });
+        switch (method) {
+          case "thread/read":
+            if (params.includeTurns) throw opts.ephemeral ? EPHEMERAL : new Error("unexpected includeTurns");
+            return { thread: { id: "thread-1", cwd: "/workspace", status: { type: "idle" }, ephemeral: opts.ephemeral } };
+          case "thread/turns/list":
+            throw opts.turnsList === "not_materialized" ? NOT_MATERIALIZED("thread-1") : rejected(-32601, "list_turns is not supported yet");
+          case "turn/start": return { turn: { id: "turn-first", status: "inProgress", items: [] } };
+          default: return {};
+        }
+      },
+    };
+    return client;
+  };
+
+  it("starts the first turn of a never-materialized thread instead of failing every activation", async () => {
+    const client = unprompted({ ephemeral: false, turnsList: "not_materialized" });
+    const runtime = await createCodexRuntime(binding, { client });
+    expect(await runtime.activate({ operation_id: "op-first", prompt: "wake" }, new AbortController().signal))
+      .toEqual({ status: "started", turn_id: "turn-first" });
+    // Dedupe: the same operation is never submitted twice.
+    expect(await runtime.activate({ operation_id: "op-first", prompt: "wake" }, new AbortController().signal))
+      .toEqual({ status: "ambiguous" });
+    expect(client.calls.filter((c) => c.method === "turn/start")).toHaveLength(1);
+  });
+
+  it("serves a never-materialized ephemeral thread without any includeTurns read", async () => {
+    const client = unprompted({ ephemeral: true, turnsList: "not_materialized" });
+    const runtime = await createCodexRuntime(binding, { client });
+    expect(await runtime.activate({ operation_id: "op-eph", prompt: "wake" }, new AbortController().signal))
+      .toEqual({ status: "started", turn_id: "turn-first" });
+    expect(client.calls.some((c) => c.method === "thread/read" && c.params.includeTurns === true)).toBe(false);
+  });
+
+  it("does not treat other -32600 rejections, or another thread's, as an empty history", async () => {
+    for (const error of [rejected(-32600, "thread thread-1 is not loaded"), NOT_MATERIALIZED("thread-other")]) {
+      const client: CodexRpcClient = { close: async () => {}, request: async (method, params) => {
+        if (method === "thread/read") return { thread: { id: "thread-1", cwd: "/workspace", status: { type: "idle" } } };
+        if (method === "thread/turns/list") throw error;
+        if (method === "turn/start") throw new Error("must not submit");
+        void params; return {};
+      } };
+      const runtime = await createCodexRuntime(binding, { client });
+      await expect(runtime.activate({ operation_id: "op-x", prompt: "wake" }, new AbortController().signal)).rejects.toThrow(/Codex RPC rejected/);
+    }
+  });
+
+  it("an ephemeral thread on a daemon without turn paging falls back without requiring includeTurns", async () => {
+    const client = unprompted({ ephemeral: true, turnsList: "unsupported" });
+    const runtime = await createCodexRuntime(binding, { client });
+    // No rollout exists for an ephemeral thread: the fallback fails before any submit, never via includeTurns.
+    await expect(runtime.activate({ operation_id: "op-legacy", prompt: "wake" }, new AbortController().signal)).rejects.toThrow(/transcript path unavailable/);
+    expect(client.calls.filter((c) => c.method === "turn/start")).toHaveLength(0);
+  });
+});

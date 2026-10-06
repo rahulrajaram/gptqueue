@@ -99,7 +99,11 @@ export class CodexThreadReader {
         const result = await this.rpc.request("thread/read", { threadId, includeTurns: true }, signal);
         return (result.thread ?? result) as Record<string, unknown>;
       } catch (error) {
-        if (!String(error).includes("list_turns is not supported")) throw error;
+        // Both mean "no whole-history read here"; fall back to the rollout.
+        // Ephemeral (Codex 0.160.1): {"code":-32600,"message":"ephemeral threads do not support includeTurns"}.
+        const text = String(error);
+        if (!text.includes("list_turns is not supported") &&
+            !text.includes('{"code":-32600,"message":"ephemeral threads do not support includeTurns"}')) throw error;
         this.historySupported = false;
       }
     }

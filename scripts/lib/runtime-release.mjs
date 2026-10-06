@@ -8,10 +8,13 @@
 //   current -> releases/<id> atomic symlink (rename of current.new over current)
 //   previous -> releases/<id>
 //
-// Release id = <git short sha>-<first 12 hex of the source digest>. The source
-// digest covers everything staged from the checkout (not node_modules), so the
-// same commit always maps to the same id; manifest.json also records every
-// node_modules file so on-disk tampering is detectable.
+// Release id = <git short sha>-<first 12 hex of the full digest>, computed
+// AFTER dependencies are installed. The full digest covers every staged file,
+// node_modules included (sorted paths, per-file sha256, symlinks by target),
+// so any change in dependency contents is a distinct release instead of a
+// collision with an existing id. Nothing is excluded as volatile: a
+// non-reproducible native rebuild only costs a new id, never a false match.
+// manifest.json records every file so on-disk tampering stays detectable.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -66,7 +69,7 @@ export function computeManifest(dir) {
   return Object.freeze({ files, sourceDigest: digestOf(source), fullDigest: digestOf(files) });
 }
 
-export const releaseId = (shortSha, sourceDigest) => `${shortSha}-${sourceDigest.slice(0, 12)}`;
+export const releaseId = (shortSha, fullDigest) => `${shortSha}-${fullDigest.slice(0, 12)}`;
 
 const git = (source, args) => {
   const r = spawnSync("git", ["-C", source, ...args], { encoding: "utf8" });
@@ -148,9 +151,8 @@ export function stageRelease({ source, prefix, shortSha, installDependencies = n
   const scratch = mkdtempSync(join(releases, ".staging-"));
   try {
     for (const entry of STAGED_ENTRIES) cpSync(join(source, entry), join(scratch, entry), { recursive: true, verbatimSymlinks: true });
-    const sourceDigest = computeManifest(scratch).sourceDigest;
-    const id = releaseId(shortSha, sourceDigest);
     installDependencies(scratch);
+    const id = releaseId(shortSha, computeManifest(scratch).fullDigest);
     const tmp = join(releases, `${id}.tmp`);
     removeTree(tmp);
     renameSync(scratch, tmp);
@@ -335,8 +337,8 @@ export async function install({ source, prefix, allowDirty = false, installDepen
     removeTree(staged.tmp);
     const integrity = checkIntegrity(final);
     if (!integrity.ok) throw new ReleaseError("tampered_release", `release ${staged.id} differs from its manifest: ${integrity.changed.slice(0, 5).join(", ")}`);
-    if (integrity.recorded.sourceDigest !== staged.manifest.sourceDigest) {
-      throw new ReleaseError("digest_mismatch", `release ${staged.id} exists with source digest ${integrity.recorded.sourceDigest}, staged ${staged.manifest.sourceDigest}`);
+    if (integrity.recorded.sourceDigest !== staged.manifest.sourceDigest || integrity.recorded.fullDigest !== staged.manifest.fullDigest) {
+      throw new ReleaseError("digest_mismatch", `release ${staged.id} exists with digests ${integrity.recorded.sourceDigest}/${integrity.recorded.fullDigest}, staged ${staged.manifest.sourceDigest}/${staged.manifest.fullDigest}`);
     }
     const verify = JSON.parse(readFileSync(join(final, "verify.json"), "utf8"));
     if (!verify.ok) throw new ReleaseError("verify_failed", `release ${staged.id} exists but failed verification`);

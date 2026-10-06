@@ -57,7 +57,7 @@ describe("RT-1 release staging", () => {
     const dir = join(prefix, "releases", result.id);
     const shortSha = gitIn("rev-parse", "--short=10", "HEAD");
     const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
-    expect(result.id).toBe(`${shortSha}-${manifest.sourceDigest.slice(0, 12)}`);
+    expect(result.id).toBe(`${shortSha}-${manifest.fullDigest.slice(0, 12)}`); // dependencies included (review C)
     for (const p of ["dist/registered-shell/server.js", "bin/gptqueue-session", "bin/gptqueue-claude-hook", "package.json", "package-lock.json", "node_modules/ioredis/package.json"]) {
       expect(existsSync(join(dir, p)), p).toBe(true);
     }
@@ -113,6 +113,25 @@ describe("RT-1 digest checks on an existing release id", () => {
     await expect(installInto(prefix)).rejects.toMatchObject({ code: "digest_mismatch" });
     expect(readlinkSync(join(prefix, "current"))).toBe(`releases/${first.id}`);
   }, 90_000);
+});
+
+describe("RT-1 release id covers dependencies", () => {
+  it("same commit, different dependency contents: a different release id and a successful install", async () => {
+    const prefix = newPrefix();
+    const first = await installInto(prefix);
+    const altered = (dir: string) => {
+      copyDeps(dir);
+      const p = join(dir, "node_modules/zod/package.json");
+      writable(p);
+      appendFileSync(p, "\n");
+    };
+    const second = await installInto(prefix, { installDependencies: altered });
+    expect(second.id).not.toBe(first.id);
+    expect(second.id.split("-")[0]).toBe(first.id.split("-")[0]); // same commit
+    expect(second.reused).toBeFalsy();
+    expect(readlinkSync(join(prefix, "current"))).toBe(`releases/${second.id}`);
+    expect(rr.checkIntegrity(join(prefix, "releases", second.id)).ok).toBe(true);
+  }, 120_000);
 });
 
 describe("RT-1 verification gate", () => {
