@@ -8,7 +8,8 @@ export type LifecycleEvent =
   | "startup_started" | "registration_complete" | "transport_connected"
   | "mcp_initialized" | "startup_failed" | "shutdown_started"
   | "shutdown_complete" | "shutdown_failed" | "native_binding_started"
-  | "native_binding_ready" | "native_binding_unavailable";
+  | "native_binding_ready" | "native_binding_unavailable" | "native_binding_retrying"
+  | "native_binding_stopped";
 
 export interface LifecycleLog {
   readonly event: LifecycleEvent;

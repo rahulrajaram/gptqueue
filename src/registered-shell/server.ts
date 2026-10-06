@@ -7,7 +7,7 @@ import { createBoundMcpServer } from "../experimental-wrapper/bridge.js";
 import { createLifecycleLog, safeLifecycleCode } from "./lifecycle-log.js";
 import { createRuntimeController } from "./runtime-controller.js";
 import { createCodexRuntime } from "./codex-runtime.js";
-import { bootstrapCodexBinding } from "./codex-bootstrap.js";
+import { bootstrapCodexBinding, withBindingState, type CodexBindingState } from "./codex-bootstrap.js";
 import { activationOutcomeSchema, type ActivationOutcome } from "./runtime.js";
 import { SESSION_KEYS } from "../core/keys.js";
 
@@ -108,6 +108,7 @@ export const startRegisteredShell = async (
   const redis = new RedisClient(null, options.redisUrl);
   const shutdown = new AbortController();
   let server: ReturnType<typeof createBoundMcpServer> | undefined;
+  let bindingState: CodexBindingState | undefined;
   const runtime = createRuntimeController(redis,
     { client: options.client, working_directory: identity.working_directory }, async (binding) => {
       if (binding.client === "codex") return createCodexRuntime(binding, { expectedAgent: redis.requireRegistered() });
@@ -178,7 +179,9 @@ export const startRegisteredShell = async (
     shutdown.signal.throwIfAborted();
     const sessionId = redis.sessionId;
     if (!sessionId) throw new Error("Registration returned no session");
-    server = createBoundMcpServer({ agentName, redisClient: redis, runtime }, shutdown.signal);
+    // get_runtime_status reports the binding supervisor's state while unbound (WK-6).
+    const runtimeTools = { ...runtime, status: () => withBindingState(runtime.status(), bindingState) };
+    server = createBoundMcpServer({ agentName, redisClient: redis, runtime: runtimeTools }, shutdown.signal);
     // Describe the implementation instantiated by this process, not files currently on disk.
     const registryKey = SESSION_KEYS.registry;
     const registrationRaw = await redis.adapterConnection.hget(registryKey, agentName);
@@ -209,9 +212,14 @@ export const startRegisteredShell = async (
     shutdown.signal.throwIfAborted();
     if (options.client === "codex") {
       lifecycle.emit({ event: "native_binding_started", phase: "binding", session_id: sessionId });
-      void bootstrapCodexBinding(runtime, redis.requireRegistered(), identity.working_directory, shutdown.signal)
-        .then(ready => lifecycle.emit({ event: ready ? "native_binding_ready" : "native_binding_unavailable",
-          phase: "binding", session_id: sessionId, code: ready ? undefined : "native_identity_unavailable" }))
+      const onState = (state: CodexBindingState) => {
+        bindingState = state;
+        lifecycle.emit({ event: state.readiness === "bound" ? "native_binding_ready"
+          : state.readiness === "stopped" ? "native_binding_stopped" : "native_binding_retrying",
+        phase: "binding", session_id: sessionId, code: state.last_binding_outcome ?? undefined });
+      };
+      void bootstrapCodexBinding(runtime, redis.requireRegistered(), identity.working_directory, shutdown.signal,
+        undefined, { onState })
         .catch(() => lifecycle.emit({ event: "native_binding_unavailable", phase: "binding",
           session_id: sessionId, code: "native_transport_error" }));
     }

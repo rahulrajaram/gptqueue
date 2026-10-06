@@ -138,7 +138,17 @@ describe("Exclusive agent names (D2, ID-1, ID-5)", () => {
     const holder = await client().register("both", "excl-agent", "first");
     const error = await heldError(client().register("both", "excl-agent", "second"));
     expect(error.code).toBe("AGENT_NAME_HELD");
-    expect(error.details).toEqual({ name: "excl-agent", holder_session_id: holder.session_id });
+    // A live holder registered by current code carries pid/hostname/pidns, so its liveness is
+    // verifiable, and its lease has most of the 30 s TTL left.
+    expect(error.details).toEqual({
+      name: "excl-agent",
+      holder_session_id: holder.session_id,
+      holder_liveness_verifiable: true,
+      holder_lease_ttl_ms: expect.any(Number),
+    });
+    const ttl = (error.details as { holder_lease_ttl_ms: number }).holder_lease_ttl_ms;
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(30_000);
     expect(await redis.smembers(SESSION_KEYS.agentSessions("excl-agent"))).toEqual([holder.session_id]);
   });
 
