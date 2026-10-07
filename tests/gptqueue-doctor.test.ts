@@ -216,6 +216,78 @@ describe("gptqueue-doctor CLI", () => {
     expect(JSON.parse(replay.stdout).status).toBe("idempotent");
   });
 
+  it("reap-offline defaults to a dry run, reaps only with --apply, and rejects --dry-run with --apply", async () => {
+    // Mutations caught: defaulting dryRun to false; ignoring --apply; accepting both flags.
+    const name = `gptqueue-shell-pi-x-${randomUUID()}`;
+    await redis.hset(SESSION_KEYS.registry, name,
+      JSON.stringify({ name, role: "both", registered_at: new Date(Date.now() - 3 * 86_400_000).toISOString() }));
+    const dry = run(["reap-offline", "--redis-url", TEST_REDIS_URL, "--json"]);
+    expect(dry.status).toBe(0);
+    const report = JSON.parse(dry.stdout);
+    expect(report.dry_run).toBe(true);
+    expect(report.candidates.map((c: { name: string }) => c.name)).toEqual([name]);
+    expect(await redis.hexists(SESSION_KEYS.registry, name)).toBe(1);
+    const text = run(["reap-offline", "--redis-url", TEST_REDIS_URL, "--min-age-hours", "1"]);
+    expect(text.stdout).toContain("would_reap: 1");
+    const both = run(["reap-offline", "--redis-url", TEST_REDIS_URL, "--dry-run", "--apply"]);
+    expect(both.status).not.toBe(0);
+    const applied = run(["reap-offline", "--redis-url", TEST_REDIS_URL, "--apply", "--json"]);
+    expect(applied.status).toBe(0);
+    expect(JSON.parse(applied.stdout).counts.reaped).toBe(1);
+    expect(await redis.hexists(SESSION_KEYS.registry, name)).toBe(0);
+  });
+
+  it("reap-offline exit codes: 0 evaluated, 4 refused without writes (breaker or batch-wide type), 3 timeout, 1 usage, 2 error", async () => {
+    // Mutations caught: a refused batch exiting 0 (a timer would count it healthy); dropping the timeout exit.
+    const name = `gptqueue-shell-pi-x-${randomUUID()}`;
+    await redis.hset(SESSION_KEYS.registry, name,
+      JSON.stringify({ name, role: "both", registered_at: new Date(Date.now() - 3 * 86_400_000).toISOString() }));
+    const ok = run(["reap-offline", "--redis-url", TEST_REDIS_URL, "--json"]);
+    expect(ok.status).toBe(0);
+    expect(JSON.parse(ok.stdout).refused).toBeNull();
+    for (const flag of ["--dry-run", "--apply"]) {
+      const big = run(["reap-offline", "--redis-url", TEST_REDIS_URL, flag, "--max-keys", "0", "--json"]);
+      expect(big.status, flag).toBe(4);
+      expect(JSON.parse(big.stdout).refused).toBe("keyspace_too_large");
+    }
+    await redis.set(SESSION_KEYS.identityAudit, "not-a-stream");
+    for (const flag of ["--dry-run", "--apply"]) {
+      const typed = run(["reap-offline", "--redis-url", TEST_REDIS_URL, flag, "--json"]);
+      expect(typed.status, flag).toBe(4);
+      expect(JSON.parse(typed.stdout).refused).toBe("unexpected_key_type");
+    }
+    expect(await redis.hexists(SESSION_KEYS.registry, name)).toBe(1);
+    await redis.del(SESSION_KEYS.identityAudit);
+    expect(run(["reap-offline", "--redis-url", TEST_REDIS_URL, "--timeout-seconds", "0"]).status).toBe(3);
+    expect(run(["reap-offlin", "--redis-url", TEST_REDIS_URL]).status).toBe(1);
+    expect(run(["reap-offline", "--redis-url", TEST_REDIS_URL, "--bogus", "1"]).status).toBe(2);
+  });
+
+  it("reap-offline exits 5 when a per-name unexpected_key_type skip occurs; dry run writes nothing, apply reaps only the healthy name", async () => {
+    // Mutation caught: per-name type anomalies exiting 0 (a timer would count them healthy).
+    const old = new Date(Date.now() - 3 * 86_400_000).toISOString();
+    const seed = async () => {
+      const [good, bad] = [`gptqueue-shell-pi-x-${randomUUID()}`, `gptqueue-shell-pi-x-${randomUUID()}`];
+      for (const n of [good, bad]) await redis.hset(SESSION_KEYS.registry, n, JSON.stringify({ name: n, role: "both", registered_at: old }));
+      await redis.hset(SESSION_KEYS.forward(bad), "x", "1");
+      return { good, bad };
+    };
+    const dry = await seed();
+    const before = (await redis.keys("gptq:*")).sort();
+    const d = run(["reap-offline", "--redis-url", TEST_REDIS_URL, "--dry-run", "--json"]);
+    expect(d.status).toBe(5);
+    expect(JSON.parse(d.stdout)).toMatchObject({ refused: null, anomalies: 1 });
+    expect((await redis.keys("gptq:*")).sort()).toEqual(before);
+    await redis.hdel(SESSION_KEYS.registry, dry.good, dry.bad); await redis.del(SESSION_KEYS.forward(dry.bad));
+    const live = await seed();
+    const a = run(["reap-offline", "--redis-url", TEST_REDIS_URL, "--apply", "--json"]);
+    expect(a.status).toBe(5);
+    expect(JSON.parse(a.stdout)).toMatchObject({ refused: null, anomalies: 1 });
+    expect(await redis.hexists(SESSION_KEYS.registry, live.good)).toBe(0);
+    expect(await redis.hexists(SESSION_KEYS.registry, live.bad)).toBe(1);
+    expect(await redis.hget(SESSION_KEYS.forward(live.bad), "x")).toBe("1");
+  });
+
   it("continuity-plan supports explicit legacy adoption", async () => {
     const target = `doc-legacy-${randomUUID().slice(0, 8)}`;
     await seedAgent(target);

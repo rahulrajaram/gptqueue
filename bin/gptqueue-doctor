@@ -1,0 +1,189 @@
+#!/usr/bin/env node
+// Shipped as a release entry point (bin/gptqueue-doctor); scripts/gptqueue-doctor.mjs is a compatibility shim.
+// Read-only by default. Continuity apply is an explicit local operator operation.
+import { readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { Redis } from 'ioredis';
+import { SESSION_KEYS } from '../dist/core/keys.js';
+import { AgentDiagnostics } from '../dist/core/agent-diagnostics.js';
+import { prepareContinuity, applyContinuity } from '../dist/core/mailbox-continuity.js';
+import { probeActivationReady, bindingAgrees } from '../dist/core/doctor-probe.js';
+import { reservedSenderRegistrations, sweepProvisional } from '../dist/core/provisional-sweeper.js';
+import { reapOfflineIdentities } from '../dist/core/registry-reaper.js';
+import { CodexSocketClient } from '../dist/registered-shell/codex-socket.js';
+
+const [command, ...args] = process.argv.slice(2);
+const allowed = ['agent', 'find', 'delivery', 'connection', 'config', 'continuity-plan', 'continuity-apply', 'sweep-provisional', 'reap-offline'];
+if (!allowed.includes(command)) {
+  console.log('Usage: node scripts/gptqueue-doctor.mjs <agent|find|delivery|connection|config|continuity-plan|continuity-apply|sweep-provisional|reap-offline> --redis-url redis://host/db [--agent NAME] [--message-id ID] [--query TEXT] [--thread-id ID] [--client codex|pi --runtime-id ID --cwd PATH --legacy yes --out PLAN] [--plan PLAN --apply yes] [--tier base|sandbox-auto|sandbox-max] [--limit N]');
+  console.log('       node scripts/gptqueue-doctor.mjs reap-offline --redis-url URL [--dry-run | --apply] [--min-age-hours N] [--limit N] [--max-keys N] [--timeout-seconds N] [--json]   (dry run unless --apply)');
+  console.log('       --max-keys: growth breaker, refuse without scanning above this DBSIZE (default 25000). --timeout-seconds (default 30) kills this');
+  console.log('       client only: a Lua step already running on the server cannot be interrupted; the breaker bounds that.');
+  console.log('       reap-offline exit codes: 0 evaluated (skips/remaining are normal), 4 batch refused with nothing written (report.refused),');
+  console.log('       5 evaluated but report.anomalies > 0 unexpected_key_type skips (other names may be reaped; unhealthy),');
+  console.log('       3 client timeout (server outcome unknown), 1 usage, 2 connection/other error. Precedence 3 > 4 > 5 > 0.');
+  process.exit(command === '--help' ? 0 : 1);
+}
+let redis = null;
+try {
+  const options = {};
+  // reap-offline takes boolean flags; strip them before the pair parser.
+  const flags = new Set();
+  const pairArgs = command === 'reap-offline' ? args.filter(arg => {
+    if (!['--dry-run', '--apply', '--json'].includes(arg)) return true;
+    if (flags.has(arg)) throw new Error(`Duplicate flag ${arg}`);
+    flags.add(arg); return false;
+  }) : args;
+  if (flags.has('--dry-run') && flags.has('--apply')) throw new Error('Pass either --dry-run or --apply, not both');
+  for (let i = 0; i < pairArgs.length; i += 2) {
+    if (!pairArgs[i]?.startsWith('--') || pairArgs[i + 1] === undefined || pairArgs[i] in options) throw new Error('Expected unique option/value pairs');
+    options[pairArgs[i]] = pairArgs[i + 1];
+  }
+  const required = name => { if (!options[name]) throw new Error(`Required ${name}`); return options[name]; };
+  // `config` lints the local Codex capability baseline only; no Redis involved.
+  const configOnly = command === 'config';
+  if (configOnly) {
+    const unknown = Object.keys(options).filter(key => key !== '--tier');
+    if (unknown.length) throw new Error(`Unknown option(s) for config subcommand: ${unknown.join(', ')}; only --tier is accepted`);
+  }
+  if (!configOnly) redis = new Redis(required('--redis-url'));
+  const diagnostics = configOnly ? null : new AgentDiagnostics(redis);
+  let result;
+  switch (command) {
+    case 'agent': result = await diagnostics.details(required('--agent')); break;
+    case 'find': result = await diagnostics.find({ query: options['--query'], working_directory: options['--cwd'] }); break;
+    case 'delivery': result = await diagnostics.delivery(required('--agent'), required('--message-id')); break;
+    case 'connection': {
+      const rpc = new CodexSocketClient();
+      try {
+        const response = await rpc.request('mcpServer/tool/call', { threadId: required('--thread-id'),
+          server: 'gptqueue-shared', tool: 'get_runtime_status', arguments: {} }, AbortSignal.timeout(10000));
+        const status = response.structuredContent;
+        const agent = status?.agent ?? options['--agent'];
+        // D7: read the recorded runtime binding (if any) so readiness uses
+        // the same identity/binding conjunction as the MCP probe.
+        let binding = null;
+        if (agent) {
+          try {
+            const raw = await redis.get(SESSION_KEYS.runtimeBinding(agent));
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (typeof parsed?.runtime_id === 'string' && typeof parsed?.epoch === 'string') {
+                binding = { runtime_id: parsed.runtime_id, epoch: parsed.epoch };
+              }
+            }
+          } catch { binding = null; }
+        }
+        result = { probe: response.isError ? 'runtime_tool_unavailable' : 'runtime_tool_available',
+          exact_thread_id: options['--thread-id'], identity_verified: typeof status?.agent === 'string',
+          expected_identity_matches: options['--agent'] && status?.agent ? options['--agent'] === status.agent : null,
+          binding_matches: bindingAgrees(status, binding),
+          activation_ready: probeActivationReady(response.isError, status, options['--agent'], binding),
+          details: agent ? await diagnostics.details(agent) : null,
+          action: response.isError ? 'Refresh this legacy MCP connection; review exact mailbox continuity first. Global reload is not performed.' : null };
+      } finally { await rpc.close(); }
+      break;
+    }
+    case 'config': {
+      // Static lint of the agent-execution baseline (docs/AGENT_EXECUTION_BASELINE.md).
+      // Behavioral proof lives in the acceptance matrix (GPTQUEUE_CODEX_APPROVAL=1).
+      // Each key check is scoped to the documented canonical table header; a key
+      // line under any other section does not satisfy its check, and sandbox_mode
+      // must sit at top level (before the first table header).
+      const home = process.env.CODEX_HOME || join(homedir(), '.codex');
+      const tier = options['--tier'] ?? 'base';
+      if (!['base', 'sandbox-auto', 'sandbox-max'].includes(tier)) {
+        throw new Error(`Unknown tier '${tier}'; expected base, sandbox-auto, or sandbox-max`);
+      }
+      let text;
+      try {
+        text = await readFile(join(home, 'config.toml'), 'utf8');
+      } catch (error) {
+        if (error?.code === 'ENOENT') throw new Error(`No Codex config at ${join(home, 'config.toml')}; set CODEX_HOME or create the file`);
+        throw error;
+      }
+      const sections = { '': [] };
+      let current = '';
+      for (const line of text.split('\n')) {
+        const header = line.match(/^\s*\[([^\]]+)\]\s*$/);
+        if (header) { current = `[${header[1].trim()}]`; (sections[current] ??= []).push(line); }
+        else if (current in sections) sections[current].push(line);
+      }
+      const inSection = (section, pattern) => Boolean((sections[section] ?? []).join('\n').match(pattern));
+      const checks = [
+        { key: 'sandbox_mode="workspace-write"', ok: inSection('', /^sandbox_mode\s*=\s*"workspace-write"/mu) },
+        { key: '[sandbox_workspace_write] network_access=true',
+          ok: inSection('[sandbox_workspace_write]', /^network_access\s*=\s*true/mu) },
+        { key: 'mcp_servers."gptqueue-shared".default_tools_approval_mode="approve"',
+          ok: inSection('[mcp_servers."gptqueue-shared"]', /^default_tools_approval_mode\s*=\s*"approve"/mu) },
+      ];
+      if (tier !== 'base') {
+        let profile;
+        try {
+          profile = await readFile(join(home, `${tier}.config.toml`), 'utf8');
+        } catch (error) {
+          if (error?.code === 'ENOENT') throw new Error(`Tier profile not found: ${join(home, `${tier}.config.toml`)}`);
+          throw error;
+        }
+        checks.push({ key: `${tier}: approval_policy="never"`, ok: /^approval_policy\s*=\s*"never"/mu.test(profile) });
+        if (tier === 'sandbox-max') checks.push({ key: `${tier}: sandbox_mode="danger-full-access"`, ok: /^sandbox_mode\s*=\s*"danger-full-access"/mu.test(profile) });
+      }
+      const failed = checks.filter(check => !check.ok);
+      result = { tier, codex_home: home, status: failed.length ? 'baseline_not_met' : 'ok', checks,
+        action: failed.length ? 'Apply the missing keys per docs/AGENT_EXECUTION_BASELINE.md. Approval keys are operator-only; installers never write them.' : null };
+      if (failed.length) process.exitCode = 1;
+      break;
+    }
+    case 'continuity-plan': {
+      result = await prepareContinuity(redis, { client: required('--client'), runtime_id: required('--runtime-id'),
+        epoch: options['--epoch'] ?? required('--runtime-id'), working_directory: required('--cwd') },
+      required('--agent'), { allowLegacy: options['--legacy'] === 'yes' });
+      await writeFile(required('--out'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+      break;
+    }
+    // DL-2: retire crashed sidecars' provisional names (idempotent; never touches live or claimed names).
+    case 'sweep-provisional':
+      result = { swept: await sweepProvisional(redis, Number(options['--limit'] ?? 1000)), reserved_sender: await reservedSenderRegistrations(redis) };
+      break;
+    // Operator reaper for empty offline sidecar names. Dry run unless --apply is explicit.
+    case 'reap-offline': {
+      const unknown = Object.keys(options).filter(key => !['--redis-url', '--min-age-hours', '--limit', '--max-keys', '--timeout-seconds'].includes(key));
+      if (unknown.length) throw new Error(`Unknown option(s) for reap-offline: ${unknown.join(', ')}`);
+      const positive = (key, fallback) => {
+        if (options[key] === undefined) return fallback;
+        const value = Number(options[key]);
+        if (!Number.isFinite(value) || value < 0) throw new Error(`${key} must be a non-negative number`);
+        return value;
+      };
+      // Process hard timeout: aborts this client. It cannot stop a Lua step already
+      // running on the server; the --max-keys growth breaker is the bound for that.
+      const timeoutSeconds = positive('--timeout-seconds', 30);
+      setTimeout(() => { console.error(`error: reap-offline exceeded --timeout-seconds ${timeoutSeconds}`); process.exit(3); }, timeoutSeconds * 1000).unref();
+      const report = await reapOfflineIdentities(redis, { dryRun: !flags.has('--apply'),
+        minAgeMs: positive('--min-age-hours', 24) * 3600 * 1000, limit: positive('--limit', undefined), maxKeys: positive('--max-keys', undefined) });
+      if (!flags.has('--json')) {
+        console.log(`${report.dry_run ? 'DRY RUN' : 'APPLIED'}: examined ${report.examined} '${report.name_prefix}*' names`);
+        for (const [reason, count] of Object.entries(report.counts)) console.log(`  ${reason}: ${count}`);
+        console.log(`  note: ${report.retained}`);
+        if (report.keyspace_too_large) console.log(`  REFUSED: keyspace ${report.keyspace_keys} keys > --max-keys ${report.max_keys}; nothing scanned or written`);
+        if (report.remaining > 0) console.log(`  remaining: ${report.remaining} more eligible names beyond this batch; re-run to continue`);
+        if (report.dry_run) console.log('  re-run with --apply to reap');
+      }
+      result = flags.has('--json') ? report : undefined;
+      // Exit 4: the batch was refused without writes, so a timer must not count it healthy.
+      if (report.refused) { if (!flags.has('--json')) console.log(`  REFUSED: ${report.refused}`); process.exitCode = 4; }
+      // Exit 5: evaluated (writes may have happened for other names) but some names had unexpected key types.
+      else if (report.anomalies > 0) { if (!flags.has('--json')) console.log(`  ANOMALIES: ${report.anomalies} name(s) skipped as unexpected_key_type`); process.exitCode = 5; }
+      break;
+    }
+    case 'continuity-apply':
+      if (options['--apply'] !== 'yes') throw new Error('Operator approval required: --apply yes');
+      result = { status: await applyContinuity(redis, JSON.parse(await readFile(required('--plan'), 'utf8'))) };
+      break;
+  }
+  if (result !== undefined) console.log(JSON.stringify(result, null, 2));
+} catch (error) {
+  console.error(`error: ${error?.message ?? String(error)}`);
+  process.exit(2);
+} finally { if (redis) await redis.quit(); }

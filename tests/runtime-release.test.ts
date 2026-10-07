@@ -74,7 +74,24 @@ describe("RT-1 release staging", () => {
     expect(verify.mcpInitialize).toMatchObject({ ok: true, escapes: [] });
     expect(verify.mcpInitialize.modulesLoaded).toBeGreaterThan(0);
     expect(verify.claudeHook).toMatchObject({ ok: true, escapes: [] });
+    // The operator doctor ships as a release entry point, read-only, with every dist dependency resolvable in the release.
+    expect(manifest.files["bin/gptqueue-doctor"]).toBe(sha256(join(REPO, "bin/gptqueue-doctor")));
+    expect(statSync(join(dir, "bin/gptqueue-doctor")).mode & 0o222).toBe(0);
+    expect(verify.imports.entries).toContain("gptqueue-doctor");
+    const help = spawnSync(process.execPath, [join(prefix, "current/bin/gptqueue-doctor"), "--help"], { encoding: "utf8", cwd: scratch });
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stdout).toContain("reap-offline");
   }, 60_000);
+
+  it("refuses a release that lacks a required entry point such as bin/gptqueue-doctor", () => {
+    // Mutation caught: dropping REQUIRED_ENTRY_POINTS from the static import gate.
+    const dir = join(scratch, `no-doctor-${Date.now()}`);
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    for (const name of rr.REQUIRED_ENTRY_POINTS.filter((n: string) => n !== "gptqueue-doctor")) writeFileSync(join(dir, "bin", name), "#!/usr/bin/env node\n");
+    const result = rr.checkEntryImports(dir);
+    expect(result.ok).toBe(false);
+    expect(result.problems).toContain("required entry point bin/gptqueue-doctor is missing");
+  });
 
   it("refuses a checkout with tracked changes unless allowed, and a dist whose Lua is stale", () => {
     const pkg = join(source, "package.json");

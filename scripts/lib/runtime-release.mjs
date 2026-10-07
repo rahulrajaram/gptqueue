@@ -33,6 +33,8 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
 export const STAGED_ENTRIES = Object.freeze(["dist", "bin", "package.json", "package-lock.json"]);
+/** bin/ entry points a release must ship (operator tools are invoked from <prefix>/current/bin). */
+export const REQUIRED_ENTRY_POINTS = Object.freeze(["gptqueue-session", "gptqueue-claude-hook", "gptqueue-doctor"]);
 export const LUA_SOURCE_DIR = "src/mcp-server/lua";
 export const LUA_DIST_DIR = "dist/mcp-server/lua";
 const DEPS_DIR = "node_modules";
@@ -276,6 +278,7 @@ export function checkEntryImports(dir) {
   };
   const entries = nodeEntryPoints(root);
   for (const name of entries) visit(join(root, "bin", name));
+  for (const name of REQUIRED_ENTRY_POINTS) if (!entries.includes(name)) problems.push(`required entry point bin/${name} is missing`);
   return Object.freeze({ ok: problems.length === 0 && entries.length > 0, entries, modules: seen.size, problems });
 }
 
