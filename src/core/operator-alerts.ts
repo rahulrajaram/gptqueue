@@ -313,7 +313,9 @@ export type DeliveryResult =
   | Readonly<{ status: "held" }>
   | Readonly<{ status: "idle" }>
   | Readonly<{ status: "outboxed"; outbox: readonly string[] }>
-  | Readonly<{ status: "sent" }>;
+  | Readonly<{ status: "sent" }>
+  /** R1: this alert id was emitted before (a retried escalation); nothing was emitted or spent. */
+  | Readonly<{ status: "already_emitted" }>;
 
 export interface OperatorAlertSink {
   deliver(alert: OperatorAlert, now: Date): Promise<DeliveryResult>;
@@ -336,12 +338,21 @@ export interface SinkOptions {
 
 const EMPTY: AlertState = Object.freeze({ held: [], sent_at: [] });
 
-const readState = async (path: string): Promise<AlertState> => {
+/** R1: ids already emitted (alone or in a digest), kept 7 days so a retried escalation never re-emits. */
+type Emitted = Readonly<{ id: string; at: string }>;
+type SinkState = Readonly<{ alerts: AlertState; emitted: readonly Emitted[] }>;
+const EMITTED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const readState = async (path: string): Promise<SinkState> => {
   try {
-    const v = JSON.parse(await readFile(path, "utf8")) as { held?: unknown; sent_at?: unknown };
-    return Array.isArray(v.held) && Array.isArray(v.sent_at) ? { held: v.held as OperatorAlert[], sent_at: v.sent_at.filter((t): t is string => typeof t === "string") } : EMPTY;
+    const v = JSON.parse(await readFile(path, "utf8")) as { held?: unknown; sent_at?: unknown; emitted?: unknown };
+    if (!Array.isArray(v.held) || !Array.isArray(v.sent_at)) return { alerts: EMPTY, emitted: [] };
+    const emitted = Array.isArray(v.emitted)
+      ? v.emitted.filter((e): e is Emitted => typeof e?.id === "string" && typeof e?.at === "string" && !Number.isNaN(Date.parse(e.at)))
+      : [];
+    return { alerts: { held: v.held as OperatorAlert[], sent_at: v.sent_at.filter((t): t is string => typeof t === "string") }, emitted };
   } catch {
-    return EMPTY;
+    return { alerts: EMPTY, emitted: [] };
   }
 };
 
@@ -376,9 +387,13 @@ export const createOperatorAlertSink = (options: SinkOptions): OperatorAlertSink
    * so the next flush retries them (S6); the failure is then rethrown.
    */
   const run = async (incoming: readonly OperatorAlert[], now: Date): Promise<DeliveryResult> => {
-    const before = await readState(statePath);
+    const stored = await readState(statePath);
+    const emittedBefore = stored.emitted.filter((e) => now.getTime() - Date.parse(e.at) < EMITTED_TTL_MS);
+    const done = new Set(emittedBefore.map((e) => e.id));
+    // R1: an emitted id is never emitted again nor charged to the budget; held copies of it are dropped too.
+    const before: AlertState = { ...stored.alerts, held: stored.alerts.held.filter((h) => !done.has(h.id)) };
     // S6: delivery is idempotent by alert id (the fire key): a retried escalation does not hold its alert twice.
-    const fresh = incoming.filter((alert, i) => !before.held.some((h) => h.id === alert.id) && incoming.findIndex((x) => x.id === alert.id) === i);
+    const fresh = incoming.filter((alert, i) => !done.has(alert.id) && !before.held.some((h) => h.id === alert.id) && incoming.findIndex((x) => x.id === alert.id) === i);
     const step = stepAlerts(before, fresh, config, now);
     const written: string[] = [];
     let failure: unknown = null;
@@ -393,16 +408,22 @@ export const createOperatorAlertSink = (options: SinkOptions): OperatorAlertSink
         break;
       }
     }
-    const unsent = step.emit.slice(sent).flatMap((e) => (e.kind === "alert" ? [e.alert] : e.alerts));
-    const state: AlertState = failure === null
+    const idsOf = (e: AlertEmission) => (e.kind === "alert" ? [e.alert] : e.alerts);
+    const unsent = step.emit.slice(sent).flatMap(idsOf);
+    const alerts: AlertState = failure === null
       ? step.state
       : { held: [...unsent, ...step.state.held], sent_at: step.state.sent_at.slice(0, step.state.sent_at.length - (step.emit.length - sent)) };
+    const stamp = now.toISOString();
+    const state = { ...alerts, emitted: [...emittedBefore, ...step.emit.slice(0, sent).flatMap(idsOf).map((a) => ({ id: a.id, at: stamp }))] };
     await mkdir(dir, { recursive: true });
     const tmp = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(tmp, JSON.stringify(state), { mode: 0o600 });
     await rename(tmp, statePath);
     if (failure !== null) throw failure;
-    if (step.emit.length === 0) return incoming.length > 0 ? { status: "held" } : { status: "idle" };
+    if (step.emit.length === 0) {
+      if (incoming.length > 0 && incoming.every((a) => done.has(a.id))) return { status: "already_emitted" };
+      return incoming.length > 0 ? { status: "held" } : { status: "idle" };
+    }
     return config.mode === "dry_run" ? { status: "outboxed", outbox: written } : { status: "sent" };
   };
 

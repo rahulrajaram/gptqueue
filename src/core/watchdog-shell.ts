@@ -9,7 +9,7 @@
  * event, Codex turn/start, Claude watcher and Stop gate, Pi followUp) fires.
  */
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Redis } from "ioredis";
 import { SESSION_KEYS } from "./keys.js";
@@ -262,13 +262,42 @@ const effect = async (
       const operatorMailbox: "ok" | "full" | "none" = config.operator === null ? "none" : await sendOnce(mailbox, config.operator, action, now);
       const delivered = await deliverAlert(alerts, action, question ?? action.text, now);
       const line = { at: now.toISOString(), rule: action.rule, lead: action.lead, task_id: action.task_id, to: action.to, fire_key: action.fire_key, text: action.text, question, operator_mailbox: operatorMailbox, ...delivered };
-      await appendFile(join(dir, "escalations.jsonl"), `${JSON.stringify(line)}\n`);
+      // R1: the log is at-least-once (consumers dedupe by fire_key); this guard skips the common retry,
+      // where the previous attempt appended the line and then failed to finalize.
+      const logPath = join(dir, "escalations.jsonl");
+      if ((await lastLogFireKey(logPath)) !== action.fire_key) await appendFile(logPath, `${JSON.stringify(line)}\n`);
       break;
     }
     default: {
       const unreachable: never = action.kind;
       throw new Error(`Unhandled action kind ${String(unreachable)}`);
     }
+  }
+};
+
+/** The fire_key of the last JSONL line, reading only the file's tail; null when absent or unreadable as JSON. */
+const lastLogFireKey = async (path: string): Promise<string | null> => {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const { size } = await handle.stat();
+    const length = Math.min(size, 65_536);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, size - length);
+    const last = buffer.toString("utf8").trimEnd().split("\n").at(-1) ?? "";
+    try {
+      const key = (JSON.parse(last) as { fire_key?: unknown }).fire_key;
+      return typeof key === "string" ? key : null;
+    } catch {
+      return null;
+    }
+  } finally {
+    await handle.close();
   }
 };
 

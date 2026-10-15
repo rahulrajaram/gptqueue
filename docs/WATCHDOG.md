@@ -12,6 +12,10 @@ not installed by gptqueue.
   deferred, uncorrelated, dry_run, operator_alerts }`.
   - `uncorrelated` counts outstanding requests with no task-ledger record (sent before the ledger existed).
     They cannot be matched to replies, so they never make a lead `waiting` or `stalled`.
+- **The escalation log is at-least-once.** Every line carries `fire_key`, and consumers must dedupe by it.
+  A retried escalation skips its append when the file's last line already has the same `fire_key`, but
+  that guard covers only the common retry. The operator alert sink records the alert ids it has emitted
+  for 7 days and never emits one twice, alone or in a digest.
 - **Escalations** are appended to `$XDG_STATE_HOME/gptqueue/watchdog/escalations.jsonl`. They also go to the
   operator mailbox when one is configured, and to the operator alert sink
   (`$XDG_CONFIG_HOME/gptqueue/operator-alerts.json`, mode 0600, dry run only).

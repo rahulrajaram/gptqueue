@@ -237,6 +237,23 @@ describe("operator alert sink", () => {
     await expect(sink.deliver(alert(4), at("12:00"))).rejects.toThrow();
   });
 
+  it("R1: an already-emitted id is skipped alone or in a digest, without spending budget; old entries are pruned", async () => {
+    const stateHome = join(dir, "emitted");
+    const sink = createOperatorAlertSink({ config: admitted({ rate_limit: { max_per_hour: 2 } }), stateHome });
+    expect((await sink.deliver(alert(5), at("12:00"))).status).toBe("outboxed");
+    expect(await sink.deliver(alert(5), at("12:01"))).toEqual({ status: "already_emitted" });
+    const statePath = join(stateHome, "gptqueue", "watchdog", "operator-alerts-state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8")) as { sent_at: string[]; held: OperatorAlert[]; emitted: Array<{ id: string; at: string }> };
+    expect(state.sent_at).toHaveLength(1);
+    // A held copy of an emitted alert (e.g. from a pre-R1 state file) is dropped from the next digest.
+    await writeFile(statePath, JSON.stringify({ ...state, held: [alert(5)], emitted: [...state.emitted, { id: "old", at: "2029-12-01T00:00:00.000Z" }] }));
+    expect(await sink.flush(at("12:02"))).toEqual({ status: "idle" });
+    const after = JSON.parse(await readFile(statePath, "utf8")) as typeof state;
+    expect(after.sent_at).toHaveLength(1);
+    expect(after.held).toEqual([]);
+    expect(after.emitted.map((e) => e.id)).toEqual([alert(5).id]);
+  });
+
   it("the stub transports refuse with transport_not_enabled", async () => {
     for (const kind of ["direct_mx", "smtp_auth", "http_api"] as const) {
       await expect(STUB_TRANSPORTS[kind].send("x", "y")).rejects.toMatchObject({ code: "transport_not_enabled" });

@@ -334,6 +334,44 @@ describe("watchdog --once against Redis db 15", () => {
     extraKeys.push(SESSION_KEYS.idempotencyFor(SYSTEM_SENDER, operator, `watchdog:escalate:${lead}:${id}`));
   });
 
+  it("R1: log append failing twice, then succeeding, yields one emission, one artifact, unchanged budget and one line per fire_key", async () => {
+    const root = name("wd-root");
+    const operator = name("wd-op");
+    const { lead, id } = await leadWaitingOn(operator, 1, "may I rotate the keys?");
+    const configPath = await writeConfig(config([lead], root, operator));
+    const stateHome = join(dir, "state-logfail");
+    const configHome = join(dir, "cfg-logfail");
+    await mkdir(join(configHome, "gptqueue"), { recursive: true });
+    const alertsPath = join(configHome, "gptqueue", "operator-alerts.json");
+    await writeFile(alertsPath, JSON.stringify({ schema_version: 1, enabled: true, mode: "dry_run", transport: { kind: "direct_mx" }, to: "operator@example.invalid", from: "watchdog@example.invalid" }));
+    await chmod(alertsPath, 0o600);
+    const watchdogDir = join(stateHome, "gptqueue", "watchdog");
+    const log = join(watchdogDir, "escalations.jsonl");
+    await mkdir(log, { recursive: true }); // a directory where the log belongs: appends fail
+    const run = () => runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome, configHome });
+    const fireKey = `escalate:${lead}:${id}`;
+    extraKeys.push(SESSION_KEYS.idempotencyFor(SYSTEM_SENDER, operator, `watchdog:${fireKey}`));
+
+    expect(reportOf(await run()).actions).toEqual([expect.objectContaining({ status: "failed" })]);
+    expect(reportOf(await run()).actions).toEqual([expect.objectContaining({ status: "failed" })]);
+    await rm(log, { recursive: true });
+    expect(reportOf(await run()).actions).toEqual([expect.objectContaining({ status: "done" })]);
+
+    expect(await readdir(join(watchdogDir, "outbox"))).toEqual([`escalate_${lead}_${id}.eml`]);
+    const sinkState = JSON.parse(await readFile(join(watchdogDir, "operator-alerts-state.json"), "utf8")) as { sent_at: string[]; held: unknown[]; emitted: Array<{ id: string }> };
+    expect(sinkState.sent_at).toHaveLength(1);
+    expect(sinkState.held).toEqual([]);
+    expect(sinkState.emitted.map((e) => e.id)).toEqual([fireKey]);
+    const lines = (await readFile(log, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { fire_key: string; operator_alerts: string });
+    expect(lines).toEqual([expect.objectContaining({ fire_key: fireKey, operator_alerts: "already_emitted" })]);
+
+    // Finalize lost after the append: the retry's guard sees the same fire_key on the last line.
+    await redis.del(WATCHDOG_KEYS.fired(fireKey));
+    expect(reportOf(await run()).actions).toEqual([expect.objectContaining({ status: "done" })]);
+    expect((await readFile(log, "utf8")).trim().split("\n")).toHaveLength(1);
+    expect(await systemTasksTo(operator)).toHaveLength(1);
+  });
+
   it("S7: a Redis that goes silent after connect ends the pass at its deadline with exit 1", async () => {
     const sockets: Socket[] = [];
     const silent = createServer((socket) => { sockets.push(socket); });
