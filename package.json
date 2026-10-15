@@ -32,6 +32,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@sw4rm/js-sdk": "0.6.0",
     "@types/express": "^5.0.6",
     "@types/node": "^25.2.3",
     "@types/uuid": "^10.0.0",

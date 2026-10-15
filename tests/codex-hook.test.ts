@@ -88,6 +88,9 @@ describe("Codex runtime hook", () => {
       const child = spawn(process.execPath, ["bin/gptqueue-codex-hook"], { cwd: process.cwd(), stdio: ["pipe", "ignore", "pipe"] }); let stderr = "";
       child.stderr.on("data", (chunk) => { stderr += String(chunk); }); child.on("close", (code) => resolve({ code, stderr })); child.stdin.end(input);
     });
+    // Every spawned hook logs: keep the invalid-input runs out of the real ~/.local/state/gptqueue/logs.
+    const scratchLogDir = await mkdtemp(join(tmpdir(), "gptqueue-hooklog-")); dirs.push(scratchLogDir);
+    vi.stubEnv("GPTQ_LOG_DIR", scratchLogDir);
     const redactionFixture = "redis://user:secret@example.test/15";
     const invalidJson = await run("{not-json");
     expect(invalidJson.code).not.toBe(0);

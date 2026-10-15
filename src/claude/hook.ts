@@ -1,6 +1,11 @@
 /**
- * Claude Code hook for gptqueue: SessionStart context and a Stop gate.
- *   gptqueue-claude-hook session-start | stop     (hook JSON on stdin)
+ * Claude Code hook for gptqueue: SessionStart context, a Stop gate, and turn
+ * state for the loop adapter.
+ *   gptqueue-claude-hook session-start | stop | user-prompt-submit     (hook JSON on stdin)
+ *
+ * - Turn state: user-prompt-submit records the session's agent as running and
+ *   prints nothing; an allowed stop records it as idle. Only a confirmed
+ *   identity is recorded (a guessed name may be another session's).
  *
  * - Acts on the inbox this session's MCP server registered (ID-2), falling
  *   back to the re-derived name only when no record exists, and says so.
@@ -22,6 +27,8 @@ import { confirmLegacyLiveness, isConfirmed, probeClient, probeInbox, recordWait
 import { sessionTag } from "../core/session-tag.js";
 import { quoteAgent } from "./session-record.js";
 import { writeFileSync } from "node:fs";
+import { claudeSeatStartupContext } from "../integrations/agent-tracking.js";
+import { TurnStateStore, type TurnPhase } from "../core/turn-state.js";
 
 export type HookEvent = "session-start" | "stop";
 export type StopReason = "mail" | "error" | "watch";
@@ -36,6 +43,8 @@ export type HookInput = Readonly<{
   watcherRunning: boolean;
   watchPolicy: "require" | "off";
   watchCommand: string;
+  /** Seat card or refusal from the agent-tracking plugin; absent when the launcher named no seat. */
+  seat?: string | null;
 }>;
 
 export type HookDecision =
@@ -67,6 +76,9 @@ export const countsText = (probe: Extract<ProbeResult, { ok: true }>): string =>
 export const actionable = (probe: Extract<ProbeResult, { ok: true }>): number =>
   probe.counts.unclaimed + (probe.counts.claimed_by_session ?? 0) + probe.counts.expired_by_others;
 
+/** The seat text follows the inbox context; without a seat the context is unchanged. */
+const withSeat = (text: string, seat: string | null | undefined): string => (seat ? `${text}\n\n${seat}` : text);
+
 export const decideHook = (input: HookInput): HookDecision => {
   const { identity, probe } = input;
   const watchText = `To be woken when mail arrives while idle, run this with run_in_background (its exit wakes you; restart it after every wake): ${input.watchCommand}`;
@@ -74,12 +86,12 @@ export const decideHook = (input: HookInput): HookDecision => {
     case "session-start": {
       if (!isConfirmed(identity)) {
         // The guessed name may be another session's (same directory): report no counts for it.
-        return { kind: "context", text: `gptqueue: this session's agent name is UNCONFIRMED (${identity.note}). Its gptqueue MCP server registers the session itself; call get_queue_status or claim_tasks through it to see your own inbox. Use a distinct idempotency_key per recipient on send_message (keys are global). ${input.watchPolicy === "off" ? "" : watchText}`.trim() };
+        return { kind: "context", text: withSeat(`gptqueue: this session's agent name is UNCONFIRMED (${identity.note}). Its gptqueue MCP server registers the session itself; call get_queue_status or claim_tasks through it to see your own inbox. Use a distinct idempotency_key per recipient on send_message (keys are global). ${input.watchPolicy === "off" ? "" : watchText}`.trim(), input.seat) };
       }
       const inbox = probe.ok
         ? `Inbox: ${countsText(probe)}.${actionable(probe) > 0 ? ` ${CONSUME}` : ""}`
         : `Inbox check FAILED (${probe.code}: ${probe.message}); gptqueue state is unknown, do not assume the inbox is empty.`;
-      return { kind: "context", text: `gptqueue: this session is registered as ${identityText(identity)} (no register_agent call needed). ${inbox} Use a distinct idempotency_key per recipient on send_message (keys are global). ${input.watchPolicy === "off" ? "" : watchText}`.trim() };
+      return { kind: "context", text: withSeat(`gptqueue: this session is registered as ${identityText(identity)} (no register_agent call needed). ${inbox} Use a distinct idempotency_key per recipient on send_message (keys are global). ${input.watchPolicy === "off" ? "" : watchText}`.trim(), input.seat) };
     }
     case "stop": {
       if (!probe.ok) {
@@ -139,8 +151,28 @@ export const renderDecision = (event: HookEvent, decision: HookDecision): string
   }
 };
 
+/** Record a confirmed session's turn phase. Best effort: a turn-state failure never blocks a prompt or a stop. */
+const recordTurn = async (identity: Identity, phase: TurnPhase, claudeSession: string, env: NodeJS.ProcessEnv): Promise<void> => {
+  if (!isConfirmed(identity) || claudeSession === "unknown") return;
+  const redis = probeClient(env.REDIS_URL);
+  try {
+    await new TurnStateStore(redis).report(identity.agent, { phase, at: new Date().toISOString(), runtime: "claude", session_id: claudeSession });
+  } catch {
+    // turn state is advisory input to the watchdog
+  } finally {
+    redis.disconnect();
+  }
+};
+
 export const runClaudeHook = async (argv: readonly string[], stdin: string, binDir: string, env: NodeJS.ProcessEnv = process.env): Promise<{ stdout: string | null; exitCode: number }> => {
   const event = argv[0];
+  if (event === "user-prompt-submit") {
+    let raw: RawHookJson = {};
+    try { raw = JSON.parse(stdin || "{}") as RawHookJson; } catch { /* nothing to record */ }
+    const session = typeof raw.session_id === "string" && raw.session_id ? raw.session_id : "unknown";
+    await recordTurn(resolveIdentity(typeof raw.cwd === "string" ? raw.cwd : undefined, env), "running", session, env);
+    return { stdout: null, exitCode: 0 };
+  }
   if (event !== "session-start" && event !== "stop") return { stdout: null, exitCode: 2 };
   let json: RawHookJson = {};
   try { json = JSON.parse(stdin || "{}") as RawHookJson; } catch { /* treat as empty input; still report inbox state */ }
@@ -149,9 +181,15 @@ export const runClaudeHook = async (argv: readonly string[], stdin: string, binD
   // SessionStart can run before the MCP server has registered; wait briefly for its record.
   const resolved = event === "session-start" ? await waitForIdentity(cwd, recordWaitMs(env, 2000), env) : resolveIdentity(cwd, env);
   const redis = probeClient(env.REDIS_URL);
-  const { identity, probe } = await (async () => {
+  const { identity, probe, seat } = await (async () => {
     const checked = await confirmLegacyLiveness(redis, resolved, env);
-    return { identity: checked, probe: await probeInbox(redis, checked.agent, checked.gptqueue_session_id) };
+    const inbox = await probeInbox(redis, checked.agent, checked.gptqueue_session_id);
+    // Seat binding (agent tracking) happens here, in the hook, so the model never makes a tool call for it.
+    const seatText = event === "session-start"
+      ? await claudeSeatStartupContext({ env, cwd: cwd ?? process.cwd(), session_id: claudeSession, claude: checked.claude, redis })
+          .catch(() => "gptqueue seat: binding FAILED; this session does NOT hold a seat. Tell the operator.")
+      : null;
+    return { identity: checked, probe: inbox, seat: seatText };
   })().finally(() => redis.disconnect());
 
   let dir: string | null = null;
@@ -166,11 +204,13 @@ export const runClaudeHook = async (argv: readonly string[], stdin: string, binD
     watcherRunning: dir ? watcherRunning(watcherPidPath(dir, claudeSession), identity.agent, identity.claude) : false,
     watchPolicy: env.GPTQ_CLAUDE_WATCH === "off" ? "off" : "require",
     watchCommand: watchCommandFor(binDir, claudeSession),
+    seat,
   });
   if (statePath && event === "stop") {
     if (decision.kind === "block") writeFileSync(statePath, JSON.stringify(decision.record), { mode: 0o600 });
     else rmSync(statePath, { force: true });
   }
+  if (event === "stop" && decision.kind === "allow") await recordTurn(identity, "idle", claudeSession, env);
   return { stdout: renderDecision(event, decision), exitCode: 0 };
 };
 

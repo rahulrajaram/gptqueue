@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// One watchdog pass (loop adapter S2): gptqueue-watchdog --once [--config PATH] [--dry-run] [--redis-url URL]
+import '../dist/core/watchdog-cli.js';

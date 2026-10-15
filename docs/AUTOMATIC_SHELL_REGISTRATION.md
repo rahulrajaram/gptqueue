@@ -189,15 +189,25 @@ returns `agent`, `activation_ready`, and the exact bound runtime's `client`,
 from an agent UUID or choose a thread by directory alone.
 
 Pi binds from its native `session_start` context. Codex needs the local
-SessionStart/UserPromptSubmit command hook. Review the plan after building:
+command hooks: SessionStart and UserPromptSubmit bind the thread in the
+background, and a synchronous Stop hook gates the end of a turn on pending mail.
+Review the plan after building:
 
 ```sh
 python3 scripts/install-inbox-activation.py \
   --node-bin "$(command -v node)"
 ```
 
-Add `--apply` to install it into `~/.codex/hooks.json`, preserving other hooks.
-Then open `/hooks` in Codex and review/trust the two GPTQueue command hooks.
+Add `--apply` to install them into `~/.codex/hooks.json`, preserving other hooks.
+Then open `/hooks` in Codex and review/trust the three GPTQueue command hooks.
+
+The Stop gate runs inside the app-server for every thread, so a thread that is
+not bound to gptqueue gets `{}` at once, and a Redis failure while resolving the
+binding also allows the stop. For a bound thread with unclaimed or
+expired-claim mail it blocks once per new mail event: Codex continues the turn
+with the block reason as a new prompt, and the next Stop (with
+`stop_hook_active`) is allowed unless more mail arrived. An allowed stop
+records the agent as `idle` in its turn state; a bound prompt records `running`.
 Installation does not grant trust: Codex skips untrusted hooks even when enabled.
 The installer never bypasses this native approval boundary. See the
 [Codex hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).

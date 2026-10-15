@@ -81,6 +81,24 @@ export const SESSION_KEYS = {
   /** Marker that an agent has recent outbound traffic (string with EX). */
   outboundActivity: (agent: string) => `gptq:outbound-activity:${agent}`,
 
+  /** Advisory subject record of a sent task (string JSON with EX, see core/task-ledger.ts). */
+  taskLedger: (taskId: string) => `gptq:task-ledger:${taskId}`,
+
+  /** Marker that the request's owner replied to a task (string ISO time with EX, see core/task-ledger.ts). */
+  taskAnswered: (taskId: string) => `gptq:task-answered:${taskId}`,
+
+  /** Watchdog pass lock: one pass at a time (string token with PX). */
+  watchdogPassLock: "gptq:watchdog:pass-lock",
+
+  /** Watchdog fire record: when an action keyed by `key` last took effect (string JSON with EX). */
+  watchdogFired: (key: string) => `gptq:watchdog:fired:${key}`,
+
+  /** Latest turn phase (running/idle) reported by an agent's runtime hooks (string JSON with EX). */
+  turnState: (agent: string) => `gptq:turn-state:${agent}`,
+
+  /** Mail event id the last Stop-gate block for a runtime session cited (string with EX). */
+  stopGate: (client: string, runtimeId: string) => `gptq:stop-gate:${sha256(JSON.stringify([client, runtimeId]))}`,
+
   /** Experimental-wrapper exclusive ownership claim for an agent name (string). */
   wrapperClaim: (agent: string) => `gptq:experimental-wrapper-claim:${sha256(agent)}`,
 

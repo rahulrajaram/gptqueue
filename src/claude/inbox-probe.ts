@@ -83,8 +83,13 @@ export const probeInbox = async (redis: Redis, agent: string, sessionId: string 
 };
 
 /** A short-lived client that fails fast instead of queueing forever. */
-export const probeClient = (url = process.env.REDIS_URL || "redis://127.0.0.1:6379/0"): Redis => {
-  const redis = new Redis(url, { maxRetriesPerRequest: 0, enableOfflineQueue: true, connectTimeout: 2000, retryStrategy: () => null, lazyConnect: false });
+export type ProbeClientOptions = Readonly<{ /** ioredis commandTimeout: a hung server fails the command instead of the caller. */ commandTimeoutMs?: number }>;
+
+export const probeClient = (url = process.env.REDIS_URL || "redis://127.0.0.1:6379/0", options: ProbeClientOptions = {}): Redis => {
+  const redis = new Redis(url, {
+    maxRetriesPerRequest: 0, enableOfflineQueue: true, connectTimeout: 2000, retryStrategy: () => null, lazyConnect: false,
+    ...(options.commandTimeoutMs === undefined ? {} : { commandTimeout: options.commandTimeoutMs }),
+  });
   redis.on("error", () => undefined); // surfaced through the awaited command
   return redis;
 };

@@ -11,6 +11,7 @@ import { join } from "path";
 import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL } from "./keys.js";
 import type { QueueMessage } from "./types.js";
 import { LUA_DIR } from "./stored-read.js";
+import { taskSubject } from "./task-ledger.js";
 import { GptQueueError } from "../mcp-server/errors.js";
 
 const eventKey = SESSION_KEYS.inboxEvents;
@@ -73,22 +74,23 @@ export class MailboxStore {
     );
   }
 
-  /** Push a message to a target agent's mailbox with bounded retry. */
-  async send(message: QueueMessage): Promise<boolean> {
+  /** Push a message to a target agent's mailbox with bounded retry (a full mailbox is retried up to `maxAttempts` times). */
+  async send(message: QueueMessage, maxAttempts = 10): Promise<boolean> {
     let current = message;
     let delay = 100;
     const maxDelay = 5000;
-    const maxAttempts = 10;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const raw = await this.redis.eval(
         this.boundedPushScript,
-        5,
+        7,
         SESSION_KEYS.queue(current.to),
         SESSION_KEYS.mailboxMeta(current.to),
         eventKey(current.to),
         outstandingKeyFor(current),
         SESSION_KEYS.forward(current.to),
+        SESSION_KEYS.taskLedger(current.id),
+        SESSION_KEYS.taskAnswered(current.payload.in_reply_to || current.id),
         JSON.stringify(current),
         this.queueBound,
         current.id,
@@ -96,7 +98,9 @@ export class MailboxStore {
         eligible(current) ? 1 : 0,
         current.type === "task" ? 1 : 0,
         current.to,
-        current.from
+        current.from,
+        taskSubject(current.payload.content),
+        new Date().toISOString()
       ) as [number, string];
       if (raw[0] === 1) return true;
       if (raw[0] === -1) {
@@ -120,20 +124,23 @@ export class MailboxStore {
   async sendIdempotent(
     message: QueueMessage,
     sender: string,
-    idempotencyKey: string
+    idempotencyKey: string,
+    maxAttempts = 10
   ): Promise<{ status: "sent" | "duplicate" | "full"; messageId: string }> {
     let current = message;
     let delay = 100;
-    for (let attempt = 0; attempt < 10; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const raw = await this.redis.eval(
         this.boundedPushIdempotentScript,
-        6,
+        8,
         SESSION_KEYS.queue(current.to),
         SESSION_KEYS.mailboxMeta(current.to),
         SESSION_KEYS.idempotencyFor(sender, current.to, idempotencyKey),
         eventKey(current.to),
         outstandingKeyFor(current),
         SESSION_KEYS.forward(current.to),
+        SESSION_KEYS.taskLedger(current.id),
+        SESSION_KEYS.taskAnswered(current.payload.in_reply_to || current.id),
         JSON.stringify(current),
         this.queueBound,
         current.id,
@@ -142,7 +149,9 @@ export class MailboxStore {
         current.type,
         current.type === "task" ? 1 : 0,
         current.to,
-        current.from
+        current.from,
+        taskSubject(current.payload.content),
+        new Date().toISOString()
       ) as [number, string];
       if (raw[0] === 1) return { status: "sent", messageId: raw[1] };
       if (raw[0] === 2) return { status: "duplicate", messageId: raw[1] };

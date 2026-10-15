@@ -5,7 +5,7 @@ Entry points in `bin/` are thin Node shims over `dist/claude/*` (run `npm run bu
 | Entry | Role |
 |---|---|
 | `bin/gptqueue-claude-mcp` | stdio MCP server for Claude Code; registers under the project's agent name and publishes the name it holds for the session |
-| `bin/gptqueue-claude-hook session-start\|stop` | SessionStart context and Stop gate (hook JSON on stdin) |
+| `bin/gptqueue-claude-hook session-start\|stop\|user-prompt-submit` | SessionStart context, Stop gate, and turn state (hook JSON on stdin) |
 | `bin/gptqueue-inbox-peek` | non-consuming inbox counts and the event-driven background watcher |
 | `bin/gptqueue-claude-name [dir]` | fallback name: `GPTQ_AGENT_NAME`, then the longest prefix in `~/.config/gptqueue/claude-agent-names.tsv`, then `claude-<git top-level basename>` |
 | `scripts/verify-claude-mcp.mjs` | drive the MCP server over stdio as Claude would (`selftest`, `send`, `claim`, `list`, `unregister`) |
@@ -134,6 +134,11 @@ with `run_in_background`, its exit wakes the idle session.
    ```
    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.local/bin/gptqueue-claude-hook session-start", "timeout": 15}]}]
    "Stop":         [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.local/bin/gptqueue-claude-hook stop", "timeout": 15}]}]
+   "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.local/bin/gptqueue-claude-hook user-prompt-submit", "timeout": 15}]}]
    ```
+   The `UserPromptSubmit` entry is optional. It records the session's agent as `running`
+   (`gptq:turn-state:<agent>`) and prints nothing; an allowed Stop records it as `idle`.
+   The loop adapter's watchdog reads this turn state. Only a confirmed identity is recorded,
+   and a failure never blocks the prompt.
 4. Keep the MCP server entry that runs `gptqueue-claude-mcp`. It must start the shim directly, not
    through a shell that stays alive, or the record will be keyed by the shell's pid.

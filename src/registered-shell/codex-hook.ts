@@ -1,15 +1,44 @@
 import { z } from "zod";
+import type { Redis } from "ioredis";
 import { setTimeout as delay } from "node:timers/promises";
 import { isAbsolute } from "node:path";
 import { CodexSocketClient } from "./codex-socket.js";
 import { createHookLog, type HookBindingLog } from "./lifecycle-log.js";
 import type { CodexRpcClient } from "./codex-runtime.js";
+import { runCodexStop } from "./codex-stop-gate.js";
+import { probeClient } from "../claude/inbox-probe.js";
+import { SESSION_KEYS } from "../core/keys.js";
+import { TurnStateStore } from "../core/turn-state.js";
 
 const eventSchema = z.object({
   session_id: z.string().uuid(),
   cwd: z.string().refine(isAbsolute),
-  hook_event_name: z.enum(["SessionStart", "UserPromptSubmit"]),
+  hook_event_name: z.enum(["SessionStart", "UserPromptSubmit", "Stop"]),
+  stop_hook_active: z.boolean().optional(),
+  turn_id: z.string().optional(),
 });
+type CodexHookEvent = z.infer<typeof eventSchema>;
+
+/**
+ * A bound thread's new prompt starts a turn: record the agent as running. Best
+ * effort. `at` is the prompt event's time, captured when the hook process
+ * started and before binding (S2): this hook runs asynchronously, so it can
+ * finish after the turn's Stop recorded idle, and a later timestamp here would
+ * wrongly flip a finished turn back to running.
+ */
+export const recordRunning = async (event: CodexHookEvent, at: string, client?: Redis): Promise<void> => {
+  const redis = client ?? probeClient();
+  try {
+    const raw = await redis.get(SESSION_KEYS.runtimeMailbox("codex", event.session_id));
+    const agent = raw === null ? null : (JSON.parse(raw) as { agent?: unknown }).agent;
+    if (typeof agent !== "string" || agent.length === 0) return;
+    await new TurnStateStore(redis).report(agent, {
+      phase: "running", at, runtime: "codex", session_id: event.session_id, turn_id: event.turn_id ?? null,
+    });
+  } finally {
+    if (client === undefined) redis.disconnect();
+  }
+};
 
 export type HookBindingOutcome =
   | "ready" | "not_ready" | "legacy_connection_requires_reconnect"
@@ -73,12 +102,13 @@ export const bindCodexHook = async (
 };
 
 export const runCodexHook = async (): Promise<void> => {
+  const startedAt = new Date().toISOString(); // the event's time, before any binding work (S2)
   let input = "";
   for await (const chunk of process.stdin) {
     input += String(chunk);
     if (Buffer.byteLength(input) > 65_536) throw new Error("Hook input exceeds size limit");
   }
-  let parsed: { session_id: string; hook_event_name: string } | undefined;
+  let parsed: CodexHookEvent | undefined;
   try {
     parsed = eventSchema.parse(JSON.parse(input));
   } catch {
@@ -87,6 +117,17 @@ export const runCodexHook = async (): Promise<void> => {
     log.emit("hook_binding_outcome", { outcome: "invalid_hook_input" });
     await log.close();
     throw new Error("invalid_hook_or_transport");
+  }
+  if (parsed.hook_event_name === "Stop") {
+    // Synchronous, per turn, on every daemon thread: no binding work and no per-turn log file.
+    // A hung Redis must not hold the turn: every command gives up after 3 s and the gate fails open.
+    const redis = probeClient(undefined, { commandTimeoutMs: 3000 });
+    try {
+      process.stdout.write(await runCodexStop(parsed, redis));
+    } finally {
+      redis.disconnect();
+    }
+    return;
   }
   const log = createHookLog("codex", parsed.session_id, parsed.hook_event_name);
   const rpc = new CodexSocketClient();
@@ -97,6 +138,8 @@ export const runCodexHook = async (): Promise<void> => {
       log.emit("hook_exit", { code });
       console.error('[gptqueue] ' + JSON.stringify({ event: 'runtime_binding_failed', code }));
       process.exitCode = 1;
+    } else if (parsed.hook_event_name === "UserPromptSubmit") {
+      await recordRunning(parsed, startedAt).catch(() => log.emit("turn_state_unrecorded", {}));
     }
   } finally {
     try { await rpc.close(); } finally { await log.close(); }
