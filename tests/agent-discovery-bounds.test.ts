@@ -118,3 +118,16 @@ describe("bounded find_agents", () => {
     expect(result.structuredContent).toMatchObject({ total_matches: online.length, truncated: false, next_cursor: null });
   });
 });
+
+describe("corrupt registrations are excluded before paging", () => {
+  it("a corrupt registration sorting first does not consume the page or the total", async () => {
+    const corrupt = `${prefix}!corrupt`;
+    expect(corrupt < names[0]!).toBe(true);
+    await redis.hset(SESSION_KEYS.registry, corrupt, "{not json");
+    try {
+      const listed = await call("list_agents", { name_prefix: prefix, limit: 1 });
+      expect(legacy(listed).map((agent) => agent.name)).toEqual([names[0]]);
+      expect(listed.structuredContent).toMatchObject({ total: SEEDED, truncated: true, next_cursor: "1" });
+    } finally { await redis.hdel(SESSION_KEYS.registry, corrupt); }
+  });
+});

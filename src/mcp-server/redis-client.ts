@@ -65,6 +65,17 @@ const forwardProvisionalLua = (src: string, dst: string, sourceArg: string, targ
       -- the target instead of landing in the deleted, unclaimed queue.
       redis.call('SET', '${SESSION_KEYS.forward("")}' .. ${sourceArg}, 'to:' .. ${targetArg}, 'EX', ${SESSION_DEFAULTS.FORWARD_TOMBSTONE_TTL_SECONDS})`;
 
+type ParsedRegistration = Readonly<{ name: string; reg: Record<string, unknown> }>;
+
+/** Registrations whose JSON is an object, in input order; corrupt ones are skipped. */
+const parseRegistrations = (registry: ReadonlyArray<readonly [string, string]>): ParsedRegistration[] =>
+  registry.flatMap(([name, json]) => {
+    let parsed: unknown;
+    try { parsed = JSON.parse(json); } catch { return []; }
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? [Object.freeze({ name, reg: parsed as Record<string, unknown> })] : [];
+  });
+
 export class RedisClient {
   private redis: Redis;
   private subscriber: Redis;
@@ -513,34 +524,29 @@ export class RedisClient {
 
   async listAgents(): Promise<AgentDiscoveryRecord[]> {
     const registry = await this.redis.hgetall(SESSION_KEYS.registry);
-    return this.discoveryRecords(Object.entries(registry));
+    return this.withPresence(parseRegistrations(Object.entries(registry)));
   }
 
   /**
-   * One bounded page of discovery records in name order. The name filter runs
-   * on the registry keys; presence is read for the whole filtered set only when
-   * online_only needs it, otherwise just for the returned page.
+   * One bounded page of discovery records in name order. Corrupt
+   * registrations are dropped before the page and total are computed.
+   * Presence is read for the whole filtered set only when online_only needs
+   * it, otherwise just for the returned page.
    */
   async listAgentsPage(paging: DiscoveryPaging = {}): Promise<DiscoveryPage<AgentDiscoveryRecord>> {
     const registry = await this.redis.hgetall(SESSION_KEYS.registry);
     const names = discoveryNames(Object.keys(registry), paging.name_prefix);
+    const valid = parseRegistrations(names.map((name) => [name, registry[name]!] as const));
     if (!paging.online_only) {
-      const page = discoveryPage(names, paging);
-      const records = await this.discoveryRecords(page.items.map((name) => [name, registry[name]!] as const));
-      return Object.freeze({ ...page, items: Object.freeze(records) });
+      const page = discoveryPage(valid, paging);
+      return Object.freeze({ ...page, items: Object.freeze(await this.withPresence(page.items)) });
     }
-    const records = await this.discoveryRecords(names.map((name) => [name, registry[name]!] as const));
+    const records = await this.withPresence(valid);
     return discoveryPage(records.filter((record) => record.online), paging);
   }
 
-  /** Parsed records in input order; unparseable registrations are skipped. */
-  private async discoveryRecords(registry: ReadonlyArray<readonly [string, string]>): Promise<AgentDiscoveryRecord[]> {
-    const entries = registry.flatMap(([name, json]) => {
-      let parsed: unknown;
-      try { parsed = JSON.parse(json); } catch { return []; }
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-      return [{ name, reg: parsed as Record<string, unknown> }];
-    });
+  /** Discovery records for already parsed registrations, in input order. */
+  private async withPresence(entries: readonly ParsedRegistration[]): Promise<AgentDiscoveryRecord[]> {
     if (entries.length === 0) return [];
     // Prefer session-based presence; fall back to legacy heartbeat. Both are
     // batched across the requested names rather than read per agent.

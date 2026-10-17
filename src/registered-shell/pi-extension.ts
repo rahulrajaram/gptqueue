@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { createPiRuntime, type PiRuntimeHost } from "./pi-runtime.js";
 import type { ActivationRequest, ActivationOutcome, RuntimeBinding } from "./runtime.js";
-import { inboxNoToolPrompt, inboxReceivePrompt, runtimeBindingSchema } from "./runtime.js";
+import { canConsumeMail, inboxPromptFor, mailCapabilities, runtimeBindingSchema } from "./runtime.js";
 import { z } from "zod";
 import { VERSION } from "../version.js";
 import { RUNTIME_TOOL_NAMES, SHELL_TOOL_NAMES } from "./tool-names.js";
@@ -15,20 +15,17 @@ export const GPTQUEUE_TOOLS = ["send_message", "receive_message", "list_agents",
 /** Every registered-shell tool; the runtime subset is required. */
 export const SHELL_TOOLS = SHELL_TOOL_NAMES;
 const REQUIRED_RUNTIME_TOOLS = RUNTIME_TOOL_NAMES;
-/** Tools a wake prompt may tell the model to consume mail with, best first. */
-const CLAIM_PATH = ["claim_tasks", "acknowledge_tasks"] as const;
-const RECEIVE_PATH = ["receive_message"] as const;
-const hasAll = (active: readonly string[], names: readonly string[]) => names.every((name) => active.includes(name));
-
 /**
  * The wake prompt must only name tools this Pi session can call. A host tool
  * allowlist (`pi --tools ...`) removes excluded extension tools from Pi's
  * registry, so the dispatcher's claim prompt is replaced when they are absent.
  */
-export const piActivationPrompt = (request: Readonly<{ operation_id: string; prompt: string }>, active: readonly string[]): string =>
-  hasAll(active, CLAIM_PATH) ? request.prompt
-    : hasAll(active, RECEIVE_PATH) ? inboxReceivePrompt(request.operation_id)
-      : inboxNoToolPrompt(request.operation_id);
+export const piActivationPrompt = (request: Readonly<{ operation_id: string; prompt: string }>, active: readonly string[]): string => {
+  const caps = mailCapabilities(active);
+  // The dispatcher's prompt names claim, renew, send and receive tools.
+  return caps.claim && caps.renew && caps.send && caps.receive ? request.prompt : inboxPromptFor(request.operation_id, caps);
+};
+
 const STARTUP_TIMEOUT_MS = 10_000;
 type CatalogTool = { name?: string; description?: string; inputSchema?: unknown };
 type BoundTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
@@ -332,7 +329,7 @@ export const createPiExtension = (
     // activate them. A bound session that can still consume mail stays
     // connected (degrading would close the sidecar and its session identity);
     // activations adapt their prompt to the tools that are active.
-    if (options.runtimeEnabled && (hasAll(now, CLAIM_PATH) || hasAll(now, RECEIVE_PATH))) return;
+    if (options.runtimeEnabled && canConsumeMail(mailCapabilities(now))) return;
     throw new Error("GPTQueue tools are not active");
   };
   const unavailableNote = () =>

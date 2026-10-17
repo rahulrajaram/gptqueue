@@ -269,6 +269,55 @@ describe("registered Pi activation lifecycle", () => {
     await activate(client, inboxPrompt("agent-a", "op-d2"));
     const sent = fake.pi.sendMessage.mock.calls[0]![0] as { content: string };
     expect(sent.content).not.toMatch(/claim_tasks|acknowledge_tasks|receive_message/u);
-    expect(sent.content).toMatch(/no GPTQueue tool/u);
+    expect(sent.content).toMatch(/no usable GPTQueue mail tools/u);
+  });
+
+  describe("activation prompt names only active tools (every combination)", () => {
+    const CLAIM = ["claim_tasks", "acknowledge_tasks"];
+    const promptFor = async (active: string[]) => {
+      const client = makeClient(); const fake = allowlistedPi(["read", ...active]);
+      await createPiExtension(async () => client, 100, { runtimeEnabled: true })(fake.pi);
+      await fake.handlers.get("session_start")({}, fake.context());
+      await activate(client, inboxPrompt("agent-a", "op-d2"));
+      return (fake.pi.sendMessage.mock.calls[0]![0] as { content: string }).content;
+    };
+    const names = (text: string) => ["claim_tasks", "acknowledge_tasks", "renew_claim", "send_message", "receive_message"].filter((name) => text.includes(name));
+
+    it("claim pair with renew_claim and send_message", async () => {
+      const text = await promptFor([...CLAIM, "renew_claim", "send_message"]);
+      expect(names(text)).toEqual(["claim_tasks", "acknowledge_tasks", "renew_claim", "send_message"]);
+    });
+    it("claim pair without renew_claim says claims are not renewable", async () => {
+      const text = await promptFor([...CLAIM, "send_message"]);
+      expect(names(text)).toEqual(["claim_tasks", "acknowledge_tasks", "send_message"]);
+      expect(text).toMatch(/not renewable here/u);
+      expect(text).toMatch(/within the lease/u);
+    });
+    it("claim pair without send_message says replies cannot be sent", async () => {
+      const text = await promptFor([...CLAIM, "renew_claim"]);
+      expect(names(text)).toEqual(["claim_tasks", "acknowledge_tasks", "renew_claim"]);
+      expect(text).toMatch(/Replies cannot be sent from this session/u);
+    });
+    it("claim pair alone", async () => {
+      const text = await promptFor([...CLAIM]);
+      expect(names(text)).toEqual(["claim_tasks", "acknowledge_tasks"]);
+      expect(text).toMatch(/not renewable here/u);
+      expect(text).toMatch(/Replies cannot be sent from this session/u);
+    });
+    it("receive-only with send_message reads once and never polls", async () => {
+      const text = await promptFor(["receive_message", "send_message"]);
+      expect(names(text)).toEqual(["send_message", "receive_message"]);
+      expect(text).toMatch(/receive_message exactly once with timeout: 5/u);
+    });
+    it("receive-only without send_message does not consume destructively", async () => {
+      const text = await promptFor(["receive_message"]);
+      expect(names(text)).toEqual([]);
+      expect(text).toMatch(/no usable GPTQueue mail tools/u);
+    });
+    it("no mail tools at all", async () => {
+      const text = await promptFor(["list_agents"]);
+      expect(names(text)).toEqual([]);
+      expect(text).toMatch(/no usable GPTQueue mail tools/u);
+    });
   });
 });
