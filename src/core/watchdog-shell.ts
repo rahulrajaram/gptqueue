@@ -16,6 +16,8 @@ import { SESSION_KEYS } from "./keys.js";
 import { MailboxStore } from "./mailbox-store.js";
 import { TurnStateStore } from "./turn-state.js";
 import { admitTaskLedgerEntry, taskLedgerKey } from "./task-ledger.js";
+import { WATCHDOG_RATE_WINDOW_MS } from "./watchdog-push.js";
+import { pruneWatchdogState, rotateEscalationLog, WATCHDOG_RETENTION, type WatchdogRetention } from "./watchdog-retention.js";
 import { createOperatorAlertSink, loadOperatorAlertsConfig, type DeliveryResult, type OperatorAlertSink } from "./operator-alerts.js";
 import {
   admitWatchdogConfig,
@@ -29,11 +31,19 @@ import {
   WATCHDOG_SENDER,
   type LeadReport,
   type Sw4rmState,
+  type RecipientCapacity,
   type WatchdogAction,
   type WatchdogConfig,
 } from "./watchdog.js";
 
-export const WATCHDOG_KEYS = { fired: SESSION_KEYS.watchdogFired } as const;
+export const WATCHDOG_KEYS = { fired: SESSION_KEYS.watchdogFired, sent: SESSION_KEYS.watchdogSent } as const;
+/** W6: the last real pass's summary, read by `gptqueue-watchdog --status`. */
+export const WATCHDOG_LAST_PASS = SESSION_KEYS.watchdogLastPass;
+/** W3: the last non-skipped real pass; --status judges health from this one. */
+export const WATCHDOG_LAST_SUBSTANTIVE_PASS = SESSION_KEYS.watchdogLastSubstantivePass;
+const LAST_PASS_TTL_SECONDS = 7 * 24 * 60 * 60;
+const LAST_PASS_BUDGET_MS = 1_000;
+/** W3: reminders per recipient are counted over a rolling hour; the set itself lives two hours. */
 /** One pass at a time (S4/S5): passes and the operator-alert state file are serialized by this lock. */
 export const WATCHDOG_PASS_LOCK = SESSION_KEYS.watchdogPassLock;
 const PASS_LOCK_PX = 55_000;
@@ -68,9 +78,13 @@ export interface WatchdogOptions {
   readonly now?: () => Date;
   /** Tests only; defaults to PASS_DEADLINE_MS. */
   readonly passDeadlineMs?: number;
+  /** Tests only; defaults to WATCHDOG_RETENTION (W2). */
+  readonly retention?: WatchdogRetention;
+  /** Tests only: fault injection (W1 crash between reserve and send). */
+  readonly faults?: Readonly<{ afterSend?: (fireKey: string) => void }>;
 }
 
-export type ActionStatus = "planned" | "done" | "failed" | "skipped";
+export type ActionStatus = "planned" | "done" | "failed" | "skipped" | "rate_limited";
 export interface ReportedAction {
   readonly kind: WatchdogAction["kind"];
   readonly rule: WatchdogAction["rule"];
@@ -87,6 +101,8 @@ export interface WatchdogReport {
   readonly deferred: number;
   /** Outstanding requests with no task-ledger record (sent before S2): not correlatable with replies, never acted on. */
   readonly uncorrelated: number;
+  /** W3: reminders held back by the per-recipient hourly cap; left unclaimed for a later pass. */
+  readonly rate_limited: number;
   readonly dry_run: boolean;
   /** The S3 operator alert sink's status; never carries the operator address. */
   readonly operator_alerts: OperatorAlertsStatus;
@@ -211,10 +227,35 @@ const readFired = async (redis: Redis, keys: readonly string[]): Promise<FireRec
  * effect (a crash after delivery, before finalize) gets the original message
  * back as a duplicate instead of enqueueing a second one.
  */
-const sendOnce = async (mailbox: MailboxStore, to: string, action: WatchdogAction, now: Date): Promise<"ok" | "full"> => {
-  const sent = await mailbox.sendIdempotent(systemTask(to, action, now), WATCHDOG_SENDER, `watchdog:${action.fire_key}`, SEND_ATTEMPTS);
-  return sent.status === "full" ? "full" : "ok";
+const sendOnce = async (
+  mailbox: MailboxStore, to: string, action: WatchdogAction, now: Date, faults?: WatchdogOptions["faults"], rateCap?: number,
+): Promise<"ok" | "full" | "limited"> => {
+  let status: "sent" | "duplicate" | "full" | "limited";
+  try {
+    const message = systemTask(to, action, now);
+    const key = `watchdog:${action.fire_key}`;
+    // X3: a reminder's rate admission and enqueue are one script on Redis TIME (core/watchdog-push.ts).
+    status = rateCap === undefined
+      ? (await mailbox.sendIdempotent(message, WATCHDOG_SENDER, key, SEND_ATTEMPTS)).status
+      : (await mailbox.sendWatchdogTask(message, WATCHDOG_SENDER, key, { fireKey: action.fire_key, cap: rateCap }, SEND_ATTEMPTS)).status;
+    faults?.afterSend?.(action.fire_key);
+  } catch (error) {
+    // X2: a thrown send (timeout, lost connection, lost ack) may or may not have enqueued.
+    throw new UncertainDeliveryError(error);
+  }
+  return status === "full" || status === "limited" ? status : "ok";
 };
+
+/** X2: the mailbox positively refused the message (full, nothing stored). */
+class NotEnqueuedError extends Error {}
+/** X3: the send script refused the reminder over the recipient's hourly cap; nothing changed. */
+class RateLimitedError extends Error {}
+/** X2: the outcome of a send is unknown; it may have been enqueued. */
+class UncertainDeliveryError extends Error {
+  constructor(cause: unknown) {
+    super(`delivery outcome unknown: ${message(cause)}`);
+  }
+}
 
 const systemTask = (to: string, action: WatchdogAction, now: Date) => ({
   id: randomUUID(),
@@ -230,13 +271,17 @@ type PassClock = { expired: boolean };
 /** Claim, perform, complete. Returns false when another claim holds the key. */
 const perform = async (
   redis: Redis, mailbox: MailboxStore, action: WatchdogAction, config: WatchdogConfig, question: string | null, stateHome: string, alerts: AlertsWiring, now: Date, clock: PassClock,
+  retention: WatchdogRetention, faults?: WatchdogOptions["faults"],
 ): Promise<boolean> => {
   const fireKey = WATCHDOG_KEYS.fired(action.fire_key);
   if ((await redis.set(fireKey, `${PENDING_PREFIX}${now.toISOString()}`, "EX", PENDING_TTL_SECONDS, "NX")) !== "OK") return false;
   try {
-    await effect(mailbox, action, config, question, stateHome, alerts, now);
+    await effect(mailbox, action, config, question, stateHome, alerts, now, retention, faults);
   } catch (error) {
-    // A failed (not crashed) effect releases its claim so the next pass retries it.
+    // X2: an uncertain delivery keeps the claim; it expires and the idempotent send is retried, which
+    // returns "duplicate" (no second entry, no second rate count) if the first attempt was enqueued.
+    if (error instanceof UncertainDeliveryError) throw error;
+    // A definite non-delivery (full, rate limited) or a local failure releases the claim for a later pass.
     await redis.del(fireKey).catch(() => undefined);
     throw error;
   }
@@ -248,23 +293,30 @@ const perform = async (
 
 const effect = async (
   mailbox: MailboxStore, action: WatchdogAction, config: WatchdogConfig, question: string | null, stateHome: string, alerts: AlertsWiring, now: Date,
+  retention: WatchdogRetention, faults?: WatchdogOptions["faults"],
 ): Promise<void> => {
   switch (action.kind) {
-    case "remind":
-      if ((await sendOnce(mailbox, action.to, action, now)) === "full") throw new Error(`mailbox ${action.to} is full`);
+    case "remind": {
+      const sent = await sendOnce(mailbox, action.to, action, now, faults, config.max_reminders_per_recipient_per_hour);
+      if (sent === "full") throw new NotEnqueuedError(`mailbox ${action.to} is full`);
+      if (sent === "limited") throw new RateLimitedError(`recipient ${action.to} reached its hourly reminder cap`);
       break;
+    }
     case "escalate": {
       const dir = join(stateHome, "gptqueue", "watchdog");
       await mkdir(dir, { recursive: true });
       // Order (S6): (1) idempotent operator send, (2) sink delivery, which throws on any failure,
       // (3) the JSONL line last, so a retried escalation writes it exactly once; finalize follows.
       // A full operator mailbox is a recorded partial success (F3), not a failure.
-      const operatorMailbox: "ok" | "full" | "none" = config.operator === null ? "none" : await sendOnce(mailbox, config.operator, action, now);
+      const operatorMailbox: "ok" | "full" | "none" = config.operator === null
+        ? "none"
+        : (await sendOnce(mailbox, config.operator, action, now, faults)) === "full" ? "full" : "ok"; // escalations are never rate limited
       const delivered = await deliverAlert(alerts, action, question ?? action.text, now);
       const line = { at: now.toISOString(), rule: action.rule, lead: action.lead, task_id: action.task_id, to: action.to, fire_key: action.fire_key, text: action.text, question, operator_mailbox: operatorMailbox, ...delivered };
       // R1: the log is at-least-once (consumers dedupe by fire_key); this guard skips the common retry,
       // where the previous attempt appended the line and then failed to finalize.
       const logPath = join(dir, "escalations.jsonl");
+      await rotateEscalationLog(dir, now, retention); // W2
       if ((await lastLogFireKey(logPath)) !== action.fire_key) await appendFile(logPath, `${JSON.stringify(line)}\n`);
       break;
     }
@@ -311,7 +363,13 @@ const report = (action: WatchdogAction, status: ActionStatus, error?: string): R
  */
 export const runWatchdog = async (options: WatchdogOptions): Promise<WatchdogResult> => {
   const loaded = await loadConfig(options.configPath);
-  if (!loaded.ok) return { exitCode: 2, output: loaded.failure };
+  if (!loaded.ok) {
+    // The pass itself touches no Redis with a bad config; only after deciding to exit is the failure
+    // recorded (same 1 s budget), so a stale healthy status cannot outlive a broken config.
+    const failed: WatchdogResult = { exitCode: 2, output: loaded.failure };
+    if (!options.dryRun) await recordLastPass(options.redisUrl, failed, new Date());
+    return failed;
+  }
   const deadlineMs = options.passDeadlineMs ?? PASS_DEADLINE_MS;
   const redis = new Redis(options.redisUrl, {
     lazyConnect: true, maxRetriesPerRequest: 1, enableOfflineQueue: false, connectTimeout: 3000, commandTimeout: 3000, retryStrategy: () => null,
@@ -326,12 +384,72 @@ export const runWatchdog = async (options: WatchdogOptions): Promise<WatchdogRes
       resolveExpiry({ exitCode: 1, output: { error: "pass_deadline", reason: `the pass exceeded ${deadlineMs} ms` } });
     }, deadlineMs);
   });
+  let result: WatchdogResult;
   try {
-    return await Promise.race([pass(options, loaded.config, redis, clock), expiry]);
+    result = await Promise.race([pass(options, loaded.config, redis, clock), expiry]);
   } finally {
     clearTimeout(timer);
     redis.disconnect();
   }
+  if (!options.dryRun) await recordLastPass(options.redisUrl, result, new Date());
+  return result;
+};
+
+/** W6/W3: the summary of one invocation (every real invocation, including skipped ones). */
+export const lastPassRecord = (result: WatchdogResult, at: Date): Record<string, unknown> => {
+  const output = result.output;
+  if ("skipped" in output) return { at: at.toISOString(), exit: result.exitCode, skipped: true };
+  return { ...substantiveRecord(result, at), skipped: false };
+};
+
+/** W3: the summary --status judges: {at, exit, leads, actions, failed, rate_limited, deferred, uncorrelated, error?}. */
+const substantiveRecord = (result: WatchdogResult, at: Date): Record<string, unknown> => {
+  const output = result.output;
+  if ("skipped" in output || "error" in output) {
+    return { at: at.toISOString(), exit: result.exitCode, leads: 0, actions: 0, failed: 0, rate_limited: 0, deferred: 0, uncorrelated: 0,
+      ...("error" in output ? { error: output.error } : {}) };
+  }
+  return {
+    at: output.at, exit: result.exitCode, leads: output.leads.length, actions: output.actions.filter((a) => a.status !== "rate_limited").length,
+    failed: output.actions.filter((a) => a.status === "failed").length,
+    rate_limited: output.rate_limited, deferred: output.deferred, uncorrelated: output.uncorrelated,
+  };
+};
+
+/**
+ * Write the last-pass record on a fresh short-lived connection, so a pass that
+ * ended at its deadline or on a Redis error still records itself when Redis is
+ * reachable. Best effort.
+ */
+const recordLastPass = async (redisUrl: string, result: WatchdogResult, at: Date): Promise<void> => {
+  const client = new Redis(redisUrl, {
+    lazyConnect: true, maxRetriesPerRequest: 0, enableOfflineQueue: false, enableReadyCheck: false,
+    connectTimeout: LAST_PASS_BUDGET_MS, commandTimeout: LAST_PASS_BUDGET_MS, retryStrategy: () => null,
+  });
+  client.on("error", () => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // One overall budget: a hung server must not hold the timer's pass past its deadline.
+  const budget = new Promise<void>((resolveBudget) => { timer = setTimeout(resolveBudget, LAST_PASS_BUDGET_MS); });
+  const write = (async () => {
+    await client.connect();
+    const multi = client.multi().set(WATCHDOG_LAST_PASS, JSON.stringify(lastPassRecord(result, at)), "EX", LAST_PASS_TTL_SECONDS);
+    // W3: a skipped invocation never replaces the substantive record.
+    if (!("skipped" in result.output)) multi.set(WATCHDOG_LAST_SUBSTANTIVE_PASS, JSON.stringify(substantiveRecord(result, at)), "EX", LAST_PASS_TTL_SECONDS);
+    await multi.exec();
+  })().catch(() => { /* Redis unreachable: --status then reports the previous (aging) record */ });
+  try {
+    await Promise.race([write, budget]);
+  } finally {
+    clearTimeout(timer);
+    client.disconnect();
+  }
+};
+
+/** W2: read-only planning view of each recipient's remaining slots and current reservations. */
+const readCapacity = async (redis: Redis, recipients: readonly string[], cap: number, nowMs: number): Promise<RecipientCapacity> => {
+  const unique = [...new Set(recipients)];
+  const members = await Promise.all(unique.map((r) => redis.zrangebyscore(WATCHDOG_KEYS.sent(r), nowMs - WATCHDOG_RATE_WINDOW_MS, "+inf")));
+  return new Map(unique.map((r, i) => [r, { remaining: Math.max(0, cap - members[i]!.length), reserved: new Set(members[i]) }]));
 };
 
 const pass = async (options: WatchdogOptions, config: WatchdogConfig, redis: Redis, clock: PassClock): Promise<WatchdogResult> => {
@@ -355,7 +473,11 @@ const pass = async (options: WatchdogOptions, config: WatchdogConfig, redis: Red
     const fired = await readFired(redis, candidateFireKeys(leads));
     // A pending claim (an effect in flight, or one that crashed) suppresses its action until the claim expires;
     // it is excluded before the cap (N2).
-    const plan = planActions(leads, config, fired.done, now, fired.pending);
+    // Reminders go only to a waiting lead's awaited agent (rule 1) or to root (rules 4 and 5).
+    const recipients = [...leads.flatMap(({ state }) => (state.kind === "waiting" ? [state.on] : [])), config.root];
+    const capacity = await readCapacity(redis, recipients, config.max_reminders_per_recipient_per_hour, now.getTime());
+    // W2: rate eligibility is applied before max_actions_per_run, like pending claims.
+    const plan = planActions(leads, config, fired.done, now, fired.pending, capacity);
     const due = plan.actions;
     const questionOf = (action: WatchdogAction): string | null => {
       const state = leads.find((l) => l.lead === action.lead)?.state;
@@ -366,17 +488,20 @@ const pass = async (options: WatchdogOptions, config: WatchdogConfig, redis: Red
     // Reading the setting writes nothing, so a dry run still reports its status.
     const alerts = await wireAlerts(options.configHome, options.stateHome);
     let alertsStatus = alerts.status;
+    actions.push(...plan.rate_limited.map((a) => report(a, "rate_limited")));
     if (options.dryRun) {
       actions.push(...due.map((a) => report(a, "planned")));
     } else {
       const mailbox = new MailboxStore(redis, redis);
+      const retention = options.retention ?? WATCHDOG_RETENTION;
       for (const action of due) {
         if (clock.expired) break;
         try {
-          const performed = await perform(redis, mailbox, action, config, questionOf(action), options.stateHome, alerts, now, clock);
+          const performed = await perform(redis, mailbox, action, config, questionOf(action), options.stateHome, alerts, now, clock, retention, options.faults);
           actions.push(report(action, performed ? "done" : "skipped"));
         } catch (error) {
-          actions.push(report(action, "failed", message(error)));
+          // X3: the send script is the authority on the hourly cap; a refused reminder is unclaimed for a later pass.
+          actions.push(error instanceof RateLimitedError ? report(action, "rate_limited") : report(action, "failed", message(error)));
         }
       }
       // A digest falls due when a quiet window ends, the hourly budget frees up, or a failed delivery waits for retry.
@@ -384,6 +509,8 @@ const pass = async (options: WatchdogOptions, config: WatchdogConfig, redis: Red
         const flush = await alerts.sink.flush(now).catch((): DeliveryResult => ({ status: "idle" }));
         alertsStatus = { ...alertsStatus, flush };
       }
+      // W2: retention runs on real passes only, under the pass lock.
+      if (!clock.expired) await pruneWatchdogState(join(options.stateHome, "gptqueue", "watchdog"), now, retention);
     }
     return {
       exitCode: 0,
@@ -393,6 +520,7 @@ const pass = async (options: WatchdogOptions, config: WatchdogConfig, redis: Red
         actions,
         deferred: plan.deferred,
         uncorrelated,
+        rate_limited: actions.filter((a) => a.status === "rate_limited").length,
         dry_run: options.dryRun,
         operator_alerts: alertsStatus,
       }),

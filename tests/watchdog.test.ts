@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DATA_PREFIX,
+  WATCHDOG_PREFIX,
   NOTICE_SUFFIX,
   admitWatchdogConfig,
   candidateFireKeys,
@@ -27,14 +28,14 @@ const req = (sender: string, recipient: string, task: string, sentMin: number, s
 
 const config: WatchdogConfig = {
   schema_version: 1, root: "root", leads: ["lead-a", "lead-b"], operator: "operator",
-  thresholds_min: { waiting: 10, escalate_after: 10, idle: 15 }, max_actions_per_run: 20,
+  thresholds_min: { waiting: 10, escalate_after: 10, idle: 15 }, max_actions_per_run: 20, max_reminders_per_recipient_per_hour: 6,
 };
 
 describe("watchdog config admission", () => {
   it("admits a valid config, defaulting a missing operator to null", () => {
     const { operator: _omit, ...rest } = config;
     const admitted = admitWatchdogConfig(rest);
-    expect(admitted).toEqual({ ok: true, config: { ...config, operator: null } });
+    expect(admitted).toEqual({ ok: true, config: { ...config, operator: null, max_reminders_per_recipient_per_hour: 6 } });
     expect(admitted.ok && Object.isFrozen(admitted.config)).toBe(true);
   });
 
@@ -53,6 +54,9 @@ describe("watchdog config admission", () => {
     ["missing threshold", { ...config, thresholds_min: { waiting: 10, idle: 15 } }],
     ["negative threshold", { ...config, thresholds_min: { waiting: -1, escalate_after: 10, idle: 15 } }],
     ["bad cap", { ...config, max_actions_per_run: 0 }],
+    ["W3: recipient rate 0", { ...config, max_reminders_per_recipient_per_hour: 0 }],
+    ["W3: recipient rate 61", { ...config, max_reminders_per_recipient_per_hour: 61 }],
+    ["W3: recipient rate 2.5", { ...config, max_reminders_per_recipient_per_hour: 2.5 }],
   ])("rejects %s", (_label, value) => {
     const admitted = admitWatchdogConfig(value);
     expect(admitted.ok).toBe(false);
@@ -123,7 +127,7 @@ describe("planActions", () => {
     const { actions } = planActions([waiting("lead-a", "w1", "t1", 0)], config, none, now(10));
     expect(actions).toHaveLength(1);
     expect(actions[0]).toMatchObject({ kind: "remind", rule: 1, to: "w1", fire_key: "remind:lead-a:t1" });
-    expect(actions[0]!.text).toBe(`watchdog: lead-a has waited 10 min on you for a task. Reply to lead-a with in_reply_to set to the task_id in the data below, or tell lead-a how to proceed.${NOTICE_SUFFIX} ${DATA_PREFIX}${JSON.stringify({ lead: "lead-a", task_id: "t1", subject: "subject t1", sent_at: at(0) })}`);
+    expect(actions[0]!.text).toBe(`${WATCHDOG_PREFIX}lead-a has waited 10 min on you for a task. Reply to lead-a with in_reply_to set to the task_id in the data below, or tell lead-a how to proceed.${NOTICE_SUFFIX} ${DATA_PREFIX}${JSON.stringify({ lead: "lead-a", task_id: "t1", subject: "subject t1", sent_at: at(0) })}`);
   });
 
   it("rule 2: escalates escalate_after minutes after rule 1 fired, measured from the fire time", () => {
@@ -150,7 +154,7 @@ describe("planActions", () => {
     expect(planActions([lead], config, none, now(14)).actions).toEqual([]);
     expect(planActions([lead], config, none, now(15)).actions).toEqual([{
       kind: "remind", rule: 4, to: "root", fire_key: `idle:lead-a:${at(0)}`, lead: "lead-a", task_id: null, since: at(0),
-      text: `assign or retire: lead-a has been idle with no open work.${NOTICE_SUFFIX} ${DATA_PREFIX}${JSON.stringify({ lead: "lead-a", idle_since: at(0) })}`,
+      text: `${WATCHDOG_PREFIX}assign or retire: lead-a has been idle with no open work.${NOTICE_SUFFIX} ${DATA_PREFIX}${JSON.stringify({ lead: "lead-a", idle_since: at(0) })}`,
     }]);
   });
 
@@ -158,12 +162,12 @@ describe("planActions", () => {
     const lead: LeadReport = { lead: "lead-a", state: { kind: "stalled", assignment: "t9", from: "boss", subject: "do x", since: at(0) } };
     const { actions } = planActions([lead], config, none, now(15));
     expect(actions).toEqual([expect.objectContaining({ kind: "remind", rule: 5, to: "root", fire_key: "stalled:lead-a:t9",
-      text: `lead-a has been idle with an unanswered assignment from the sender named in the data below.${NOTICE_SUFFIX} ${DATA_PREFIX}${JSON.stringify({ lead: "lead-a", assignment_from: "boss", task_id: "t9", subject: "do x", idle_since: at(0) })}` })]);
+      text: `${WATCHDOG_PREFIX}lead-a has been idle with an unanswered assignment from the sender named in the data below.${NOTICE_SUFFIX} ${DATA_PREFIX}${JSON.stringify({ lead: "lead-a", assignment_from: "boss", task_id: "t9", subject: "do x", idle_since: at(0) })}` })]);
   });
 
   it("rule 6: running and unknown leads produce no action", () => {
     const leads: LeadReport[] = [{ lead: "lead-a", state: { kind: "running", since: at(0) } }, { lead: "lead-b", state: { kind: "unknown" } }];
-    expect(planActions(leads, config, none, now(1000))).toEqual({ actions: [], deferred: 0 });
+    expect(planActions(leads, config, none, now(1000))).toEqual({ actions: [], deferred: 0, rate_limited: [] });
   });
 
   it("rule 7: drops actions whose fire key already fired", () => {
@@ -253,5 +257,54 @@ describe("N2: a pending claim is excluded before the cap", () => {
   it("keeps pending separate from done for rule 2 timing", () => {
     const pendingRemind = new Set(["remind:lead-a:t1"]);
     expect(planActions([waiting("lead-a", "w1", "t1", 0)], config, none, now(60), pendingRemind).actions).toEqual([]);
+  });
+});
+
+describe("W4: every watchdog text starts with the fixed prefix", () => {
+  it("covers all five rules", () => {
+    const leads: LeadReport[] = [
+      waiting("lead-a", "w1", "t1", 0), waiting("lead-b", "operator", "t2", 0),
+      { lead: "lead-c", state: { kind: "idle", since: at(0) } },
+      { lead: "lead-d", state: { kind: "stalled", assignment: "t4", from: "x", subject: "s", since: at(0) } },
+    ];
+    const first = planActions(leads, config, none, now(60)).actions;
+    const second = planActions([waiting("lead-a", "w1", "t1", 0)], config, new Map([["remind:lead-a:t1", at(0)]]), now(60)).actions;
+    const rules = [...first, ...second].map((a) => a.rule).sort();
+    expect(rules).toEqual([1, 2, 3, 4, 5]);
+    for (const a of [...first, ...second]) expect(a.text.startsWith(WATCHDOG_PREFIX)).toBe(true);
+    expect(WATCHDOG_PREFIX).toBe("[gptqueue watchdog] ");
+  });
+
+  it("W3: admits max_reminders_per_recipient_per_hour from 1 to 60", () => {
+    for (const n of [1, 60]) {
+      const r = admitWatchdogConfig({ ...config, max_reminders_per_recipient_per_hour: n });
+      expect(r.ok && r.config.max_reminders_per_recipient_per_hour).toBe(n);
+    }
+  });
+});
+
+describe("W2 (rate eligibility before the cap)", () => {
+  const capped = { ...config, max_actions_per_run: 1 };
+  const full = new Map([["w-busy", { remaining: 0, reserved: new Set<string>() }]]);
+
+  it("a rate-limited oldest reminder does not starve a newer eligible reminder", () => {
+    const leads = [waiting("lead-a", "w-busy", "t-old", 0), waiting("lead-b", "w-free", "t-new", 30)];
+    const plan = planActions(leads, capped, none, now(100), new Set(), full);
+    expect(plan.actions.map((a) => a.fire_key)).toEqual(["remind:lead-b:t-new"]);
+    expect(plan.rate_limited.map((a) => a.fire_key)).toEqual(["remind:lead-a:t-old"]);
+    expect(plan.deferred).toBe(0);
+  });
+
+  it("a rate-limited oldest reminder does not starve an escalation", () => {
+    const leads = [waiting("lead-a", "w-busy", "t-old", 0), waiting("lead-b", "operator", "t-op", 30)];
+    expect(planActions(leads, capped, none, now(100), new Set(), full).actions.map((a) => a.rule)).toEqual([3]);
+  });
+
+  it("counts remaining capacity per recipient in plan order, and a fire key's own reservation consumes nothing", () => {
+    const leads = [waiting("lead-a", "w", "t1", 0), waiting("lead-b", "w", "t2", 10), waiting("lead-c", "w", "t3", 20)];
+    const one = new Map([["w", { remaining: 1, reserved: new Set(["remind:lead-b:t2"]) }]]);
+    const plan = planActions(leads, config, none, now(100), new Set(), one);
+    expect(plan.actions.map((a) => a.fire_key)).toEqual(["remind:lead-a:t1", "remind:lead-b:t2"]);
+    expect(plan.rate_limited.map((a) => a.fire_key)).toEqual(["remind:lead-c:t3"]);
   });
 });

@@ -2,15 +2,15 @@ import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { createServer, type Socket } from "node:net";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { Redis } from "ioredis";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { SESSION_KEYS, SYSTEM_SENDER } from "../src/core/keys.js";
 import { TurnStateStore } from "../src/core/turn-state.js";
-import { runWatchdog, WATCHDOG_KEYS, WATCHDOG_PASS_LOCK, type WatchdogReport, type WatchdogResult } from "../src/core/watchdog-shell.js";
+import { runWatchdog, WATCHDOG_KEYS, WATCHDOG_LAST_PASS, WATCHDOG_LAST_SUBSTANTIVE_PASS, WATCHDOG_PASS_LOCK, type WatchdogReport, type WatchdogResult } from "../src/core/watchdog-shell.js";
 import { TASK_LEDGER_TTL_SECONDS, taskLedgerKey } from "../src/core/task-ledger.js";
 import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
 import type { QueueMessage } from "../src/core/types.js";
@@ -372,6 +372,196 @@ describe("watchdog --once against Redis db 15", () => {
     expect(await systemTasksTo(operator)).toHaveLength(1);
   });
 
+  const escalatingLead = async (stateTag: string) => {
+    const root = name("wd-root");
+    const operator = name("wd-op");
+    const { lead, id } = await leadWaitingOn(operator, 1);
+    extraKeys.push(SESSION_KEYS.idempotencyFor(SYSTEM_SENDER, operator, `watchdog:escalate:${lead}:${id}`));
+    const stateHome = join(dir, stateTag);
+    const watchdogDir = join(stateHome, "gptqueue", "watchdog");
+    await mkdir(join(watchdogDir, "outbox"), { recursive: true });
+    return { configPath: await writeConfig(config([lead], root, operator)), stateHome, watchdogDir, lead, id };
+  };
+  const DAY = 86_400_000;
+  const today = (): string => new Date().toISOString().slice(0, 10);
+
+  it("W2: rotates the escalation log by size, with a numeric suffix on collision", async () => {
+    const { configPath, stateHome, watchdogDir, lead, id } = await escalatingLead("state-rot-size");
+    const log = join(watchdogDir, "escalations.jsonl");
+    await writeFile(log, `${JSON.stringify({ at: new Date().toISOString(), fire_key: "old" })}\n`);
+    await writeFile(join(watchdogDir, `escalations-${today()}.jsonl`), "taken\n");
+    const result = await runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome, configHome: join(dir, "no-alerts"),
+      retention: { maxLogBytes: 10, maxLogAgeMs: 30 * DAY, pruneAgeMs: 30 * DAY } });
+    expect(reportOf(result).actions).toEqual([expect.objectContaining({ status: "done" })]);
+    expect(await readFile(join(watchdogDir, `escalations-${today()}-1.jsonl`), "utf8")).toContain('"fire_key":"old"');
+    expect(await readFile(join(watchdogDir, `escalations-${today()}.jsonl`), "utf8")).toBe("taken\n");
+    const lines = (await readFile(log, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { fire_key: string });
+    expect(lines.map((l) => l.fire_key)).toEqual([`escalate:${lead}:${id}`]);
+  });
+
+  it("W2: rotates the escalation log when its first line is older than the age limit", async () => {
+    const { configPath, stateHome, watchdogDir } = await escalatingLead("state-rot-age");
+    const log = join(watchdogDir, "escalations.jsonl");
+    await writeFile(log, `${JSON.stringify({ at: new Date(Date.now() - 31 * DAY).toISOString(), fire_key: "ancient" })}\n`);
+    reportOf(await runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome, configHome: join(dir, "no-alerts") }));
+    expect(await readFile(join(watchdogDir, `escalations-${today()}.jsonl`), "utf8")).toContain("ancient");
+    expect(await readFile(log, "utf8")).not.toContain("ancient");
+  });
+
+  it("W2: a real pass prunes rotated logs and outbox files older than 30 days; a dry run prunes nothing", async () => {
+    const stateHome = join(dir, "state-prune");
+    const watchdogDir = join(stateHome, "gptqueue", "watchdog");
+    await mkdir(join(watchdogDir, "outbox"), { recursive: true });
+    const old = new Date(Date.now() - 31 * DAY);
+    const files = {
+      oldLog: join(watchdogDir, "escalations-2020-01-01.jsonl"), newLog: join(watchdogDir, "escalations-2030-01-01.jsonl"),
+      oldEml: join(watchdogDir, "outbox", "old.eml"), newEml: join(watchdogDir, "outbox", "new.eml"), live: join(watchdogDir, "escalations.jsonl"),
+    };
+    for (const f of Object.values(files)) await writeFile(f, "x\n");
+    for (const f of [files.oldLog, files.oldEml, files.live]) await utimes(f, old, old);
+    const configPath = await writeConfig(config([name("wd-nobody")], name("wd-root"), null));
+    reportOf(await runWatchdog({ configPath, dryRun: true, redisUrl: REDIS_URL, stateHome, configHome: join(dir, "no-alerts") }));
+    expect(await readdir(join(watchdogDir, "outbox"))).toHaveLength(2);
+    reportOf(await runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome, configHome: join(dir, "no-alerts") }));
+    expect((await readdir(watchdogDir)).sort()).toEqual(["escalations-2030-01-01.jsonl", "escalations.jsonl", "outbox"]);
+    expect(await readdir(join(watchdogDir, "outbox"))).toEqual(["new.eml"]);
+  });
+
+  it("W3: the 7th reminder to one recipient within an hour is rate limited, unclaimed, and sent after the window", async () => {
+    const target = name("wd-busy");
+    extraKeys.push(`gptq:watchdog:sent:${target}`);
+    const waits = [];
+    for (let i = 0; i < 7; i += 1) waits.push(await leadWaitingOn(target, 20 + i));
+    const configPath = await writeConfig(config(waits.map((w) => w.lead), name("wd-root"), null));
+    const t0 = Date.now();
+    // The recipient holds 7 tasks plus up to 7 reminders: lift the default mailbox bound (10) for the watchdog's sends.
+    const bound = process.env.GPTQ_QUEUE_BOUND;
+    process.env.GPTQ_QUEUE_BOUND = "50";
+    onTestFinished(() => { if (bound === undefined) delete process.env.GPTQ_QUEUE_BOUND; else process.env.GPTQ_QUEUE_BOUND = bound; });
+    const run = (offsetMs: number) => runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome: join(dir, "state-rate"),
+      configHome: join(dir, "no-alerts"), now: () => new Date(t0 + offsetMs) });
+
+    const first = reportOf(await run(0));
+    expect(first.rate_limited).toBe(1);
+    const limited = first.actions.filter((a) => a.status === "rate_limited");
+    expect(limited).toHaveLength(1);
+    expect(await redis.exists(WATCHDOG_KEYS.fired(limited[0]!.fire_key))).toBe(0);
+    expect(await systemTasksTo(target)).toHaveLength(6);
+    const ttl = await redis.ttl(`gptq:watchdog:sent:${target}`);
+    expect(ttl).toBeGreaterThan(3600);
+    expect(ttl).toBeLessThanOrEqual(7200);
+
+    expect(reportOf(await run(30 * 60_000)).rate_limited).toBe(1);
+    expect(await systemTasksTo(target)).toHaveLength(6);
+    // The window is counted by Redis TIME (X3): age the six entries past the hour instead of moving the pass clock.
+    const sentKey = WATCHDOG_KEYS.sent(target);
+    const entries = await redis.zrange(sentKey, 0, -1, "WITHSCORES");
+    for (let i = 0; i < entries.length; i += 2) await redis.zadd(sentKey, Number(entries[i + 1]) - 3_600_001, entries[i]!);
+    const later = reportOf(await run(61 * 60_000));
+    expect(later.actions).toContainEqual(expect.objectContaining({ fire_key: limited[0]!.fire_key, status: "done" }));
+    expect(later.rate_limited).toBe(0);
+    expect(await systemTasksTo(target)).toHaveLength(7);
+    for (const w of waits) extraKeys.push(SESSION_KEYS.idempotencyFor(SYSTEM_SENDER, target, `watchdog:remind:${w.lead}:${w.id}`));
+  }, 30_000);
+
+  it("W1: a failed send frees its slot", async () => {
+    const target = name("wd-full");
+    extraKeys.push(WATCHDOG_KEYS.sent(target));
+    const { lead, id } = await leadWaitingOn(target, 20);
+    await redis.rpush(SESSION_KEYS.queue(target), ...Array.from({ length: 20 }, () => JSON.stringify({ id: randomUUID(), from: "filler", to: target, type: "status", timestamp: new Date().toISOString(), payload: { content: "x" } })));
+    const configPath = await writeConfig({ ...config([lead], name("wd-root"), null), max_reminders_per_recipient_per_hour: 1 });
+    const out = reportOf(await runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome: join(dir, "state-w1-full"), configHome: join(dir, "no-alerts") }));
+    expect(out.actions).toEqual([expect.objectContaining({ fire_key: `remind:${lead}:${id}`, status: "failed" })]);
+    expect(await redis.zcard(WATCHDOG_KEYS.sent(target))).toBe(0);
+    expect(await redis.exists(WATCHDOG_KEYS.fired(`remind:${lead}:${id}`))).toBe(0);
+  }, 30_000);
+
+  it("X3: a slow pass (stale pass clock) cannot let a 7th reminder into the hour: the script counts by Redis TIME", async () => {
+    const target = name("wd-slow");
+    extraKeys.push(WATCHDOG_KEYS.sent(target));
+    const waits = [];
+    for (let i = 0; i < 7; i += 1) waits.push(await leadWaitingOn(target, 20 + i));
+    for (const w of waits) extraKeys.push(SESSION_KEYS.idempotencyFor(SYSTEM_SENDER, target, `watchdog:remind:${w.lead}:${w.id}`));
+    const configPath = await writeConfig(config(waits.map((w) => w.lead), name("wd-root"), null));
+    const bound = process.env.GPTQ_QUEUE_BOUND;
+    process.env.GPTQ_QUEUE_BOUND = "50";
+    onTestFinished(() => { if (bound === undefined) delete process.env.GPTQ_QUEUE_BOUND; else process.env.GPTQ_QUEUE_BOUND = bound; });
+    const run = (offsetMs: number) => runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome: join(dir, "state-x3"),
+      configHome: join(dir, "no-alerts"), now: () => new Date(Date.now() + offsetMs) });
+
+    const first = reportOf(await run(0));
+    expect(first.rate_limited).toBe(1);
+    expect(await systemTasksTo(target)).toHaveLength(6);
+    // A pass whose clock runs two hours ahead plans the 7th as eligible (its read-only count sees an empty hour),
+    // but the send script trims by Redis TIME and refuses it; the claim is released for a later pass.
+    const skewed = reportOf(await run(2 * 3_600_000));
+    const seventh = skewed.actions.find((a) => a.kind === "remind" && a.status !== "skipped");
+    expect(seventh).toMatchObject({ status: "rate_limited" });
+    expect(await redis.exists(WATCHDOG_KEYS.fired(seventh!.fire_key))).toBe(0);
+    expect(await systemTasksTo(target)).toHaveLength(6);
+    expect(await redis.zcard(WATCHDOG_KEYS.sent(target))).toBe(6);
+  }, 30_000);
+
+  it("X2: a send that enqueues and then throws (lost ack) keeps the slot and the claim; the retry does not duplicate", async () => {
+    const target = name("wd-ack");
+    extraKeys.push(WATCHDOG_KEYS.sent(target));
+    const { lead, id } = await leadWaitingOn(target, 20);
+    const fireKey = `remind:${lead}:${id}`;
+    extraKeys.push(SESSION_KEYS.idempotencyFor(SYSTEM_SENDER, target, `watchdog:${fireKey}`));
+    const configPath = await writeConfig({ ...config([lead], name("wd-root"), null), max_reminders_per_recipient_per_hour: 1 });
+    const run = (lose: boolean) => runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome: join(dir, "state-x2"), configHome: join(dir, "no-alerts"),
+      faults: lose ? { afterSend: () => { throw new Error("connection lost after enqueue"); } } : undefined });
+    expect(reportOf(await run(true)).actions).toEqual([expect.objectContaining({ fire_key: fireKey, status: "failed" })]);
+    expect(await systemTasksTo(target)).toHaveLength(1);
+    expect(await redis.zscore(WATCHDOG_KEYS.sent(target), fireKey)).not.toBeNull();
+    expect(await redis.get(WATCHDOG_KEYS.fired(fireKey))).toMatch(/^pending:/u);
+    // The pending claim expires; the retry reuses the reservation and the idempotent send returns the original.
+    await redis.pexpire(WATCHDOG_KEYS.fired(fireKey), 1);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(reportOf(await run(false)).actions).toEqual([expect.objectContaining({ fire_key: fireKey, status: "done" })]);
+    expect(await systemTasksTo(target)).toHaveLength(1);
+    expect(await redis.zcard(WATCHDOG_KEYS.sent(target))).toBe(1);
+  });
+
+  it("health: a config failure is recorded in both status records when Redis is reachable", async () => {
+    extraKeys.push(WATCHDOG_LAST_PASS, WATCHDOG_LAST_SUBSTANTIVE_PASS);
+    const missing = await runWatchdog({ configPath: join(dir, `absent-${randomUUID()}.json`), dryRun: false, redisUrl: REDIS_URL, stateHome: dir, configHome: join(dir, "no-alerts") });
+    expect(missing.exitCode).toBe(2);
+    expect(JSON.parse((await redis.get(WATCHDOG_LAST_SUBSTANTIVE_PASS))!)).toMatchObject({ exit: 2, error: "config_missing" });
+    expect(JSON.parse((await redis.get(WATCHDOG_LAST_PASS))!)).toMatchObject({ exit: 2, error: "config_missing", skipped: false });
+    await runWatchdog({ configPath: await writeConfig("{bad"), dryRun: false, redisUrl: REDIS_URL, stateHome: dir, configHome: join(dir, "no-alerts") });
+    expect(JSON.parse((await redis.get(WATCHDOG_LAST_SUBSTANTIVE_PASS))!)).toMatchObject({ exit: 2, error: "config_invalid" });
+    // A dry run with a bad config records nothing.
+    await redis.del(WATCHDOG_LAST_PASS);
+    await runWatchdog({ configPath: await writeConfig("{bad"), dryRun: true, redisUrl: REDIS_URL, stateHome: dir, configHome: join(dir, "no-alerts") });
+    expect(await redis.exists(WATCHDOG_LAST_PASS)).toBe(0);
+  });
+
+  it("W6: a real pass records gptq:watchdog:last-pass with a 7-day TTL; a dry run does not", async () => {
+    await redis.del(WATCHDOG_LAST_PASS);
+    extraKeys.push(WATCHDOG_LAST_PASS);
+    const configPath = await writeConfig(config([name("wd-nobody")], name("wd-root"), null));
+    reportOf(await runWatchdog({ configPath, dryRun: true, redisUrl: REDIS_URL, stateHome: join(dir, "state-last"), configHome: join(dir, "no-alerts") }));
+    expect(await redis.exists(WATCHDOG_LAST_PASS)).toBe(0);
+    extraKeys.push(WATCHDOG_LAST_SUBSTANTIVE_PASS);
+    reportOf(await runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome: join(dir, "state-last"), configHome: join(dir, "no-alerts") }));
+    expect(JSON.parse((await redis.get(WATCHDOG_LAST_PASS))!)).toMatchObject({ exit: 0, leads: 1, actions: 0, rate_limited: 0, deferred: 0, uncorrelated: 0, skipped: false });
+    expect(JSON.parse((await redis.get(WATCHDOG_LAST_SUBSTANTIVE_PASS))!)).toEqual(expect.objectContaining({ exit: 0, leads: 1, actions: 0, failed: 0, rate_limited: 0, deferred: 0, uncorrelated: 0 }));
+    expect(await redis.ttl(WATCHDOG_LAST_SUBSTANTIVE_PASS)).toBeGreaterThan(6 * 86400);
+    expect(await redis.ttl(WATCHDOG_LAST_PASS)).toBeGreaterThan(6 * 86400);
+    // A skipped pass (lock held) is recorded as skipped.
+    await redis.set(WATCHDOG_PASS_LOCK, "someone-else", "PX", 5_000);
+    try {
+      const before = await redis.get(WATCHDOG_LAST_SUBSTANTIVE_PASS);
+      await runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome: join(dir, "state-last"), configHome: join(dir, "no-alerts") });
+      expect(JSON.parse((await redis.get(WATCHDOG_LAST_PASS))!)).toMatchObject({ exit: 0, skipped: true });
+      // W3: a skip never replaces the substantive record that --status judges.
+      expect(await redis.get(WATCHDOG_LAST_SUBSTANTIVE_PASS)).toBe(before);
+    } finally {
+      await redis.del(WATCHDOG_PASS_LOCK);
+    }
+  });
+
   it("S7: a Redis that goes silent after connect ends the pass at its deadline with exit 1", async () => {
     const sockets: Socket[] = [];
     const silent = createServer((socket) => { sockets.push(socket); });
@@ -443,5 +633,27 @@ describe.skipIf(!BUILT)("gptqueue-watchdog bin (needs npm run build)", () => {
     expect(missing.status).toBe(2);
     expect(JSON.parse(missing.stdout)).toMatchObject({ error: "config_missing" });
     expect(run("--config", "x").status).toBe(2);
+  });
+
+  it("W5/W6: a quiet pass prints one line, --json forces the report, --status reads the last pass", async () => {
+    const dirQuiet = await mkdtemp(join(tmpdir(), "gptq-watchdog-cli-"));
+    try {
+      const configPath = join(dirQuiet, "w.json");
+      await writeFile(configPath, JSON.stringify({ schema_version: 1, root: "r", leads: [`wd-cli-${randomUUID().slice(0, 8)}`], operator: null,
+        thresholds_min: { waiting: 10, escalate_after: 10, idle: 15 }, max_actions_per_run: 5 }));
+      const env = { ...process.env, XDG_STATE_HOME: dirQuiet, XDG_CONFIG_HOME: dirQuiet, REDIS_URL };
+      const exec = (...args: string[]) => spawnSync(process.execPath, [join(process.cwd(), "bin", "gptqueue-watchdog"), ...args], { encoding: "utf8", timeout: 10_000, env });
+      const quiet = exec("--once", "--config", configPath);
+      expect(quiet.status).toBe(0);
+      expect(quiet.stdout.trim().split("\n")).toHaveLength(1);
+      expect(quiet.stdout).toMatch(/^gptqueue watchdog: ok at=\S+ leads=1 waiting=0 stalled=0 idle=0 uncorrelated=\d+\n$/u);
+      const full = exec("--once", "--json", "--config", configPath);
+      expect(JSON.parse(full.stdout)).toMatchObject({ dry_run: false, actions: [] });
+      const status = exec("--status");
+      expect(status.status).toBe(0);
+      expect(JSON.parse(status.stdout)).toMatchObject({ healthy: true, last_pass: { exit: 0 } });
+    } finally {
+      await rm(dirQuiet, { recursive: true, force: true });
+    }
   });
 });

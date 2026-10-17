@@ -87,6 +87,15 @@ export const SESSION_KEYS = {
   /** Marker that the request's owner replied to a task (string ISO time with EX, see core/task-ledger.ts). */
   taskAnswered: (taskId: string) => `gptq:task-answered:${taskId}`,
 
+  /** Watchdog reminders sent to one recipient (zset: fire key -> ms), for the hourly cap (W3). */
+  watchdogSent: (recipient: string) => `gptq:watchdog:sent:${recipient}`,
+
+  /** Summary of the last real watchdog pass (string JSON with EX), read by --status (W6). */
+  watchdogLastPass: "gptq:watchdog:last-pass",
+
+  /** Summary of the last non-skipped real watchdog pass (string JSON with EX), judged by --status (W3). */
+  watchdogLastSubstantivePass: "gptq:watchdog:last-substantive-pass",
+
   /** Watchdog pass lock: one pass at a time (string token with PX). */
   watchdogPassLock: "gptq:watchdog:pass-lock",
 

@@ -149,6 +149,8 @@ describe("RFC 5322 rendering", () => {
     expect(eml).toMatch(/^From: .+\r\nTo: <operator>\r\nSubject: .+\r\nDate: .+\r\nMessage-ID: <.+>\r\nMIME-Version: 1\.0\r\nContent-Type: text\/plain; charset=utf-8\r\n\r\n/u);
     expect(eml).toContain("may I do thing 1?");
     expect(eml).toContain("Answer with one word: yes | no");
+    // W4: the body starts with the fixed watchdog prefix.
+    expect(eml.slice(eml.indexOf("\r\n\r\n") + 4).startsWith("[gptqueue watchdog] ")).toBe(true);
   });
 });
 

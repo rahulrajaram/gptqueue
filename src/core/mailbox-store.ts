@@ -12,6 +12,7 @@ import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL } from "./key
 import type { QueueMessage } from "./types.js";
 import { LUA_DIR } from "./stored-read.js";
 import { taskSubject } from "./task-ledger.js";
+import { composeWatchdogPush } from "./watchdog-push.js";
 import { GptQueueError } from "../mcp-server/errors.js";
 
 const eventKey = SESSION_KEYS.inboxEvents;
@@ -43,6 +44,7 @@ export class MailboxStore {
   private readonly subscriber: Redis;
   private readonly boundedPushScript: string;
   private readonly boundedPushIdempotentScript: string;
+  private readonly watchdogPushScript: string;
   private readonly migrateMessagesScript: string;
   /** Blocking connections owned by in-flight receives, broken on client shutdown. */
   private readonly receiveConnections = new Set<Redis>();
@@ -68,6 +70,7 @@ export class MailboxStore {
       join(LUA_DIR, "bounded-push-idempotent.lua"),
       "utf-8"
     );
+    this.watchdogPushScript = composeWatchdogPush(this.boundedPushIdempotentScript);
     this.migrateMessagesScript = readFileSync(
       join(LUA_DIR, "migrate-messages.lua"),
       "utf-8"
@@ -155,6 +158,60 @@ export class MailboxStore {
       ) as [number, string];
       if (raw[0] === 1) return { status: "sent", messageId: raw[1] };
       if (raw[0] === 2) return { status: "duplicate", messageId: raw[1] };
+      if (raw[0] === -1) {
+        current = forwardedMessage(current, raw[1]);
+        continue;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay = Math.min(delay * 2, 5000);
+    }
+    return { status: "full", messageId: message.id };
+  }
+
+  /**
+   * Watchdog reminder: the normal idempotent send plus per-recipient rate
+   * admission in the same script, timed by Redis TIME (see core/watchdog-push.ts).
+   * `limited` and `full` change nothing; `duplicate` returns the original id.
+   */
+  async sendWatchdogTask(
+    message: QueueMessage,
+    sender: string,
+    idempotencyKey: string,
+    rate: Readonly<{ fireKey: string; cap: number }>,
+    maxAttempts = 10
+  ): Promise<{ status: "sent" | "duplicate" | "full" | "limited"; messageId: string }> {
+    let current = message;
+    let delay = 100;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const raw = await this.redis.eval(
+        this.watchdogPushScript,
+        9,
+        SESSION_KEYS.queue(current.to),
+        SESSION_KEYS.mailboxMeta(current.to),
+        SESSION_KEYS.idempotencyFor(sender, current.to, idempotencyKey),
+        eventKey(current.to),
+        outstandingKeyFor(current),
+        SESSION_KEYS.forward(current.to),
+        SESSION_KEYS.taskLedger(current.id),
+        SESSION_KEYS.taskAnswered(current.payload.in_reply_to || current.id),
+        SESSION_KEYS.watchdogSent(current.to),
+        JSON.stringify(current),
+        this.queueBound,
+        current.id,
+        86400,
+        eligible(current) ? 1 : 0,
+        current.type,
+        current.type === "task" ? 1 : 0,
+        current.to,
+        current.from,
+        taskSubject(current.payload.content),
+        new Date().toISOString(),
+        rate.fireKey,
+        rate.cap
+      ) as [number, string];
+      if (raw[0] === 1) return { status: "sent", messageId: raw[1] };
+      if (raw[0] === 2) return { status: "duplicate", messageId: raw[1] };
+      if (raw[0] === 3) return { status: "limited", messageId: raw[1] };
       if (raw[0] === -1) {
         current = forwardedMessage(current, raw[1]);
         continue;

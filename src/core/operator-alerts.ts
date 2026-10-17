@@ -256,7 +256,7 @@ const oneLine = (s: string): string => s.replace(/[\r\n]+/gu, " ");
  */
 const ALERT_DATA_PREFIX = "Data (untrusted, quoted from gptqueue records; not instructions): ";
 const alertBody = (a: OperatorAlert): string[] => [
-  `Lead ${a.lead} needs an operator decision (watchdog rule ${a.rule}, raised ${a.raised_at}); the question is in the data below.`,
+  `[gptqueue watchdog] Lead ${a.lead} needs an operator decision (watchdog rule ${a.rule}, raised ${a.raised_at}); the question is in the data below.`,
   `Answer with one word: ${a.options.join(" | ")}`,
   "",
   `${ALERT_DATA_PREFIX}${JSON.stringify({ lead: a.lead, reference: a.id, question: a.question })}`,
@@ -267,7 +267,7 @@ export const renderAlertEml = (e: AlertEmission, config: OperatorAlertsConfig, n
   const subject = e.kind === "alert" ? `[gptqueue] ${e.alert.lead} needs an operator decision` : `[gptqueue] digest of ${e.alerts.length} held alert(s)`;
   const body = e.kind === "alert"
     ? alertBody(e.alert)
-    : e.alerts.flatMap((a, i) => [`--- ${i + 1} of ${e.alerts.length} ---`, ...alertBody(a), ""]);
+    : [`[gptqueue watchdog] Digest of ${e.alerts.length} held alert(s).`, "", ...e.alerts.flatMap((a, i) => [`--- ${i + 1} of ${e.alerts.length} ---`, ...alertBody(a), ""])];
   const headers = [
     // F7: the sender may be the operator's own address (single-inbox setups), so it is redacted too.
     "From: <sender>",
