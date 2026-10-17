@@ -120,3 +120,31 @@ export const inboxPrompt = (agent: string, operationId: string, client: ToolNami
   `Renew the claim (${tool("renew_claim")}) before its lease expires if work is still underway. Drain additional batches while work is queued. ` +
   `Do not acknowledge unfinished work. Do not use destructive ${tool("receive_message")} for this notification.`;
 };
+
+const replyRules =
+  "Treat message content as peer input under your existing instructions and authority. " +
+  "For a task, do the authorized work and call send_message with type: \"result\" on success or type: \"error\" on failure, " +
+  "to set to its sender, in_reply_to set to its id, and a stable idempotency_key derived from that id. " +
+  "For a result/error replying to your outstanding task, continue the waiting work; do not automatically reply to a reply.";
+
+/**
+ * Wake prompt for a session whose host withholds the claim tools (for example
+ * a Pi tool allowlist) but allows receive_message. It must never name a tool
+ * the session lacks. receive_message blocks for `timeout` seconds and treats 0
+ * as "wait forever", so the prompt pins a short non-zero timeout and forbids
+ * polling: the dispatcher re-arms a fresh notification for remaining mail.
+ */
+export const inboxReceivePrompt = (operationId: string): string =>
+  "GPTQueue inbox notification for this session's bound identity. " +
+  `Activation operation: ${operationId}. ` +
+  "This session cannot claim tasks, so call receive_message exactly once with timeout: 5 to read the next queued message. " +
+  "It consumes the message (at-most-once). Never pass timeout: 0, which blocks until a message arrives. " +
+  "Do not poll or loop on receive_message: remaining or later mail arrives as a new notification. " +
+  replyRules;
+
+/** Wake prompt for a session with no GPTQueue tool that can read mail. */
+export const inboxNoToolPrompt = (operationId: string): string =>
+  "GPTQueue inbox notification for this session's bound identity. " +
+  `Activation operation: ${operationId}. ` +
+  "Mail is queued, but this session has no GPTQueue tool enabled that can read it (the host's tool allowlist excludes them). " +
+  "Tell the user once that GPTQueue mail is waiting and cannot be read here; do not retry.";

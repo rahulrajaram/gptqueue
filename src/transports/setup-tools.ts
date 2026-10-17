@@ -10,7 +10,7 @@ import type { RedisClient } from "../mcp-server/redis-client.js";
 import { registerAgentSchema, registerAgent } from "../mcp-server/tools/register-agent.js";
 import { sendMessageSchema, sendMessage } from "../mcp-server/tools/send-message.js";
 import { receiveMessageSchema, receiveMessage } from "../mcp-server/tools/receive-message.js";
-import { listAgents } from "../mcp-server/tools/list-agents.js";
+import { LIST_AGENTS_DESCRIPTION, listAgents, listAgentsSchema } from "../mcp-server/tools/list-agents.js";
 import { queueStatusSchema, getQueueStatus } from "../mcp-server/tools/queue-status.js";
 import {
   unregisterAgent,
@@ -106,10 +106,10 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
 
   server.tool(
     "list_agents",
-    "[safety: readonly] List agents with readable labels, exact messaging names, public UUIDs, working directories, clients, registration times, process IDs, and presence. Send messages to the full name; labels are for display. Works before registration.",
-    {},
+    LIST_AGENTS_DESCRIPTION + " Works before registration.",
+    listAgentsSchema.shape,
     READ_ONLY,
-    async () => safeToolCall(() => listAgents(redisClient))
+    async (params) => safeToolCall(() => listAgents(redisClient, listAgentsSchema.parse(params)))
   );
 
   server.tool(

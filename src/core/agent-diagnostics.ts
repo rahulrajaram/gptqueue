@@ -2,7 +2,7 @@ import type { Redis } from "ioredis";
 import { resolve } from "path";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS } from "./keys.js";
 import { SessionStore } from "./session-store.js";
-import { discoveryRecord, type AgentDiscoveryRecord } from "./agent-discovery.js";
+import { discoveryNames, discoveryPage, discoveryRecord, type AgentDiscoveryRecord, type DiscoveryPaging } from "./agent-discovery.js";
 import { z } from "zod";
 import { runtimeBindingSchema } from "./runtime-binding.js";
 
@@ -130,8 +130,9 @@ export class AgentDiagnostics {
     return Object.freeze({ name: agent, discovery, profile, capabilities: Object.freeze({ protocol_version: typeof metadata.protocol_version === "string" || typeof metadata.protocol_version === "number" ? String(metadata.protocol_version) : null, tool_names: Object.freeze(tools), published: derived.published }), online, runtime_binding: binding, activation: Object.freeze(activation), readiness: derived.readiness, activation_ready: derived.activation_ready, queue: Object.freeze({ queued, claimed, dead_lettered }), evidence_at: at, snapshot: "bounded_non_atomic", next_action: derived.readiness === "bound_unverified" ? "probe_exact_runtime_before_relying_on_activation" : derived.readiness });
   }
 
-  async find(filters: Readonly<{ query?: string; client?: "codex" | "pi" | "opencode"; cwd?: string; working_directory?: string; kind?: AgentKind; activation_ready?: boolean; online?: boolean; limit?: number }> = {}) {
-    const limit = Math.min(100, Math.max(1, Math.floor(filters.limit ?? 50)));
+  async find(filters: Readonly<{ query?: string; client?: "codex" | "pi" | "opencode"; cwd?: string; working_directory?: string; kind?: AgentKind; activation_ready?: boolean; online?: boolean } & DiscoveryPaging> = {}) {
+    // online_only is the shared discovery spelling of online: true.
+    const wantOnline = filters.online_only ? true : filters.online;
     const directory = filters.working_directory ?? filters.cwd;
     const query = filters.query?.toLowerCase();
 
@@ -147,10 +148,10 @@ export class AgentDiagnostics {
       directory !== undefined ||
       filters.activation_ready !== undefined;
     const needOnline =
-      filters.online !== undefined || filters.activation_ready !== undefined;
+      wantOnline !== undefined || filters.activation_ready !== undefined;
 
     const registry = await this.redis.hgetall(SESSION_KEYS.registry);
-    const names = Object.keys(registry);
+    const names = discoveryNames(Object.keys(registry), filters.name_prefix);
 
     const matched = await withBoundedConcurrency(names, 8, async (name) => {
       const reg = record(json(registry[name] ?? null));
@@ -194,19 +195,22 @@ export class AgentDiagnostics {
         (directory === undefined || sameDirectory(bindingDirectory, directory)) &&
         (filters.kind === undefined || kind(profileRaw.kind) === filters.kind) &&
         (filters.activation_ready === undefined || activationReady === filters.activation_ready) &&
+        (filters.online_only !== true || online) &&
         (filters.online === undefined || online === filters.online)
       );
     });
 
     const matchedNames = names.filter((_, i) => matched[i] === true);
     const total = matchedNames.length;
+    const window = discoveryPage(matchedNames, filters);
     const page = await withBoundedConcurrency(
-      matchedNames.slice(0, limit),
+      [...window.items],
       8,
       (name) => this.details(name)
     );
     return Object.freeze({ matches: Object.freeze(page), total_matches: total,
-      truncated: total > limit, resolution: total === 1 ? "unique" : total > 1 ? "ambiguous" : "none" });
+      truncated: window.truncated, next_cursor: window.next_cursor,
+      resolution: total === 1 ? "unique" : total > 1 ? "ambiguous" : "none" });
   }
 
   async delivery(agent: string, messageId: string): Promise<DeliveryDiagnostics> {

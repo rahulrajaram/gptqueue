@@ -14,6 +14,7 @@ import { claimTasksSchema } from "../mcp-server/tools/claim-tasks.js";
 import { acknowledgeTasksSchema } from "../mcp-server/tools/acknowledge-tasks.js";
 import { renewClaimSchema } from "../mcp-server/tools/renew-claim.js";
 import { queueStatusSchema } from "../mcp-server/tools/queue-status.js";
+import { listAgentsSchema } from "../mcp-server/tools/list-agents.js";
 import { boundReceiveMessageSchema } from "../experimental-wrapper/bridge.js";
 import {
   agentDetailsSchema,
@@ -365,7 +366,7 @@ export const createOpenCodePlugin = (
     ),
     gptqueue_list_agents: forwarded(
       "gptqueue_list_agents", "list_agents",
-      "List discoverable GPTQueue agents.", z.object({}).strict(),
+      "List discoverable GPTQueue agents, bounded (default 50, max 500); filter with name_prefix/online_only and page with next_cursor.", listAgentsSchema,
     ),
     gptqueue_get_runtime_status: forwarded(
       "gptqueue_get_runtime_status", "get_runtime_status",

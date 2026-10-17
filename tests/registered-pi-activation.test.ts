@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPiExtension, GPTQUEUE_TOOLS, SHELL_TOOLS, type PiAPI, type SessionClient } from "../src/registered-shell/pi-extension.js";
+import { inboxPrompt } from "../src/registered-shell/runtime.js";
 
 const catalog = { tools: [...GPTQUEUE_TOOLS, ...SHELL_TOOLS].map((name) => ({ name, inputSchema: { type: "object" } })) };
 const makeClient = () => {
@@ -17,7 +18,7 @@ const makeClient = () => {
 const fakePi = () => {
   const handlers = new Map<string, any>(); const entries: any[] = []; let current = { cwd: "/tmp/project", sessionManager: { getSessionId: () => "session-1", getEntries: () => entries } };
   const pi = {
-    registerTool: vi.fn(), on: vi.fn((name, handler) => handlers.set(name, handler)), getActiveTools: vi.fn(() => [...GPTQUEUE_TOOLS, ...SHELL_TOOLS]), setActiveTools: vi.fn(),
+    registerTool: vi.fn(), on: vi.fn((name, handler) => handlers.set(name, handler)), getActiveTools: vi.fn((): string[] => [...GPTQUEUE_TOOLS, ...SHELL_TOOLS]), setActiveTools: vi.fn(),
     sendMessage: vi.fn(), appendEntry: vi.fn(),
   } satisfies PiAPI;
   return { pi, handlers, context: () => current, entries, switchSession: (id: string, cwd = current.cwd) => { current = { ...current, cwd, sessionManager: { ...current.sessionManager, getSessionId: () => id } }; }, setCwd: (cwd: string) => { current = { ...current, cwd }; } };
@@ -208,5 +209,66 @@ describe("registered Pi activation lifecycle", () => {
     await fake.handlers.get("session_start")({}, fake.context()); fake.switchSession("session-2");
     await fake.handlers.get("session_before_switch")({}, fake.context());
     expect(client.close).toHaveBeenCalled();
+  });
+
+  // D2: a Pi host tool allowlist (`pi --tools ...`) can exclude the claim tools.
+  // Pi then drops them from the registry, so setActiveTools cannot enable them.
+  const allowlistedPi = (allowed: readonly string[]) => {
+    const fake = fakePi();
+    fake.pi.getActiveTools.mockImplementation(() => [...allowed]);
+    return fake;
+  };
+  const activate = async (client: any, prompt: string) => {
+    const bind = (client.callTool as any).mock.calls.find((call: any[]) => call[0]?.name === "bind_runtime");
+    return client.handler(bind[0].arguments, { operation_id: "op-d2", prompt }, new AbortController().signal);
+  };
+
+  it("keeps a bound Pi session connected when its host allowlist excludes the claim tools", async () => {
+    const client = makeClient(); const fake = allowlistedPi(["read", ...GPTQUEUE_TOOLS]);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await createPiExtension(async () => client, 100, { runtimeEnabled: true, retry: { baseMs: 60_000 } })(fake.pi);
+      await fake.handlers.get("session_start")({}, fake.context());
+      const before = await fake.handlers.get("before_agent_start")({ systemPrompt: "p" });
+      expect(before.systemPrompt).toBe("p\n\ninstructions");
+      expect(client.close).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+    } finally { errors.mockRestore(); }
+  });
+
+  it("tells a session without claim tools to call receive_message once with a short timeout, never claim_tasks", async () => {
+    const client = makeClient(); const fake = allowlistedPi(["read", ...GPTQUEUE_TOOLS]);
+    await createPiExtension(async () => client, 100, { runtimeEnabled: true })(fake.pi);
+    await fake.handlers.get("session_start")({}, fake.context());
+    await expect(activate(client, inboxPrompt("agent-a", "op-d2"))).resolves.toEqual({ status: "queued" });
+    const sent = fake.pi.sendMessage.mock.calls[0]![0] as { content: string; details: { operation_id: string } };
+    expect(sent.details.operation_id).toBe("op-d2");
+    expect(sent.content).toContain("op-d2");
+    expect(sent.content).not.toMatch(/claim_tasks|acknowledge_tasks|renew_claim/u);
+    expect(sent.content).toMatch(/call receive_message exactly once with timeout: 5/u);
+    expect(sent.content).toMatch(/timeout: 0[^.]*blocks/u);
+    expect(sent.content).toMatch(/Do not poll/u);
+  });
+
+  it("delivers the claim prompt unchanged when the claim tools are active", async () => {
+    const client = makeClient(); const fake = fakePi();
+    await createPiExtension(async () => client, 100, { runtimeEnabled: true })(fake.pi);
+    await fake.handlers.get("session_start")({}, fake.context());
+    const prompt = inboxPrompt("agent-a", "op-d2");
+    await activate(client, prompt);
+    const sent = fake.pi.sendMessage.mock.calls[0]![0] as { content: string };
+    expect(sent.content).toBe(prompt);
+    expect(sent.content).toContain("Call claim_tasks");
+    expect(sent.content).toContain("acknowledge_tasks");
+  });
+
+  it("names no GPTQueue tool when the session can neither claim nor receive", async () => {
+    const client = makeClient(); const fake = allowlistedPi(["read", "send_message"]);
+    await createPiExtension(async () => client, 100, { runtimeEnabled: true })(fake.pi);
+    await fake.handlers.get("session_start")({}, fake.context());
+    await activate(client, inboxPrompt("agent-a", "op-d2"));
+    const sent = fake.pi.sendMessage.mock.calls[0]![0] as { content: string };
+    expect(sent.content).not.toMatch(/claim_tasks|acknowledge_tasks|receive_message/u);
+    expect(sent.content).toMatch(/no GPTQueue tool/u);
   });
 });

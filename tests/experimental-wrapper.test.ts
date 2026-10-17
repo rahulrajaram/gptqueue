@@ -306,7 +306,7 @@ describe("experimental authenticated bound bridge", () => {
       );
 
       const listed = toolPayload(
-        await client.callTool({ name: "list_agents", arguments: {} })
+        await client.callTool({ name: "list_agents", arguments: { name_prefix: name } })
       ) as Array<{ name: string }>;
       expect(listed.some((agent) => agent.name === name)).toBe(true);
 

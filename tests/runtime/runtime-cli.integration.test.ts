@@ -695,7 +695,7 @@ describe.skipIf(!RUNTIME_ENABLED)(
       expect(
         (status.data as Array<{ agent: string; depth: number }>)[0]!.depth
       ).toBe(1);
-      const list = await probe.call("list_agents", {});
+      const list = await probe.call("list_agents", { name_prefix: name });
       const entry = (list.data as Array<{ name: string; online: boolean }>).find(
         (a) => a.name === name
       );

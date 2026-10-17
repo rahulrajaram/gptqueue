@@ -47,9 +47,10 @@ const connected = async (cwd: string) => {
 describe("registered agent discovery metadata", () => {
   it("returns readable identity fields in bound list_agents text and structured data", async () => {
     const { shell, client } = await connected("/tmp/Readable Workspace Ω");
-    const response = await client.callTool({ name: "list_agents", arguments: {} });
+    const response = await client.callTool({ name: "list_agents", arguments: { name_prefix: shell.agentName } });
     const listed = result(response);
-    expect(response.structuredContent).toEqual({ status: "ok", agents: listed });
+    // Bounded discovery extends the structured result with paging fields; the text stays the agent array.
+    expect(response.structuredContent).toMatchObject({ status: "ok", agents: listed, total: expect.any(Number), truncated: expect.any(Boolean) });
     const agent = listed.find((entry: any) => entry.name === shell.agentName);
     expect(agent.label).toBe(`Readable Workspace Ω · codex · ${agent.uuid.slice(0, 8)}`);
     expect(agent.uuid).toBe(shell.agentName.slice(-36));
@@ -66,7 +67,10 @@ describe("registered agent discovery metadata", () => {
     const first = await connected("/tmp/same");
     const second = await connected("/tmp/same");
     expect(first.shell.agentName).not.toBe(second.shell.agentName);
-    const listed = result(await first.client.callTool({ name: "list_agents", arguments: {} }));
+    const listed = [
+      ...result(await first.client.callTool({ name: "list_agents", arguments: { name_prefix: first.shell.agentName } })),
+      ...result(await first.client.callTool({ name: "list_agents", arguments: { name_prefix: second.shell.agentName } })),
+    ];
     const ours = listed.filter((entry: any) => [first.shell.agentName, second.shell.agentName].includes(entry.name));
     expect(new Set(ours.map((entry: any) => entry.uuid)).size).toBe(2);
     expect(new Set(ours.map((entry: any) => entry.label)).size).toBe(2);
@@ -93,7 +97,7 @@ describe("registered agent discovery metadata", () => {
         metadata: { label: { secret: "hidden-value" }, uuid: ["secret-uuid"], client: "invented", working_directory: "relative" },
         registered_at: "invalid", pid: -1,
       }), invalidName, "null");
-      const listed = result(await client.callTool({ name: "list_agents", arguments: {} }));
+      const listed = result(await client.callTool({ name: "list_agents", arguments: { limit: 500 } }));
       expect(listed.find((entry: any) => entry.name === shell.agentName)).toMatchObject({ label: shell.agentName, uuid: null, client: null, working_directory: null, registered_at: null, pid: null });
       expect(listed.some((entry: any) => entry.name === invalidName)).toBe(false);
       expect(JSON.stringify(listed)).not.toMatch(/secret|hidden-value/u);

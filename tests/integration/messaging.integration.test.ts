@@ -101,7 +101,7 @@ describe("registration & identity wire semantics", () => {
     const a = await connect(uniq("reg-a"), { shared: true });
     const b = await connect(uniq("reg-b"));
 
-    const list = await a.call("list_agents", {});
+    const list = await a.call("list_agents", { limit: 500 });
     expect(Array.isArray(list.data)).toBe(true);
     const names = (list.data as Array<{ name: string }>).map((x) => x.name);
     expect(names).toContain(a.name);
@@ -111,7 +111,7 @@ describe("registration & identity wire semantics", () => {
     const dup = await connect(a.name, { shared: true });
     expect(dup.sessionId).toBeTruthy();
     expect(dup.sessionId).not.toBe(a.sessionId);
-    const list2 = await a.call("list_agents", {});
+    const list2 = await a.call("list_agents", { name_prefix: a.name });
     const names2 = (list2.data as Array<{ name: string }>).map((x) => x.name);
     expect(names2.filter((n) => n === a.name).length).toBe(1);
   });
@@ -162,7 +162,7 @@ describe("registration & identity wire semantics", () => {
     expect(closed.data.status).toBe("session_closed");
     expect(closed.data.mailbox_preserved).toBe(true);
     expect(await ctx.redis.llen(SESSION_KEYS.queue(closeTgt.name))).toBe(1);
-    const listAfterClose = (await sender.call("list_agents", {})).data as Array<{ name: string }>;
+    const listAfterClose = (await sender.call("list_agents", { name_prefix: closeTgt.name })).data as Array<{ name: string }>;
     expect(listAfterClose.some((x) => x.name === closeTgt.name)).toBe(true);
 
     // unregister_agent: mailbox + registry deleted. The wire result body is a
@@ -171,7 +171,7 @@ describe("registration & identity wire semantics", () => {
     const unreg = await unregTgt.call("unregister_agent", { session_id: unregTgt.sessionId });
     expect(unreg.contentText).toMatch(/unregistered/);
     expect(await ctx.redis.llen(SESSION_KEYS.queue(unregTgt.name))).toBe(0);
-    const listAfterUnreg = (await sender.call("list_agents", {})).data as Array<{ name: string }>;
+    const listAfterUnreg = (await sender.call("list_agents", { name_prefix: unregTgt.name })).data as Array<{ name: string }>;
     expect(listAfterUnreg.some((x) => x.name === unregTgt.name)).toBe(false);
   });
 

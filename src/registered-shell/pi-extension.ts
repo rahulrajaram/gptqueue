@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { createPiRuntime, type PiRuntimeHost } from "./pi-runtime.js";
 import type { ActivationRequest, ActivationOutcome, RuntimeBinding } from "./runtime.js";
-import { runtimeBindingSchema } from "./runtime.js";
+import { inboxNoToolPrompt, inboxReceivePrompt, runtimeBindingSchema } from "./runtime.js";
 import { z } from "zod";
 import { VERSION } from "../version.js";
 import { RUNTIME_TOOL_NAMES, SHELL_TOOL_NAMES } from "./tool-names.js";
@@ -15,6 +15,20 @@ export const GPTQUEUE_TOOLS = ["send_message", "receive_message", "list_agents",
 /** Every registered-shell tool; the runtime subset is required. */
 export const SHELL_TOOLS = SHELL_TOOL_NAMES;
 const REQUIRED_RUNTIME_TOOLS = RUNTIME_TOOL_NAMES;
+/** Tools a wake prompt may tell the model to consume mail with, best first. */
+const CLAIM_PATH = ["claim_tasks", "acknowledge_tasks"] as const;
+const RECEIVE_PATH = ["receive_message"] as const;
+const hasAll = (active: readonly string[], names: readonly string[]) => names.every((name) => active.includes(name));
+
+/**
+ * The wake prompt must only name tools this Pi session can call. A host tool
+ * allowlist (`pi --tools ...`) removes excluded extension tools from Pi's
+ * registry, so the dispatcher's claim prompt is replaced when they are absent.
+ */
+export const piActivationPrompt = (request: Readonly<{ operation_id: string; prompt: string }>, active: readonly string[]): string =>
+  hasAll(active, CLAIM_PATH) ? request.prompt
+    : hasAll(active, RECEIVE_PATH) ? inboxReceivePrompt(request.operation_id)
+      : inboxNoToolPrompt(request.operation_id);
 const STARTUP_TIMEOUT_MS = 10_000;
 type CatalogTool = { name?: string; description?: string; inputSchema?: unknown };
 type BoundTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
@@ -281,7 +295,7 @@ export const createPiExtension = (
           incoming.client !== "pi" || incoming.working_directory !== ownBinding.working_directory || runtime !== adapter) {
         return { status: "unavailable" };
       }
-      return adapter.activate(request, signal);
+      return adapter.activate({ ...request, prompt: piActivationPrompt(request, pi.getActiveTools()) }, signal);
     });
     // Serialize binds across generations: the previous one was aborted (its
     // lifecycle signal) and its client closed by close(); wait until it settles.
@@ -312,7 +326,14 @@ export const createPiExtension = (
     const active = pi.getActiveTools();
     const missing = expected.filter((name) => !active.includes(name));
     if (missing.length) pi.setActiveTools([...active, ...missing]);
-    if (!expected.every((name) => pi.getActiveTools().includes(name))) throw new Error("GPTQueue tools are not active");
+    const now = pi.getActiveTools();
+    if (expected.every((name) => now.includes(name))) return;
+    // A host tool allowlist can withhold some GPTQueue tools; Pi then cannot
+    // activate them. A bound session that can still consume mail stays
+    // connected (degrading would close the sidecar and its session identity);
+    // activations adapt their prompt to the tools that are active.
+    if (options.runtimeEnabled && (hasAll(now, CLAIM_PATH) || hasAll(now, RECEIVE_PATH))) return;
+    throw new Error("GPTQueue tools are not active");
   };
   const unavailableNote = () =>
     `GPTQueue is currently unavailable in this session (${degraded?.code}); GPTQueue tools will report errors until it reconnects. Continue the user's work normally.`;

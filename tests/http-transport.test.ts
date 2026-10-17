@@ -266,7 +266,7 @@ describe("HTTP transport (NXT-018)", () => {
     // List agents
     const listResult = await client.callTool({
       name: "list_agents",
-      arguments: {},
+      arguments: { name_prefix: "http-agent-1" },
     });
     const agents = JSON.parse((listResult.content as any)[0].text);
     expect(agents.find((a: any) => a.name === "http-agent-1")).toBeDefined();

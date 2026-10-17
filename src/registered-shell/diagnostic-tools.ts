@@ -6,6 +6,7 @@ import { CodexSocketClient } from "./codex-socket.js";
 import type { RuntimeTools } from "./runtime-tools.js";
 import { AgentDiagnostics } from "../core/agent-diagnostics.js";
 import { SESSION_KEYS } from "../core/keys.js";
+import { discoveryPagingShape } from "../core/agent-discovery.js";
 
 /** Machine-readable MCP annotations mirroring the prose [safety: ...] prefixes. */
 const READ_ONLY = { readOnlyHint: true } as const;
@@ -18,7 +19,7 @@ const agentProfileSchema = z.object({
 }).strict();
 export const findAgentsSchema = z.object({ query: z.string().max(200).optional(), client: z.enum(["codex", "pi", "opencode"]).optional(),
   working_directory: z.string().max(4096).optional(), kind: agentProfileSchema.shape.kind.optional(),
-  online: z.boolean().optional(), activation_ready: z.boolean().optional(), limit: z.number().int().min(1).max(100).default(50),
+  online: z.boolean().optional(), activation_ready: z.boolean().optional(), ...discoveryPagingShape,
 }).strict();
 export const agentDetailsSchema = z.object({ agent: z.string().min(1).max(500).optional(), probe: z.boolean().default(false) }).strict();
 export const deliveryStatusSchema = agentDetailsSchema.extend({ message_id: z.string().min(1).max(200) }).strict();
@@ -30,7 +31,7 @@ export const registerDiagnosticTools = (server: McpServer, client: RedisClient, 
     try { return toolResult(await work() as Record<string, unknown>); }
     catch (error) { return stableToolError(error); }
   };
-  server.tool("find_agents", "[safety: readonly] Find exact agent candidates by declared purpose and identity. Ambiguous matches are never routed automatically; online does not imply activation readiness.",
+  server.tool("find_agents", "[safety: readonly] Find exact agent candidates by declared purpose and identity. Ambiguous matches are never routed automatically; online does not imply activation readiness. Bounded: at most `limit` matches (default 50, max 500) in name order; filter with name_prefix and online_only, and page with the returned next_cursor.",
     findAgentsSchema.shape, READ_ONLY, params => safe(() => diagnostics.find(findAgentsSchema.parse(params))));
   server.tool("get_agent_details", "[safety: readonly] Inspect an exact mailbox, runtime binding, published capabilities, declared role and activation readiness. Omit agent for this connection. No message content or credentials.",
     agentDetailsSchema.shape, READ_ONLY, params => safe(async () => {

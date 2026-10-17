@@ -10,7 +10,7 @@ import { CustodyStore } from "../core/custody-store.js";
 import { ActorDirectory } from "../core/actor-directory.js";
 import { WakeLeaseStore } from "../core/wake-lease.js";
 import { TaskClaimStore, purgeActorClaimsLua } from "../core/task-claim-store.js";
-import { discoveryRecord, type AgentDiscoveryMetadata, type AgentDiscoveryRecord } from "../core/agent-discovery.js";
+import { discoveryNames, discoveryPage, discoveryRecord, type AgentDiscoveryMetadata, type AgentDiscoveryRecord, type DiscoveryPage, type DiscoveryPaging } from "../core/agent-discovery.js";
 import { GptQueueError } from "./errors.js";
 
 /**
@@ -513,7 +513,29 @@ export class RedisClient {
 
   async listAgents(): Promise<AgentDiscoveryRecord[]> {
     const registry = await this.redis.hgetall(SESSION_KEYS.registry);
-    const entries = Object.entries(registry).flatMap(([name, json]) => {
+    return this.discoveryRecords(Object.entries(registry));
+  }
+
+  /**
+   * One bounded page of discovery records in name order. The name filter runs
+   * on the registry keys; presence is read for the whole filtered set only when
+   * online_only needs it, otherwise just for the returned page.
+   */
+  async listAgentsPage(paging: DiscoveryPaging = {}): Promise<DiscoveryPage<AgentDiscoveryRecord>> {
+    const registry = await this.redis.hgetall(SESSION_KEYS.registry);
+    const names = discoveryNames(Object.keys(registry), paging.name_prefix);
+    if (!paging.online_only) {
+      const page = discoveryPage(names, paging);
+      const records = await this.discoveryRecords(page.items.map((name) => [name, registry[name]!] as const));
+      return Object.freeze({ ...page, items: Object.freeze(records) });
+    }
+    const records = await this.discoveryRecords(names.map((name) => [name, registry[name]!] as const));
+    return discoveryPage(records.filter((record) => record.online), paging);
+  }
+
+  /** Parsed records in input order; unparseable registrations are skipped. */
+  private async discoveryRecords(registry: ReadonlyArray<readonly [string, string]>): Promise<AgentDiscoveryRecord[]> {
+    const entries = registry.flatMap(([name, json]) => {
       let parsed: unknown;
       try { parsed = JSON.parse(json); } catch { return []; }
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
@@ -521,7 +543,7 @@ export class RedisClient {
     });
     if (entries.length === 0) return [];
     // Prefer session-based presence; fall back to legacy heartbeat. Both are
-    // batched across the whole registry rather than read per agent.
+    // batched across the requested names rather than read per agent.
     const names = entries.map(({ name }) => name);
     const [presences, heartbeats] = await Promise.all([
       this.sessionStore.getPresenceMany(names),

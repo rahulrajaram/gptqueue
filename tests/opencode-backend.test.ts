@@ -68,7 +68,7 @@ describe("OpenCode backend", () => {
       );
       liveBackends.push(parent, child);
 
-      const listed = payload(await parent.callTool("list_agents", {}));
+      const listed = payload(await parent.callTool("list_agents", { limit: 500 }));
       expect(listed.agents).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ name: parentName }),
