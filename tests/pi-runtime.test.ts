@@ -94,4 +94,47 @@ describe("Pi runtime adapter", () => {
         .resolves.toEqual({ status: "completed", turn_id: "pi:op-ran" });
     });
   });
+  describe("coalescing fresh notifications", () => {
+    const signal = new AbortController().signal;
+    const stateful = (entries: any[] = [], state = { idle: false, pending: true }) => {
+      const fake = host(entries); const sessionManager = fake.host.getContext().sessionManager;
+      fake.host.getContext = () => ({ cwd: "/tmp/project", sessionManager, isIdle: () => state.idle, hasPendingMessages: () => state.pending });
+      return { ...fake, state };
+    };
+    const go = (runtime: ReturnType<typeof createPiRuntime>, id: string) => runtime.activate({ operation_id: id, prompt: "wake" }, signal);
+    it("queues one notification while Pi is busy and reports busy for newer operations", async () => {
+      const fake = stateful(); const runtime = createPiRuntime(binding, fake.host, { now: () => 0, graceMs: 1_000 });
+      await expect(go(runtime, "op-1")).resolves.toEqual({ status: "queued" });
+      await expect(go(runtime, "op-2")).resolves.toEqual({ status: "busy" });
+      await expect(go(runtime, "op-3")).resolves.toEqual({ status: "busy" });
+      expect(fake.sendMessage).toHaveBeenCalledTimes(1);
+      // The earlier operation itself is still reported as queued, not coalesced away.
+      await expect(go(runtime, "op-1")).resolves.toEqual({ status: "queued" });
+    });
+    it("queues the next notification once the earlier one's turn completed", async () => {
+      const fake = stateful(); const runtime = createPiRuntime(binding, fake.host, { now: () => 0, graceMs: 1_000 });
+      await go(runtime, "op-1");
+      fake.entries.push({ type: "custom", customType: "gptqueue-inbox-activation-completed", data: { operation_id: "op-1", runtime_id: "session-1", turn_id: "turn-1" } });
+      await expect(go(runtime, "op-2")).resolves.toEqual({ status: "queued" });
+      expect(fake.sendMessage).toHaveBeenCalledTimes(2);
+    });
+    it("queues the next notification once Pi is quiescent past the grace period", async () => {
+      let clock = 0;
+      const fake = stateful(); const runtime = createPiRuntime(binding, fake.host, { now: () => clock, graceMs: 1_000 });
+      await go(runtime, "op-1");
+      fake.state.idle = true; fake.state.pending = false;
+      await expect(go(runtime, "op-2")).resolves.toEqual({ status: "busy" }); // inside the grace window
+      clock = 1_000;
+      await expect(go(runtime, "op-2")).resolves.toEqual({ status: "queued" });
+    });
+    it("bounds coalescing in time when the host cannot prove idleness", async () => {
+      let clock = 0;
+      const fake = host(); const runtime = createPiRuntime(binding, fake.host, { now: () => clock, graceMs: 1_000, coalesceMaxMs: 60_000 });
+      await go(runtime, "op-1");
+      await expect(go(runtime, "op-2")).resolves.toEqual({ status: "busy" });
+      clock = 60_000;
+      await expect(go(runtime, "op-2")).resolves.toEqual({ status: "queued" });
+      expect(fake.sendMessage).toHaveBeenCalledTimes(2);
+    });
+  });
 });

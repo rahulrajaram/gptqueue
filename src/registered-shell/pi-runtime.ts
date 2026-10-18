@@ -20,6 +20,12 @@ export interface PiRuntimeHost {
 
 /** A submission younger than this may not yet be visible to isIdle()/hasPendingMessages(). */
 export const PI_SUBMIT_GRACE_MS = 5_000;
+/**
+ * Upper bound on coalescing: a queued notification older than this no longer
+ * holds back a new one, even when Pi cannot prove it ran (matches the
+ * dispatcher's default settle deadline).
+ */
+export const PI_COALESCE_MAX_MS = 600_000;
 
 /**
  * Own-session Pi adapter. Follow-ups are queued by Pi for both idle and busy turns.
@@ -29,9 +35,13 @@ export const PI_SUBMIT_GRACE_MS = 5_000;
  * outcome ambiguous.
  */
 export const createPiRuntime = (binding: RuntimeBinding, host: PiRuntimeHost,
-  options: Readonly<{ now?: () => number; graceMs?: number }> = {}): RuntimeAdapter & { invalidate(): void } => {
+  options: Readonly<{ now?: () => number; graceMs?: number; coalesceMaxMs?: number }> = {}): RuntimeAdapter & { invalidate(): void } => {
   const now = options.now ?? Date.now;
   const grace = options.graceMs ?? PI_SUBMIT_GRACE_MS;
+  const coalesceMax = options.coalesceMaxMs ?? PI_COALESCE_MAX_MS;
+  // The latest fresh notification queued here. While it is outstanding, new
+  // operations are coalesced into it, so at most one is outstanding at a time.
+  let latest: Readonly<{ id: string; at: number }> | undefined;
   const submitted = new Map<string, Readonly<{ state: "queued" | "ambiguous"; at: number }>>();
   const remember = (id: string, state: "queued" | "ambiguous") => {
     submitted.set(id, Object.freeze({ state, at: now() }));
@@ -69,6 +79,13 @@ export const createPiRuntime = (binding: RuntimeBinding, host: PiRuntimeHost,
     }
     return false;
   };
+  /** A queued notification is over once its turn completed, or Pi proves idle with nothing queued after the grace period. */
+  const outstanding = (sent: Readonly<{ id: string; at: number }>): boolean => {
+    const age = now() - sent.at;
+    if (age >= coalesceMax) return false;
+    if (age >= grace && quiescent()) return false;
+    return typeof recorded(sent.id) !== "object";
+  };
   const adapter: RuntimeAdapter & { invalidate(): void } = {
     binding,
     invalidate: () => { invalidated = true; },
@@ -94,12 +111,17 @@ export const createPiRuntime = (binding: RuntimeBinding, host: PiRuntimeHost,
       }
       if (known) return Object.freeze({ status: known.state });
       if (request.recover_only) return Object.freeze({ status: "ambiguous" as const });
+      // Coalesce: a still-queued or running notification already tells the agent
+      // to claim ALL pending mail, so another follow-up would only duplicate it.
+      // Report busy; the dispatcher retries with backoff once that one is over.
+      if (latest && outstanding(latest)) return Object.freeze({ status: "busy" as const });
       const payload = Object.freeze({ customType: "gptqueue-inbox-activation", content: request.prompt,
         display: false, details: Object.freeze({ operation_id: request.operation_id, runtime_id: binding.runtime_id, epoch: binding.epoch }) });
       remember(request.operation_id, "ambiguous");
       try { host.sendMessage(payload, { deliverAs: "followUp", triggerTurn: true }); }
       catch { return Object.freeze({ status: "ambiguous" as const }); }
       remember(request.operation_id, "queued");
+      latest = Object.freeze({ id: request.operation_id, at: now() });
       return Object.freeze({ status: "queued" as const });
     },
     close: async () => { invalidated = true; },

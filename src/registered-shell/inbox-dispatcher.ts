@@ -17,9 +17,9 @@ export type InboxDispatcherOptions = Readonly<{
   /**
    * How long a submitting (recovery), accepted or ambiguous record may wait
    * for its work to be claimed before a fresh operation re-attempts it.
-   * Default 10 min. This is shorter than the longest claim lease (3600 s):
-   * the deadline only fires while no claim is held, so a long claim never
-   * triggers it; it bounds the wait for the agent to take its first claim.
+   * Default 10 min. It fires while the notified mail is still unclaimed (held
+   * mail is no longer pending), so it bounds the wait for the agent to claim
+   * the mail it was woken for; other open claims do not affect it.
    */
   settleTimeoutMs?: number;
   /** How long an exhausted record parks before a new bounded round re-arms it. */
