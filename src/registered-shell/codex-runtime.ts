@@ -21,11 +21,6 @@ export interface CodexRuntimeOptions {
   readonly client?: CodexRpcClient;
   readonly timeoutMs?: number;
   readonly expectedAgent?: string;
-  /** Consecutive `systemError` observations before the binding is retired as stale. */
-  readonly systemErrorThreshold?: number;
-  /** Minimum span of those observations before retiring (default 2 minutes). */
-  readonly systemErrorWindowMs?: number;
-  readonly now?: () => number;
 }
 
 /**
@@ -182,10 +177,6 @@ export const createCodexRuntime = async (
   // Connection generation the thread/resume attachment was made on, if any.
   let subscribedOn: number | undefined;
   let hostState: string = threadStatusType(raw) ?? "unknown";
-  let systemErrors: { count: number; since: number } | undefined;
-  const now = options.now ?? Date.now;
-  const errorThreshold = options.systemErrorThreshold ?? 3;
-  const errorWindowMs = options.systemErrorWindowMs ?? 120_000;
   const emit = (listeners: ReadonlySet<() => void>): void => {
     for (const listener of Array.from(listeners)) { try { listener(); } catch { /* listener faults never reach the socket */ } }
   };
@@ -228,14 +219,10 @@ export const createCodexRuntime = async (
       if (!sameThread(current)) throw new Error("Codex thread identity does not match binding");
       const statusType = threadStatusType(current);
       hostState = statusType ?? "unknown";
-      if (statusType === "systemError") {
-        const at = now();
-        systemErrors = systemErrors ? { count: systemErrors.count + 1, since: systemErrors.since } : { count: 1, since: at };
-        // Bounded: a persistently failed thread releases its mailbox like a closed one.
-        if (systemErrors.count >= errorThreshold && at - systemErrors.since >= errorWindowMs) markStale();
-        return { status: "unavailable" };
-      }
-      systemErrors = undefined;
+      // systemError is recoverable (the thread's next turn clears it), so only defer
+      // delivery. Retiring here would close this sidecar and take the thread's
+      // GPTQueue tools with it; only thread/closed retires the binding.
+      if (statusType === "systemError") return { status: "unavailable" };
       let lookup = await lookupRecent(client, binding.runtime_id, request, abortSignal);
       if (lookup.kind === "unsupported") {
         const legacy = lookupLegacy(await reader.read(binding.runtime_id, abortSignal), request);

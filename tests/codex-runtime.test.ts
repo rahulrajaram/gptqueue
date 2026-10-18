@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCodexRuntime, CODEX_TURN_WINDOW, type CodexNotification, type CodexRpcClient } from "../src/registered-shell/codex-runtime.js";
 
 const binding = { client: "codex" as const, runtime_id: "thread-1", epoch: "e1", working_directory: "/workspace" };
@@ -86,6 +86,7 @@ const filler = (n: number): V2Turn[] => Array.from({ length: n }, (_, i) => ({ i
 const sig = () => new AbortController().signal;
 
 describe("Codex runtime, bounded v2 history", () => {
+  afterEach(() => { vi.useRealTimers(); });
   it("does not go ambiguous on long or summarized history and reads only a bounded window", async () => {
     const client = v2(filler(500));
     const runtime = await createCodexRuntime(binding, { client });
@@ -115,19 +116,25 @@ describe("Codex runtime, bounded v2 history", () => {
     expect(unloaded.calls.map((c) => c.method)).toContain("turn/start");
     expect(runtime.describe!()).toEqual({ host_state: "notLoaded", attached: false, stale: false });
   });
-  it("bounds systemError: unavailable, then stale only after N observations spanning the window", async () => {
+  it("defers delivery to a systemError thread but never retires it; only thread/closed does", async () => {
+    // A long systemError run once retired a live lead's sidecar, closing its GPTQueue MCP;
+    // the thread recovered on its next turn without its tools.
+    vi.useFakeTimers({ toFake: ["Date"] });
     const status: Record<string, unknown> = { type: "systemError" };
-    let clock = 0;
-    const runtime = await createCodexRuntime(binding, { client: v2([], status), now: () => clock, systemErrorThreshold: 3, systemErrorWindowMs: 120_000 });
+    const client = v2([], status);
+    const runtime = await createCodexRuntime(binding, { client });
     let stale = 0; runtime.onStale!(() => { stale++; });
-    const go = () => runtime.activate({ operation_id: "op", prompt: "p" }, sig());
-    expect(await go()).toEqual({ status: "unavailable" });
-    clock = 60_000; expect(await go()).toEqual({ status: "unavailable" });
-    clock = 119_000; await go(); expect(stale).toBe(0); // three observations, window not yet spanned
-    status.type = "idle"; expect(await go()).toEqual({ status: "started", turn_id: "turn-new" }); // recovery resets
-    status.type = "systemError"; clock = 200_000; await go(); clock = 260_000; await go(); expect(stale).toBe(0);
-    clock = 320_000; await go(); expect(stale).toBe(1);
-    expect(await go()).toEqual({ status: "unavailable" });
+    const go = (operation_id = "op") => runtime.activate({ operation_id, prompt: "p" }, sig());
+    // Span ten minutes of observations: no count or duration of systemError retires the thread.
+    for (let i = 0; i < 10; i++) { expect(await go()).toEqual({ status: "unavailable" }); vi.setSystemTime(Date.now() + 60_000); }
+    expect(stale).toBe(0);
+    expect(client.calls.map((c) => c.method)).not.toContain("turn/start");
+    expect(runtime.describe!()).toEqual({ host_state: "systemError", attached: false, stale: false });
+    status.type = "idle";
+    expect(await go()).toEqual({ status: "started", turn_id: "turn-new" });
+    client.emit({ method: "thread/closed", params: { threadId: "thread-1" } });
+    expect(stale).toBe(1);
+    expect(await go("op-after-close")).toEqual({ status: "unavailable" });
   });
   it("fires the idle-again signal on turn/completed for its own thread only, after subscribing while busy", async () => {
     const client = v2([{ id: "t", status: "inProgress", items: [user("someone")] }]);
