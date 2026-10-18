@@ -113,7 +113,12 @@ export const decideHook = (input: HookInput): HookDecision => {
         }
         return { kind: "block", record: { reason: "mail", event_id: latest }, reason: `gptqueue inbox for ${identityText(identity)}: ${countsText(probe)}. ${CONSUME} Acknowledge or renew claims you already hold. If none need action now, say so and stop.` };
       }
-      if (input.watchPolicy === "require" && !input.watcherRunning && !input.stopHookActive) {
+      // One watch reminder per stop chain. A re-entered stop skips it only when
+      // this chain already showed it, or the earlier block was not ours (no
+      // record). After our own mail or error block it must still fire: the
+      // watcher often exits during that very turn, because the mail woke it.
+      const remindedThisChain = input.stopHookActive && (input.prior === null || input.prior.reason === "watch");
+      if (input.watchPolicy === "require" && !input.watcherRunning && !remindedThisChain) {
         return { kind: "block", record: { reason: "watch", event_id: latest }, reason: `gptqueue: inbox for ${identityText(identity)} is empty, but no background inbox watcher is running for this session, so mail arriving while you are idle will not wake you. ${watchText} Then stop.` };
       }
       return { kind: "allow", systemMessage: null };

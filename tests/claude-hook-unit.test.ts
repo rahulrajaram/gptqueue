@@ -119,6 +119,20 @@ describe("hook decisions", () => {
     expect(decideHook(base({ watcherRunning: false, watchPolicy: "off" })).kind).toBe("allow");
   });
 
+  it("still asks for the watcher on the stop after a mail or error block in the same chain (f-1754)", () => {
+    // The watcher fired mid-turn (mail woke it), the stop blocked for that mail, and
+    // the continued turn's stop was allowed with no watcher: the session slept 7.8 h.
+    for (const reason of ["mail", "error"] as const) {
+      const d = decideHook(base({ watcherRunning: false, stopHookActive: true, prior: { reason, event_id: "5-0" } }));
+      expect(d.kind === "block" && d.record.reason).toBe("watch");
+      expect(d.kind === "block" && d.reason).toMatch(/no background inbox watcher.*peek --watch/s);
+    }
+    // Once shown in this chain, the reminder is not repeated.
+    expect(decideHook(base({ watcherRunning: false, stopHookActive: true, prior: { reason: "watch", event_id: "5-0" } })).kind).toBe("allow");
+    // A re-armed watcher ends it.
+    expect(decideHook(base({ watcherRunning: true, stopHookActive: true, prior: { reason: "mail", event_id: "5-0" } })).kind).toBe("allow");
+  });
+
   it("states when the name is unconfirmed (no session record)", () => {
     const d = decideHook(base({ event: "session-start", identity: { agent: "claude-x", gptqueue_session_id: null, source: "derived", note: "no session record", claude: null } }));
     expect(d.kind === "context" && d.text).toMatch(/UNCONFIRMED \(no session record\)/);
