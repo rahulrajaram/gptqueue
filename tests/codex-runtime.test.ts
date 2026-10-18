@@ -140,14 +140,39 @@ describe("Codex runtime, bounded v2 history", () => {
     expect(starts()).toBe(4);
     expect(stale).toBe(0);
     expect(runtime.describe!()).toEqual({ host_state: "systemError", attached: false, stale: false });
-    // Recovery ends the episode: a later systemError waits the first delay again.
+    // Recovery ends the episode: a later systemError waits only the first delay again
+    // (the old episode's next slot would have been 900 s).
     status.type = "idle"; expect(await go("op-5")).toEqual({ status: "started", turn_id: "turn-new" });
     status.type = "systemError"; clock = 700_000; expect(await go("op-6")).toEqual({ status: "unavailable" });
+    clock = 759_000; expect(await go("op-6")).toEqual({ status: "unavailable" });
+    clock = 760_000; expect(await go("op-6")).toEqual({ status: "started", turn_id: "turn-new" });
     // Only thread/closed retires the binding.
     client.emit({ method: "thread/closed", params: { threadId: "thread-1" } });
     expect(stale).toBe(1);
     expect(await go("op-after-close")).toEqual({ status: "unavailable" });
   });
+  it("reconciles a failed delivery from history without spending the systemError backoff", async () => {
+    let clock = 0;
+    const turns: V2Turn[] = [];
+    const client = v2(turns, { type: "systemError" });
+    // Record each submitted turn as a failed turn carrying its clientUserMessageId.
+    const submit = client.request;
+    client.request = async (method, params, signal) => {
+      const result = await submit(method, params, signal);
+      if (method === "turn/start") turns.push({ id: `t-${turns.length}`, status: "failed", items: [user(String(params.clientUserMessageId))] });
+      return result;
+    };
+    const runtime = await createCodexRuntime(binding, { client, now: () => clock, systemErrorFirstDelayMs: 60_000, systemErrorMaxDelayMs: 900_000 });
+    const go = (operation_id: string, recover_only = false) => runtime.activate({ operation_id, prompt: "p", recover_only }, sig());
+    clock = 0; await go("op-a");
+    clock = 60_000; expect(await go("op-a")).toEqual({ status: "started", turn_id: "turn-new" });
+    // The failed turn is found right away, even inside the next backoff window...
+    clock = 61_000; expect(await go("op-a", true)).toEqual({ status: "completed", turn_id: "t-0" });
+    // ...and reconciling it does not push the next fresh delivery past 60 s + 120 s.
+    clock = 179_000; expect(await go("op-b")).toEqual({ status: "unavailable" });
+    clock = 180_000; expect(await go("op-b")).toEqual({ status: "started", turn_id: "turn-new" });
+  });
+
   it("fires the idle-again signal on turn/completed for its own thread only, after subscribing while busy", async () => {
     const client = v2([{ id: "t", status: "inProgress", items: [user("someone")] }]);
     const runtime = await createCodexRuntime(binding, { client });

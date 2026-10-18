@@ -229,20 +229,7 @@ export const createCodexRuntime = async (
       if (!sameThread(current)) throw new Error("Codex thread identity does not match binding");
       const statusType = threadStatusType(current);
       hostState = statusType ?? "unknown";
-      // systemError means the last turn failed (e.g. "model at capacity"), and only a
-      // new turn clears it, so deferring until it clears would never wake the thread.
-      // Wait briefly, then deliver; while it persists, back off (doubling, capped).
-      // Never retire here: only thread/closed retires the binding, because retiring
-      // closes this sidecar and takes the thread's GPTQueue tools with it.
-      if (statusType === "systemError") {
-        const at = now();
-        const episode = errorEpisode ?? { deliveries: 0, nextAt: at + firstDelay };
-        if (at < episode.nextAt) { errorEpisode = episode; return { status: "unavailable" }; }
-        errorEpisode = Object.freeze({ deliveries: episode.deliveries + 1,
-          nextAt: at + Math.min(maxDelay, firstDelay * 2 ** (episode.deliveries + 1)) });
-      } else {
-        errorEpisode = undefined;
-      }
+      if (statusType !== "systemError") errorEpisode = undefined;
       let lookup = await lookupRecent(client, binding.runtime_id, request, abortSignal);
       if (lookup.kind === "unsupported") {
         const legacy = lookupLegacy(await reader.read(binding.runtime_id, abortSignal), request);
@@ -255,6 +242,20 @@ export const createCodexRuntime = async (
       if (lookup.kind === "unsupported") return { status: "ambiguous" };
       if (lookup.busy || statusType === "active") { await subscribe(abortSignal); return { status: "busy" }; }
       if (seen.has(request.operation_id) || request.recover_only) return { status: "ambiguous" };
+      // systemError means the last turn failed (e.g. "model at capacity"), and only a
+      // new turn clears it, so deferring until it clears would never wake the thread.
+      // History reconciliation above always runs; only a NEW turn is gated: wait
+      // briefly, then deliver, and while it persists back off (doubling, capped).
+      // The check and the reservation are synchronous, so concurrent callers can't
+      // both pass. Never retire here: only thread/closed retires the binding, because
+      // retiring closes this sidecar and takes the thread's GPTQueue tools with it.
+      if (statusType === "systemError") {
+        const at = now();
+        const episode = errorEpisode ?? { deliveries: 0, nextAt: at + firstDelay };
+        if (at < episode.nextAt) { errorEpisode = episode; return { status: "unavailable" }; }
+        errorEpisode = Object.freeze({ deliveries: episode.deliveries + 1,
+          nextAt: at + Math.min(maxDelay, firstDelay * 2 ** (episode.deliveries + 1)) });
+      }
       seen.set(request.operation_id, "pending");
       if (seen.size > 1024) seen.delete(seen.keys().next().value!);
       try {
