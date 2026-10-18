@@ -21,6 +21,11 @@ export interface CodexRuntimeOptions {
   readonly client?: CodexRpcClient;
   readonly timeoutMs?: number;
   readonly expectedAgent?: string;
+  /** Wait after first seeing systemError before delivering into it (default 60 s). */
+  readonly systemErrorFirstDelayMs?: number;
+  /** Cap on the doubling wait between deliveries while systemError persists (default 15 min). */
+  readonly systemErrorMaxDelayMs?: number;
+  readonly now?: () => number;
 }
 
 /**
@@ -177,6 +182,11 @@ export const createCodexRuntime = async (
   // Connection generation the thread/resume attachment was made on, if any.
   let subscribedOn: number | undefined;
   let hostState: string = threadStatusType(raw) ?? "unknown";
+  const now = options.now ?? Date.now;
+  const firstDelay = options.systemErrorFirstDelayMs ?? 60_000;
+  const maxDelay = options.systemErrorMaxDelayMs ?? 900_000;
+  // One systemError episode: deliveries made into it, and when the next may go.
+  let errorEpisode: Readonly<{ deliveries: number; nextAt: number }> | undefined;
   const emit = (listeners: ReadonlySet<() => void>): void => {
     for (const listener of Array.from(listeners)) { try { listener(); } catch { /* listener faults never reach the socket */ } }
   };
@@ -219,10 +229,20 @@ export const createCodexRuntime = async (
       if (!sameThread(current)) throw new Error("Codex thread identity does not match binding");
       const statusType = threadStatusType(current);
       hostState = statusType ?? "unknown";
-      // systemError is recoverable (the thread's next turn clears it), so only defer
-      // delivery. Retiring here would close this sidecar and take the thread's
-      // GPTQueue tools with it; only thread/closed retires the binding.
-      if (statusType === "systemError") return { status: "unavailable" };
+      // systemError means the last turn failed (e.g. "model at capacity"), and only a
+      // new turn clears it, so deferring until it clears would never wake the thread.
+      // Wait briefly, then deliver; while it persists, back off (doubling, capped).
+      // Never retire here: only thread/closed retires the binding, because retiring
+      // closes this sidecar and takes the thread's GPTQueue tools with it.
+      if (statusType === "systemError") {
+        const at = now();
+        const episode = errorEpisode ?? { deliveries: 0, nextAt: at + firstDelay };
+        if (at < episode.nextAt) { errorEpisode = episode; return { status: "unavailable" }; }
+        errorEpisode = Object.freeze({ deliveries: episode.deliveries + 1,
+          nextAt: at + Math.min(maxDelay, firstDelay * 2 ** (episode.deliveries + 1)) });
+      } else {
+        errorEpisode = undefined;
+      }
       let lookup = await lookupRecent(client, binding.runtime_id, request, abortSignal);
       if (lookup.kind === "unsupported") {
         const legacy = lookupLegacy(await reader.read(binding.runtime_id, abortSignal), request);

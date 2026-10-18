@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createCodexRuntime, CODEX_TURN_WINDOW, type CodexNotification, type CodexRpcClient } from "../src/registered-shell/codex-runtime.js";
 
 const binding = { client: "codex" as const, runtime_id: "thread-1", epoch: "e1", working_directory: "/workspace" };
@@ -86,7 +86,6 @@ const filler = (n: number): V2Turn[] => Array.from({ length: n }, (_, i) => ({ i
 const sig = () => new AbortController().signal;
 
 describe("Codex runtime, bounded v2 history", () => {
-  afterEach(() => { vi.useRealTimers(); });
   it("does not go ambiguous on long or summarized history and reads only a bounded window", async () => {
     const client = v2(filler(500));
     const runtime = await createCodexRuntime(binding, { client });
@@ -116,22 +115,35 @@ describe("Codex runtime, bounded v2 history", () => {
     expect(unloaded.calls.map((c) => c.method)).toContain("turn/start");
     expect(runtime.describe!()).toEqual({ host_state: "notLoaded", attached: false, stale: false });
   });
-  it("defers delivery to a systemError thread but never retires it; only thread/closed does", async () => {
-    // A long systemError run once retired a live lead's sidecar, closing its GPTQueue MCP;
-    // the thread recovered on its next turn without its tools.
-    vi.useFakeTimers({ toFake: ["Date"] });
+  it("delivers into a systemError thread after a wait, backs off while it persists, and never retires it", async () => {
+    // A turn that ended on "model at capacity" leaves the thread in systemError until
+    // its next turn. Deferring until it cleared never woke the lead (f-1712); retiring
+    // it closed the thread's GPTQueue MCP (f-1729).
+    let clock = 0;
     const status: Record<string, unknown> = { type: "systemError" };
     const client = v2([], status);
-    const runtime = await createCodexRuntime(binding, { client });
+    const runtime = await createCodexRuntime(binding, { client, now: () => clock, systemErrorFirstDelayMs: 60_000, systemErrorMaxDelayMs: 240_000 });
     let stale = 0; runtime.onStale!(() => { stale++; });
-    const go = (operation_id = "op") => runtime.activate({ operation_id, prompt: "p" }, sig());
-    // Span ten minutes of observations: no count or duration of systemError retires the thread.
-    for (let i = 0; i < 10; i++) { expect(await go()).toEqual({ status: "unavailable" }); vi.setSystemTime(Date.now() + 60_000); }
+    const go = (operation_id: string) => runtime.activate({ operation_id, prompt: "p" }, sig());
+    const starts = () => client.calls.filter((c) => c.method === "turn/start").length;
+    expect(await go("op-1")).toEqual({ status: "unavailable" }); // first sight: wait
+    clock = 59_000; expect(await go("op-1")).toEqual({ status: "unavailable" });
+    clock = 60_000; expect(await go("op-1")).toEqual({ status: "started", turn_id: "turn-new" }); // a new turn is the recovery
+    expect(starts()).toBe(1);
+    // Still failing: the next delivery waits 2x the first delay, then 4x, capped at the maximum.
+    clock = 179_000; expect(await go("op-2")).toEqual({ status: "unavailable" });
+    clock = 180_000; expect(await go("op-2")).toEqual({ status: "started", turn_id: "turn-new" });
+    clock = 419_000; expect(await go("op-3")).toEqual({ status: "unavailable" });
+    clock = 420_000; expect(await go("op-3")).toEqual({ status: "started", turn_id: "turn-new" });
+    clock = 659_000; expect(await go("op-4")).toEqual({ status: "unavailable" }); // capped at 240 s
+    clock = 660_000; expect(await go("op-4")).toEqual({ status: "started", turn_id: "turn-new" });
+    expect(starts()).toBe(4);
     expect(stale).toBe(0);
-    expect(client.calls.map((c) => c.method)).not.toContain("turn/start");
     expect(runtime.describe!()).toEqual({ host_state: "systemError", attached: false, stale: false });
-    status.type = "idle";
-    expect(await go()).toEqual({ status: "started", turn_id: "turn-new" });
+    // Recovery ends the episode: a later systemError waits the first delay again.
+    status.type = "idle"; expect(await go("op-5")).toEqual({ status: "started", turn_id: "turn-new" });
+    status.type = "systemError"; clock = 700_000; expect(await go("op-6")).toEqual({ status: "unavailable" });
+    // Only thread/closed retires the binding.
     client.emit({ method: "thread/closed", params: { threadId: "thread-1" } });
     expect(stale).toBe(1);
     expect(await go("op-after-close")).toEqual({ status: "unavailable" });
