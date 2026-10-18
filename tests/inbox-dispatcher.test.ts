@@ -270,7 +270,7 @@ describe("inbox dispatcher", () => {
     expect(await redis.zcard(CLAIM_KEYS.index(agent))).toBe(1); // the held claim is untouched
   });
 
-  it("does not stack Pi notifications for staggered mail while the holder is busy, and delivers once idle", async () => {
+  it("does not stack Pi notifications for staggered mail or settle expiry while the holder is busy, and delivers once idle", async () => {
     const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); const claims = new TaskClaimStore(redis);
     await mailbox.send(task(agent));
     await claims.claim({ actor_id: agent, session_id: "s", max_batch: 1, ttl_seconds: 30, now: new Date().toISOString() });
@@ -280,10 +280,11 @@ describe("inbox dispatcher", () => {
     const piHost: PiRuntimeHost = { getContext: () => ({ cwd: "/workspace", sessionManager, isIdle: () => state.idle, hasPendingMessages: () => state.pending }),
       sendMessage: (payload) => { sent.push(payload); } };
     const adapter = createPiRuntime({ client: "pi", runtime_id: "session-pi", epoch: "epoch-1", working_directory: "/workspace" }, piHost, { graceMs: 0 });
-    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10, maxBackoffMs: 20 }); live.push({ agent, dispatcher });
+    // A short settle deadline also expires repeatedly while Pi stays busy.
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10, maxBackoffMs: 20, settleTimeoutMs: 30 }); live.push({ agent, dispatcher });
     await mailbox.send(task(agent)); await eventually(async () => sent.length >= 1);
     for (let i = 0; i < 3; i += 1) { await sleep(40); await mailbox.send(task(agent)); }
-    await sleep(150);
+    await sleep(200);
     expect(sent).toHaveLength(1);
     // The busy turn ends without claiming: once Pi is quiescent the still-pending mail is notified again.
     state.idle = true; state.pending = false;

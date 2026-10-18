@@ -127,6 +127,16 @@ describe("Pi runtime adapter", () => {
       clock = 1_000;
       await expect(go(runtime, "op-2")).resolves.toEqual({ status: "queued" });
     });
+    it("keeps coalescing past the time cap while Pi positively reports busy", async () => {
+      let clock = 0;
+      const fake = stateful(); const runtime = createPiRuntime(binding, fake.host, { now: () => clock, graceMs: 1_000, coalesceMaxMs: 60_000 });
+      await go(runtime, "op-1");
+      clock = 10 * 60_000;
+      await expect(go(runtime, "op-2")).resolves.toEqual({ status: "busy" });
+      expect(fake.sendMessage).toHaveBeenCalledTimes(1);
+      fake.state.idle = true; fake.state.pending = false;
+      await expect(go(runtime, "op-2")).resolves.toEqual({ status: "queued" });
+    });
     it("bounds coalescing in time when the host cannot prove idleness", async () => {
       let clock = 0;
       const fake = host(); const runtime = createPiRuntime(binding, fake.host, { now: () => clock, graceMs: 1_000, coalesceMaxMs: 60_000 });

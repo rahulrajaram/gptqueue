@@ -21,9 +21,10 @@ export interface PiRuntimeHost {
 /** A submission younger than this may not yet be visible to isIdle()/hasPendingMessages(). */
 export const PI_SUBMIT_GRACE_MS = 5_000;
 /**
- * Upper bound on coalescing: a queued notification older than this no longer
- * holds back a new one, even when Pi cannot prove it ran (matches the
- * dispatcher's default settle deadline).
+ * Coalescing bound used ONLY when Pi cannot report its state (no isIdle /
+ * hasPendingMessages, or they throw): an unproven notification older than
+ * this no longer holds back a new one, accepting a possible duplicate over a
+ * stall. A host that reports busy keeps coalescing without a time limit.
  */
 export const PI_COALESCE_MAX_MS = 600_000;
 
@@ -80,11 +81,20 @@ export const createPiRuntime = (binding: RuntimeBinding, host: PiRuntimeHost,
     return false;
   };
   /** A queued notification is over once its turn completed, or Pi proves idle with nothing queued after the grace period. */
+  /** Pi's own state, or "unknown" when the host cannot report it. */
+  const hostState = (): "quiescent" | "busy" | "unknown" => {
+    const context = host.getContext();
+    if (typeof context.isIdle !== "function" || typeof context.hasPendingMessages !== "function") return "unknown";
+    try { return context.isIdle() && !context.hasPendingMessages() ? "quiescent" : "busy"; } catch { return "unknown"; }
+  };
   const outstanding = (sent: Readonly<{ id: string; at: number }>): boolean => {
+    if (typeof recorded(sent.id) === "object") return false;
     const age = now() - sent.at;
-    if (age >= coalesceMax) return false;
-    if (age >= grace && quiescent()) return false;
-    return typeof recorded(sent.id) !== "object";
+    switch (hostState()) {
+      case "quiescent": return age < grace;
+      case "busy": return true;
+      case "unknown": return age < coalesceMax;
+    }
   };
   const adapter: RuntimeAdapter & { invalidate(): void } = {
     binding,
