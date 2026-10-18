@@ -133,6 +133,35 @@ describe("hook decisions", () => {
     expect(decideHook(base({ watcherRunning: true, stopHookActive: true, prior: { reason: "mail", event_id: "5-0" } })).kind).toBe("allow");
   });
 
+  /** Replays one stop chain: the first stop is fresh, later ones re-enter with the last block's record. */
+  const chainOf = (steps: ReadonlyArray<Partial<HookInput>>) => {
+    let prior: HookInput["prior"] = null; const kinds: string[] = [];
+    for (const [i, step] of steps.entries()) {
+      const d = decideHook(base({ ...step, stopHookActive: i > 0, prior }));
+      kinds.push(d.kind === "block" ? `block:${d.record.reason}` : d.kind);
+      if (d.kind !== "block") break;
+      prior = d.record;
+    }
+    return kinds;
+  };
+  const failed: ProbeResult = { ok: false, code: "redis_unavailable", message: "down" };
+
+  it("ends a chain that alternates failed and empty probes; each reminder fires at most once", () => {
+    const empty = { probe: ok(0), watcherRunning: false };
+    expect(chainOf([{ probe: failed }, empty, { probe: failed }, empty])).toEqual(["block:error", "block:watch", "allow"]);
+    expect(chainOf([empty, { probe: failed }, empty, { probe: failed }])).toEqual(["block:watch", "block:error", "allow"]);
+  });
+
+  it("keeps the mail watermark across other blocks in the chain, and still reminds after mail", () => {
+    // mail, then the turn empties the inbox with no watcher: one watch reminder.
+    expect(chainOf([{ probe: ok(1, 0, 0, "5-0") }, { probe: ok(0, 0, 0, "5-0"), watcherRunning: false }, { probe: ok(0, 0, 0, "5-0"), watcherRunning: false }]))
+      .toEqual(["block:mail", "block:watch", "allow"]);
+    // The same mail after an intervening error is not new: no second mail block.
+    expect(chainOf([{ probe: ok(1, 0, 0, "5-0") }, { probe: failed }, { probe: ok(1, 0, 0, "5-0") }])).toEqual(["block:mail", "block:error", "allow"]);
+    // New mail still re-blocks.
+    expect(chainOf([{ probe: ok(1, 0, 0, "5-0") }, { probe: ok(1, 0, 0, "6-0") }, { probe: ok(1, 0, 0, "6-0") }])).toEqual(["block:mail", "block:mail", "allow"]);
+  });
+
   it("states when the name is unconfirmed (no session record)", () => {
     const d = decideHook(base({ event: "session-start", identity: { agent: "claude-x", gptqueue_session_id: null, source: "derived", note: "no session record", claude: null } }));
     expect(d.kind === "context" && d.text).toMatch(/UNCONFIRMED \(no session record\)/);

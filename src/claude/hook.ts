@@ -32,7 +32,23 @@ import { TurnStateStore, type TurnPhase } from "../core/turn-state.js";
 
 export type HookEvent = "session-start" | "stop";
 export type StopReason = "mail" | "error" | "watch";
-export type PriorStop = Readonly<{ reason: StopReason; event_id: string | null }> | null;
+/**
+ * What one stop chain (a stop and the stops re-entered after its blocks) has
+ * already shown. It accumulates across the chain's blocks, so each reminder
+ * fires at most once per chain and mail re-blocks only for new mail.
+ */
+export type ChainHistory = Readonly<{ error: boolean; watch: boolean; mail: boolean; mail_event_id: string | null }>;
+export type PriorStop = Readonly<{ reason: StopReason; event_id: string | null; chain?: ChainHistory }> | null;
+
+const EMPTY_CHAIN: ChainHistory = Object.freeze({ error: false, watch: false, mail: false, mail_event_id: null });
+/** A record written before chain history existed describes only its own block. */
+const historyOf = (prior: Exclude<PriorStop, null>): ChainHistory => prior.chain ?? Object.freeze({
+  error: prior.reason === "error", watch: prior.reason === "watch",
+  mail: prior.reason === "mail", mail_event_id: prior.reason === "mail" ? prior.event_id : null });
+const blockRecord = (reason: StopReason, eventId: string | null, chain: ChainHistory): Exclude<PriorStop, null> => Object.freeze({
+  reason, event_id: eventId, chain: Object.freeze({
+    error: chain.error || reason === "error", watch: chain.watch || reason === "watch",
+    mail: chain.mail || reason === "mail", mail_event_id: reason === "mail" ? eventId : chain.mail_event_id }) });
 
 export type HookInput = Readonly<{
   event: HookEvent;
@@ -94,11 +110,13 @@ export const decideHook = (input: HookInput): HookDecision => {
       return { kind: "context", text: withSeat(`gptqueue: this session is registered as ${identityText(identity)} (no register_agent call needed). ${inbox} Use a distinct idempotency_key per recipient on send_message (keys are global). ${input.watchPolicy === "off" ? "" : watchText}`.trim(), input.seat) };
     }
     case "stop": {
+      // A fresh stop starts a new chain; a re-entered one continues the recorded chain.
+      const chain = input.stopHookActive && input.prior !== null ? historyOf(input.prior) : EMPTY_CHAIN;
       if (!probe.ok) {
-        if (input.stopHookActive && input.prior?.reason === "error") {
+        if (chain.error) {
           return { kind: "allow", systemMessage: `gptqueue inbox check for ${quoteAgent(identity.agent)} still failing (${probe.code}); stopping without inbox confirmation.` };
         }
-        return { kind: "block", record: { reason: "error", event_id: null }, reason: `gptqueue inbox check for ${identityText(identity)} FAILED (${probe.code}: ${probe.message}). The inbox state is unknown, not empty. Tell the user gptqueue is unreachable, or retry with get_queue_status / claim_tasks, then stop.` };
+        return { kind: "block", record: blockRecord("error", null, chain), reason: `gptqueue inbox check for ${identityText(identity)} FAILED (${probe.code}: ${probe.message}). The inbox state is unknown, not empty. Tell the user gptqueue is unreachable, or retry with get_queue_status / claim_tasks, then stop.` };
       }
       if (!isConfirmed(identity)) {
         // Never present a guessed name's counts as this session's own.
@@ -107,19 +125,19 @@ export const decideHook = (input: HookInput): HookDecision => {
       const pending = actionable(probe);
       const latest = probe.counts.latest_event_id;
       if (pending > 0) {
-        const newMail = input.prior === null || input.prior.reason !== "mail" || latest !== input.prior.event_id;
+        const newMail = !chain.mail || latest !== chain.mail_event_id;
         if (input.stopHookActive && !newMail) {
           return { kind: "allow", systemMessage: `gptqueue: ${quoteAgent(identity.agent)} still has ${countsText(probe)}; not re-blocking (no new mail since the last reminder).` };
         }
-        return { kind: "block", record: { reason: "mail", event_id: latest }, reason: `gptqueue inbox for ${identityText(identity)}: ${countsText(probe)}. ${CONSUME} Acknowledge or renew claims you already hold. If none need action now, say so and stop.` };
+        return { kind: "block", record: blockRecord("mail", latest, chain), reason: `gptqueue inbox for ${identityText(identity)}: ${countsText(probe)}. ${CONSUME} Acknowledge or renew claims you already hold. If none need action now, say so and stop.` };
       }
-      // One watch reminder per stop chain. A re-entered stop skips it only when
-      // this chain already showed it, or the earlier block was not ours (no
-      // record). After our own mail or error block it must still fire: the
-      // watcher often exits during that very turn, because the mail woke it.
-      const remindedThisChain = input.stopHookActive && (input.prior === null || input.prior.reason === "watch");
+      // One watch reminder per stop chain. A re-entered stop skips it when this
+      // chain already showed it, or the earlier block was not ours (no record).
+      // After our own mail or error block it must still fire: the watcher often
+      // exits during that very turn, because the mail woke it.
+      const remindedThisChain = input.stopHookActive && (input.prior === null || chain.watch);
       if (input.watchPolicy === "require" && !input.watcherRunning && !remindedThisChain) {
-        return { kind: "block", record: { reason: "watch", event_id: latest }, reason: `gptqueue: inbox for ${identityText(identity)} is empty, but no background inbox watcher is running for this session, so mail arriving while you are idle will not wake you. ${watchText} Then stop.` };
+        return { kind: "block", record: blockRecord("watch", latest, chain), reason: `gptqueue: inbox for ${identityText(identity)} is empty, but no background inbox watcher is running for this session, so mail arriving while you are idle will not wake you. ${watchText} Then stop.` };
       }
       return { kind: "allow", systemMessage: null };
     }
@@ -138,12 +156,21 @@ export const watchCommandFor = (binDir: string, claudeSessionId: string): string
 
 type RawHookJson = { session_id?: unknown; cwd?: unknown; stop_hook_active?: unknown };
 
+const readChain = (raw: unknown): ChainHistory | undefined => {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const c = raw as Record<string, unknown>;
+  return typeof c.error === "boolean" && typeof c.watch === "boolean" && typeof c.mail === "boolean"
+    ? Object.freeze({ error: c.error, watch: c.watch, mail: c.mail, mail_event_id: typeof c.mail_event_id === "string" ? c.mail_event_id : null })
+    : undefined;
+};
+
 const readPrior = (path: string): PriorStop => {
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as { reason?: unknown; event_id?: unknown };
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { reason?: unknown; event_id?: unknown; chain?: unknown };
     const reason = parsed.reason;
-    return reason === "mail" || reason === "error" || reason === "watch"
-      ? { reason, event_id: typeof parsed.event_id === "string" ? parsed.event_id : null } : null;
+    if (reason !== "mail" && reason !== "error" && reason !== "watch") return null;
+    const chain = readChain(parsed.chain);
+    return { reason, event_id: typeof parsed.event_id === "string" ? parsed.event_id : null, ...(chain ? { chain } : {}) };
   } catch { return null; }
 };
 
