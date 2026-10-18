@@ -238,22 +238,35 @@ describe("inbox dispatcher", () => {
     let settled = false; void dispatcher.closed.then(() => { settled = true; }); await sleep(20); expect(settled).toBe(false);
   });
 
-  // Documented limitation (not tested): the claim check and activate are not
-  // atomic, so a claim taken between them can still be followed by one
-  // prompt. Worst case is one empty turn; claims prevent duplicate work.
-  it("never activates again while a claim is held, even past the settle deadline", async () => {
+  // Documented limitation (not tested): the pending read and activate are not
+  // atomic, so mail claimed between them can still be followed by one prompt.
+  // Worst case is one empty turn; claims prevent duplicate work.
+  it("never wakes an agent for mail it already holds in a claim", async () => {
     const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); const claims = new TaskClaimStore(redis);
+    await mailbox.send(task(agent));
+    const held = await claims.claim({ actor_id: agent, session_id: "s", max_batch: 1, ttl_seconds: 30, now: new Date().toISOString() });
+    expect(held.ok && held.claim?.tasks).toHaveLength(1);
     const submissions: string[] = [];
-    const adapter: RuntimeAdapter = { binding: binding("runtime-held"), activate: async (request) => {
-      if (!request.recover_only) submissions.push(request.operation_id);
-      if (submissions.length === 1 && !request.recover_only) await claims.claim({ actor_id: agent, session_id: "s", max_batch: 1, ttl_seconds: 30, now: new Date().toISOString() });
-      return { status: "queued" };
-    }, close: async () => {} };
-    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10, settleTimeoutMs: 30, exhaustedCooldownMs: 30 }); live.push({ agent, dispatcher });
-    await mailbox.send(task(agent)); await eventually(async () => submissions.length >= 1);
-    await mailbox.send(task(agent)); // new work while the claim is held
-    await sleep(200);
-    expect(submissions).toHaveLength(1);
+    const adapter: RuntimeAdapter = { binding: binding("runtime-held"), activate: async (request) => { submissions.push(request.operation_id); return { status: "queued" }; }, close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10 }); live.push({ agent, dispatcher });
+    await sleep(150);
+    expect(submissions).toHaveLength(0);
+  });
+
+  it("wakes an idle agent for new mail even while it holds an open claim", async () => {
+    // A lead that claims work, idles, and acks later must still be woken for new
+    // mail; the open claim once suppressed every wake for hours.
+    const agent = `dispatcher-${randomUUID()}`; owned.add(agent); const mailbox = new MailboxStore(redis, redis); const claims = new TaskClaimStore(redis);
+    await mailbox.send(task(agent));
+    const held = await claims.claim({ actor_id: agent, session_id: "s", max_batch: 1, ttl_seconds: 30, now: new Date().toISOString() });
+    expect(held.ok && held.claim?.tasks).toHaveLength(1);
+    const prompts: string[] = [];
+    const adapter: RuntimeAdapter = { binding: binding("runtime-idle-holder"), activate: async (request) => { if (!request.recover_only) prompts.push(request.prompt); return { status: "queued" }; }, close: async () => {} };
+    const dispatcher = await startInboxDispatcher(redis, agent, adapter, { intervalMs: 10 }); live.push({ agent, dispatcher });
+    const fresh = task(agent); await mailbox.send(fresh);
+    await eventually(async () => prompts.length >= 1);
+    expect(prompts).toHaveLength(1);
+    expect(await redis.zcard(CLAIM_KEYS.index(agent))).toBe(1); // the held claim is untouched
   });
 
   it("renders the wake prompt with the bound client's tool naming (I-1)", async () => {

@@ -2,7 +2,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Redis } from "ioredis";
 import { InboxEvents, type InboxTraceStage } from "../core/inbox-events.js";
 import { TaskClaimStore } from "../core/task-claim-store.js";
-import { CLAIM_KEYS } from "../core/keys.js";
 import { ActivationStore, type ActivationRecord } from "./activation-store.js";
 import { activationOperationId, inboxPrompt, subscribeIdle, type RuntimeAdapter } from "./runtime.js";
 
@@ -118,7 +117,6 @@ export const startInboxDispatcher = async (
     const pending = await events.pending(agent);
     const pendingIds = pending.map((message) => message.id);
     let record = await state.current();
-    // Claimed messages are durable in the claim store; do not inject another turn while owned.
     // Clear a record none of whose messages is pending any more. New work a
     // non-pending record does not cover re-arms activation instead of waiting
     // behind an exhausted, accepted or ambiguous operation.
@@ -129,10 +127,13 @@ export const startInboxDispatcher = async (
       if (!await save(null)) return;
       record = null;
     }
-    // Known, accepted race: the claim check and adapter.activate are separate
-    // steps, so a claim taken in between can still be followed by one prompt.
-    // Its worst case is one empty turn; claims prevent duplicate work.
-    if (!pending.length || await redis.zcard(CLAIM_KEYS.index(agent)) > 0) return;
+    // Only unclaimed mail wakes the runtime, and an open claim does not block
+    // that: an agent can hold claims across idle periods (claim, work, ack
+    // later), and new mail must still reach it. A working runtime is protected
+    // by its adapter (busy defers; Pi queues a follow-up), not by claim state.
+    // Known, accepted race: mail claimed between the pending read and
+    // adapter.activate can still be followed by one prompt, at worst one empty turn.
+    if (!pending.length) return;
     if (record && superseded) {
       await trace("activation_rearmed", record, "activation_superseded_by_new_work");
       record = null;
