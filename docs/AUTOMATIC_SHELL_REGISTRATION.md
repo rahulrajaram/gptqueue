@@ -390,8 +390,10 @@ Without `--apply yes` this is a dry run. It previews both mailboxes' retained wo
 No index records correlations by mailbox, so the doctor finds them with a
 read-only SCAN of the outstanding-request keys. The SCAN is capped at about
 `--max-correlation-scan` keyspace entries (default 200000). If it stops at the
-cap, the disclosure is reported as incomplete, its counts are lower bounds, and
-the remap is refused unless you pass `--accept-incomplete-disclosure yes`.
+cap, or an existing outstanding record cannot be read as a correlation (for
+example one that lost its expiry, which may still name either mailbox), the
+disclosure is reported as incomplete, its counts are lower bounds, and the
+remap is refused unless you pass `--accept-incomplete-disclosure yes`.
 
 The dry run also reports the guards:
 - the mapping names FROM;

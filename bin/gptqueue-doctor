@@ -28,7 +28,7 @@ if (!allowed.includes(command)) {
   console.log('         [--apply yes] [--accept-incomplete-disclosure yes] [--max-correlation-scan N]');
   console.log('       Repoint one runtime\'s mailbox mapping from a dormant FROM to a live TO (dry run unless --apply yes). Previews both');
   console.log('       mailboxes\' retained work (queue, claims, outstanding reply correlations); moves none. Correlations come from a bounded');
-  console.log('       SCAN of about N keyspace entries (default 200000); if it stops at that cap the disclosure is incomplete and the remap');
+  console.log('       SCAN of about N keyspace entries (default 200000); if it stops at that cap, or a record cannot be read, the disclosure is incomplete and the remap');
   console.log('       is refused unless --accept-incomplete-disclosure yes. Exit codes: 0 applied or dry run with every guard holding,');
   console.log('       6 refused (nothing written; each refusal on stderr), 1 usage (bad or missing option), 2 connection/other error');
   console.log('       (after --apply yes the outcome is then unknown: run the dry run again before retrying).');

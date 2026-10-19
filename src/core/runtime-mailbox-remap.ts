@@ -190,7 +190,7 @@ const guard = (name: RemapGuardName, ok: boolean, detail: string): RemapGuard =>
 /** Pure: evaluate the guards over a read snapshot. */
 export const remapGuards = (
   request: RemapRequest, mappingAgent: string | null, from: MailboxPreview, to: MailboxPreview,
-  disclosure: Readonly<{ complete: boolean; scanned: number; accepted: boolean }>,
+  disclosure: Readonly<{ complete: boolean; scanned: number; unparsed: number; accepted: boolean }>,
 ): ReadonlyArray<RemapGuard> => Object.freeze([
   guard("distinct_mailboxes", request.from !== request.to, request.from !== request.to ? "from and to differ" : "from and to are the same mailbox"),
   guard("mapping_names_from", mappingAgent === request.from,
@@ -203,10 +203,14 @@ export const remapGuards = (
   guard("from_dormant", !from.runtime_binding && !from.heartbeat,
     !from.runtime_binding && !from.heartbeat ? `${from.name} has no runtime binding and no heartbeat`
       : `${from.name} is live (${[from.runtime_binding && "runtime binding", from.heartbeat && "heartbeat"].filter(Boolean).join(", ")}); do not remap`),
-  guard("correlation_disclosure_complete", disclosure.complete || disclosure.accepted,
-    disclosure.complete ? "outstanding reply correlations fully enumerated"
-      : disclosure.accepted ? `correlation SCAN stopped at its cap (~${disclosure.scanned} keyspace entries); incomplete disclosure accepted by the operator`
-        : `correlation SCAN stopped at its cap (~${disclosure.scanned} keyspace entries) before finishing; raise --max-correlation-scan or pass --accept-incomplete-disclosure yes`),
+  // Complete means the SCAN finished AND every existing record was readable: an
+  // unparsed record (e.g. one that lost its expiry) may still name either mailbox.
+  guard("correlation_disclosure_complete", (disclosure.complete && disclosure.unparsed === 0) || disclosure.accepted,
+    disclosure.complete && disclosure.unparsed === 0 ? "outstanding reply correlations fully enumerated"
+      : `${[!disclosure.complete && `correlation SCAN stopped at its cap (~${disclosure.scanned} keyspace entries) before finishing`,
+          disclosure.unparsed > 0 && `${disclosure.unparsed} outstanding record(s) could not be read as correlations, so their reply owners are unknown`]
+          .filter(Boolean).join("; ")}; ${disclosure.accepted ? "incomplete disclosure accepted by the operator"
+          : `${!disclosure.complete ? "raise --max-correlation-scan or " : ""}pass --accept-incomplete-disclosure yes`}`),
 ]);
 
 /** Read-only plan: both mailboxes' retained work, and the guard results. */
@@ -228,8 +232,8 @@ export const planRuntimeMailboxRemap = async (
   const parsed = mappingSchema.safeParse(parseJson(expected));
   const mapping = parsed.success ? parsed.data : null;
   const guards = remapGuards(request, mapping?.agent ?? null, from.view, to.view,
-    { complete: correlations.complete, scanned: correlations.scanned, accepted: options.acceptIncompleteDisclosure === true });
-  const bound = correlations.complete ? "" : " at least";
+    { complete: correlations.complete, scanned: correlations.scanned, unparsed: correlations.unparsed, accepted: options.acceptIncompleteDisclosure === true });
+  const bound = correlations.complete && correlations.unparsed === 0 ? "" : " at least";
   return Object.freeze({
     request: Object.freeze({ ...request }),
     mapping: Object.freeze({ key, agent: mapping?.agent ?? null, working_directory: mapping?.working_directory ?? null }),

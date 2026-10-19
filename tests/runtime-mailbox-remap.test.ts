@@ -121,8 +121,14 @@ describe("runtime mailbox remap", () => {
       expect.objectContaining({ sender: "peer", task_id: "t-owe", recipient: s.from, answered: false, subject: "review the patch" }),
     ]));
     expect(plan.correlations.to.sample).toEqual([expect.objectContaining({ task_id: "t-to", recipient: s.to })]);
-    expect(plan.notes[0]).toMatch(/0 queued message\(s\), 0 unexpired claim\(s\), and 1 awaited and 1 owed reply correlation\(s\) stay at/);
-    expect(plan.guards.find((g) => g.guard === "correlation_disclosure_complete")).toMatchObject({ ok: true });
+    // The unreadable record (no TTL) may still name FROM: counts are lower bounds and apply needs explicit acceptance (G1).
+    expect(plan.notes[0]).toMatch(/0 queued message\(s\), 0 unexpired claim\(s\), and at least 1 awaited and at least 1 owed reply correlation\(s\) stay at/);
+    expect(plan.guards.find((g) => g.guard === "correlation_disclosure_complete")).toMatchObject({ ok: false,
+      detail: expect.stringMatching(/1 outstanding record\(s\) could not be read.*--accept-incomplete-disclosure yes/) });
+    expect(await applyRuntimeMailboxRemap(s.redis, plan)).toMatchObject({ status: "refused", refusals: [{ reason: "correlation_disclosure_complete" }] });
+    await unchanged(s);
+    const accepted = await planRuntimeMailboxRemap(s.redis, s.request, { isPidAlive: alive, acceptIncompleteDisclosure: true });
+    expect(accepted.guards.find((g) => g.guard === "correlation_disclosure_complete")).toMatchObject({ ok: true, detail: expect.stringMatching(/accepted by the operator/) });
   });
 
   it("an incomplete correlation SCAN refuses apply unless the operator accepts it (F2)", async () => {
