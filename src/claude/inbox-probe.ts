@@ -70,15 +70,20 @@ if latest[1] then lid = latest[1][1] end
 return { n, lid, raws, expired }
 `;
 
+/** A failed read as a typed probe error: redis_unavailable when Redis could not be reached. */
+export const probeFailure = (error: unknown): Readonly<{ ok: false; code: ProbeErrorCode; message: string }> => {
+  const message = error instanceof Error ? error.message : String(error);
+  const unavailable = /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|Connection is closed|max retries|connect/i.test(message);
+  return Object.freeze({ ok: false, code: unavailable ? "redis_unavailable" : "redis_error", message });
+};
+
 export const probeInbox = async (redis: Redis, agent: string, sessionId: string | null): Promise<ProbeResult> => {
   try {
     const [unclaimed, latest, raw, expiredFlags] = await redis.eval(PROBE_SCRIPT, 4, SESSION_KEYS.queue(agent), CLAIM_KEYS.index(agent), CLAIM_KEYS.claims, SESSION_KEYS.inboxEvents(agent)) as [number, string, string[], number[]];
     const { mine, others, expiredOthers } = tallyClaims(raw.map((value) => value === "" ? null : value), sessionId, expiredFlags.map((flag) => flag === 1));
     return Object.freeze({ ok: true, counts: Object.freeze({ unclaimed, claimed_by_session: mine, claimed_by_others: others, expired_by_others: expiredOthers, latest_event_id: latest === "" ? null : latest }) });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const unavailable = /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|Connection is closed|max retries|connect/i.test(message);
-    return Object.freeze({ ok: false, code: unavailable ? "redis_unavailable" : "redis_error", message });
+    return probeFailure(error);
   }
 };
 

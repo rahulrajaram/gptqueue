@@ -2,6 +2,10 @@
  * Non-consuming inbox check; never pops, claims or acknowledges.
  *   gptqueue-inbox-peek [--name N] [--dir D] [--json]
  *       print the unclaimed count (or, with --json, every count and the identity)
+ *   gptqueue-inbox-peek --list [--name N] [--dir D] [--limit K] [--json]
+ *       list the unclaimed messages (oldest first, at most K, default 50, max
+ *       500) and the open claims, marking the mail that would wake the
+ *       recipient (the dispatcher's own rule); see inbox-list.ts.
  *   gptqueue-inbox-peek --watch [--name N] [--session ID] [--timeout S] [--block-ms MS]
  *       wait until the inbox is non-empty, print one JSON line, exit 0.
  *       Without --name it resolves this session's registered name from the
@@ -25,12 +29,18 @@
 import { Redis } from "ioredis";
 import { rmSync } from "node:fs";
 import { CLAIM_KEYS, SESSION_KEYS } from "../core/keys.js";
+import { formatListing, LIST_LIMIT, listInbox } from "./inbox-list.js";
 import { confirmLegacyLiveness, isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity } from "./inbox-probe.js";
 import { resolveAgentName } from "./agent-name.js";
 import { ensureRuntimeDir, processAlive, readProcess, readWatcherPid, watcherPidPath, writeWatcherPid, type ClaudeProcess } from "./session-record.js";
 
 const USAGE = `Non-consuming gptqueue inbox check; never pops a message.
   gptqueue-inbox-peek [--name N] [--dir D] [--json]          print the pending count
+  gptqueue-inbox-peek --list [--name N] [--dir D] [--limit K] [--json]
+      list unclaimed messages oldest first (at most K: default 50, max 500)
+      and open claims. "wakes" marks mail that would wake the recipient: a
+      task, or a result/error answering its own outstanding request.
+      Status mail never wakes. --list cannot be combined with --watch.
   gptqueue-inbox-peek --watch [--name N] [--session ID] [--interval S] [--timeout S]
       wait until the inbox is non-empty, print one JSON line, exit 0.
       Exit 3 on timeout (0 = no timeout), 2 on bad arguments, 6 when this
@@ -38,10 +48,10 @@ const USAGE = `Non-consuming gptqueue inbox check; never pops a message.
   --dir D selects the inbox derived from D, ignoring this session's record.
 `;
 
-type PeekArgs = Readonly<{ intervalSec: number; name: string | null; dir: string | null; watch: boolean; json: boolean; session: string | null; timeoutSec: number; blockMs: number }>;
+type PeekArgs = Readonly<{ intervalSec: number; name: string | null; dir: string | null; watch: boolean; json: boolean; session: string | null; timeoutSec: number; blockMs: number; list: boolean; limit: number }>;
 
 export const parsePeekArgs = (argv: readonly string[]): PeekArgs | string => {
-  const out = { intervalSec: 30, name: null as string | null, dir: null as string | null, watch: false, json: false, session: null as string | null, timeoutSec: 0, blockMs: 5000 };
+  const out = { intervalSec: 30, name: null as string | null, dir: null as string | null, watch: false, json: false, session: null as string | null, timeoutSec: 0, blockMs: 5000, list: false, limit: null as number | null };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => { const v = argv[++i]; if (v === undefined) throw new Error(`${arg} needs a value`); return v; };
@@ -55,13 +65,19 @@ export const parsePeekArgs = (argv: readonly string[]): PeekArgs | string => {
         case "--timeout": out.timeoutSec = Number(value()); break;
         case "--block-ms": out.blockMs = Number(value()); break;
         case "--interval": out.intervalSec = Number(value()); break; // legacy outage retry cadence; the watch itself is event-driven
+        case "--list": out.list = true; break;
+        case "--limit": { const v = value(); out.limit = /^\d+$/.test(v) ? Number(v) : NaN; break; }
         case "-h": case "--help": return "help";
         default: return `unknown argument: ${String(arg)}`;
       }
     } catch (error) { return (error as Error).message; }
   }
   if (!Number.isFinite(out.intervalSec) || out.intervalSec <= 0 || !Number.isFinite(out.timeoutSec) || out.timeoutSec < 0 || !Number.isFinite(out.blockMs) || out.blockMs < 10) return "invalid --timeout or --block-ms";
-  return Object.freeze(out);
+  if (out.list && out.watch) return "--list cannot be combined with --watch";
+  if (out.limit !== null && !out.list) return "--limit needs --list";
+  const limit = out.limit ?? LIST_LIMIT.default;
+  if (!Number.isInteger(limit) || limit < 1 || limit > LIST_LIMIT.max) return `invalid --limit: a positive integer up to ${LIST_LIMIT.max}`;
+  return Object.freeze({ ...out, limit });
 };
 
 const latestId = async (redis: Redis, agent: string): Promise<string> =>
@@ -158,6 +174,14 @@ export const runPeek = async (argv: readonly string[], env: NodeJS.ProcessEnv = 
   const self = explicitName !== null ? own() : identity;
   const sessionId = explicitName !== null ? (self.agent === explicitName ? self.gptqueue_session_id : null) : identity.gptqueue_session_id;
   const owner: ClaudeProcess | null = self.claude;
+  if (args.list) {
+    const redis = probeClient(url);
+    const result = await listInbox(redis, identity.agent, args.limit).finally(() => redis.disconnect());
+    if (!result.ok) { process.stderr.write(`gptqueue-inbox-peek: ${result.code}: ${result.message}\n`); return 1; }
+    const { agent, ...listing } = result.listing;
+    process.stdout.write(args.json ? `${JSON.stringify({ agent, source: identity.source, note: identity.note, ...listing })}\n` : formatListing(result.listing));
+    return 0;
+  }
   if (!args.watch) {
     const redis = probeClient(url);
     const probe = await probeInbox(redis, identity.agent, sessionId).finally(() => redis.disconnect());

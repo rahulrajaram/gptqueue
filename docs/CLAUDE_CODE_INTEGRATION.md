@@ -6,7 +6,7 @@ Entry points in `bin/` are thin Node shims over `dist/claude/*` (run `npm run bu
 |---|---|
 | `bin/gptqueue-claude-mcp` | stdio MCP server for Claude Code; registers under the project's agent name and publishes the name it holds for the session |
 | `bin/gptqueue-claude-hook session-start\|stop\|user-prompt-submit` | SessionStart context, Stop gate, and turn state (hook JSON on stdin) |
-| `bin/gptqueue-inbox-peek` | non-consuming inbox counts and the event-driven background watcher |
+| `bin/gptqueue-inbox-peek` | non-consuming inbox counts, the `--list` listing and the event-driven background watcher |
 | `bin/gptqueue-claude-name [dir]` | fallback name: `GPTQ_AGENT_NAME`, then the longest prefix in `~/.config/gptqueue/claude-agent-names.tsv`, then `claude-<git top-level basename>` |
 | `scripts/verify-claude-mcp.mjs` | drive the MCP server over stdio as Claude would (`selftest`, `send`, `claim`, `list`, `unregister`) |
 
@@ -112,6 +112,31 @@ on the inbox has expired (`expired_claims` in the line). It exits 6 when the Cla
 serves has gone, checked every block period. An explicit `--dir D` names the inbox derived from
 `D`, like `--name`, and ignores this session's record. Started
 with `run_in_background`, its exit wakes the idle session.
+
+## Listing an inbox
+
+`gptqueue-inbox-peek --list [--name N] [--dir D] [--limit K] [--json]` lists an inbox's unclaimed
+messages, oldest first, and its open claims, without consuming anything. An operator or observer
+can use it on another agent's mailbox. It names the inbox like the count form: `--name`, `--dir`,
+or this session's identity. It reads only: one MULTI/EXEC of TIME, LLEN, LRANGE on the queue and
+ZRANGE on the claim index, then MGET on outstanding-request keys and HMGET on the claim records.
+`--limit` caps the listed messages (default 50, max 500). `--list` with `--watch` is a usage error
+(exit 2). A Redis failure prints `gptqueue-inbox-peek: <code>: <message>` on stderr and exits 1.
+
+Each message shows `id`, `from`, `type`, `timestamp`, `age_s` (against Redis TIME), `in_reply_to`,
+`wakes` and a `preview`: the first 80 characters of the content, whitespace collapsed, with `…`
+when cut. An entry that is not a JSON object appears as `{raw_index, error: "unparseable"}`.
+The summary gives `unclaimed` (LLEN), `listed`, `truncated`, `oldest_unclaimed_age_s` (over the
+whole queue, since recovered mail returns to the tail; null when empty or no timestamp is readable), `wake_eligible_count`
+(among the listed messages), each claim (`claim_id`, `session_id`, `claimed_at`, `age_s`,
+`expires_at`, `expired`, `task_count`) and `expired_claims`. `--json` prints one object; without
+it, a table and summary lines.
+
+`wakes` is the dispatcher's own rule (`wakesRecipient` in `src/core/inbox-events.ts`). A `task`
+always wakes the recipient. A `result` or `error` wakes it only when it answers the recipient's own
+outstanding request: `in_reply_to` names a request whose `gptq:outstanding:<recipient>:<id>` key
+holds the reply's sender. Status mail never wakes, nor does ping, an unsolicited reply or a reply
+from another sender. Mail that needs the recipient to act must be sent as `type=task`.
 
 ## Install note (not applied)
 
