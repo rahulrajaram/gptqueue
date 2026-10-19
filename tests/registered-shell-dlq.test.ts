@@ -51,15 +51,32 @@ const connectedShell = async (ids: readonly string[]) => {
 };
 
 /** Dead-letter `id` on `agent` through the real recovery Lua (one expiry past the cap). */
-const deadLetter = async (redis: Redis, agent: string, id: string) => {
+const deadLetter = async (redis: Redis, agent: string, id: string): Promise<string> => {
   const store = new TaskClaimStore(redis);
-  await redis.rpush(SESSION_KEYS.queue(agent), JSON.stringify({ id, type: "task", from: "peer", to: agent, payload: { content: id }, timestamp: new Date().toISOString() }));
+  const raw = JSON.stringify({ id, type: "task", from: "peer", to: agent, payload: { content: id, nested: { n: 1, list: ["a", "b"] } },
+    correlation_id: `corr-${id}`, timestamp: new Date().toISOString() });
+  await redis.rpush(SESSION_KEYS.queue(agent), raw);
   await redis.set(CLAIM_KEYS.recoverCount(agent, id), String(DLQ_PROVISIONAL.RECOVER_CAP));
   const claimed = await store.claim({ actor_id: agent, session_id: "dlq-seed", max_batch: 1, ttl_seconds: 1, now: new Date().toISOString() });
   if (!claimed.ok || !claimed.claim) throw new Error(`seed claim failed: ${JSON.stringify(claimed)}`);
   await delay(1100);
   expect(await store.recoverExpired({ actor_id: agent, now: new Date().toISOString() })).toMatchObject({ ok: true, deadlettered: 1 });
+  return raw;
 };
+
+/** A bare connection whose identity is whatever RedisClient currently holds. */
+const bareConnection = async (backend: RedisClient) => {
+  const server = new McpServer({ name: "dlq-transition", version: "1" });
+  registerRuntimeTools(server, backend, { bind: async () => ({}), status: () => ({}) } as RuntimeTools);
+  const [st, ct] = InMemoryTransport.createLinkedPair();
+  await server.connect(st);
+  const client = new Client({ name: "dlq-transition-client", version: "1" });
+  await client.connect(ct);
+  cleanups.push(async () => { await client.close(); await server.close(); await backend.shutdown(); });
+  return client;
+};
+const dlqIds = async (client: Client) =>
+  (data(await client.callTool({ name: "dlq_status", arguments: {} })).entries as Array<{ message_id: string }>).map((e) => e.message_id);
 
 describe("registered-shell dlq_status / dlq_requeue", () => {
   it("are listed with the safety contract and strict, session-free schemas", async () => {
@@ -84,7 +101,7 @@ describe("registered-shell dlq_status / dlq_requeue", () => {
   it("are caller-bound: a shell sees and restores only its own DLQ, and requeue restores the exact message with a fresh budget", async () => {
     const a = await connectedShell(["a-dead"]);
     const b = await connectedShell(["b-dead"]);
-    await deadLetter(a.redis, a.shell.agentName, "a-dead");
+    const originalRaw = await deadLetter(a.redis, a.shell.agentName, "a-dead");
     await deadLetter(b.redis, b.shell.agentName, "b-dead");
 
     const listA = data(await a.client.callTool({ name: "dlq_status", arguments: {} }));
@@ -102,6 +119,8 @@ describe("registered-shell dlq_status / dlq_requeue", () => {
     expect(restored).toMatchObject({ status: "ok", requeued: 1 });
     const queue = await a.redis.lrange(SESSION_KEYS.queue(a.shell.agentName), 0, -1);
     expect(queue.map((raw) => JSON.parse(raw).id)).toEqual(["a-dead"]);
+    // The exact message: the restored raw payload is the original, byte for byte.
+    expect(queue).toEqual([originalRaw]);
     expect(await a.redis.llen(DLQ_KEYS.list(a.shell.agentName))).toBe(0);
     expect(await a.redis.exists(CLAIM_KEYS.recoverCount(a.shell.agentName, "a-dead"))).toBe(0);
     expect(data(await a.client.callTool({ name: "dlq_status", arguments: {} }))).toMatchObject({ count: 0, entries: [] });
@@ -109,6 +128,39 @@ describe("registered-shell dlq_status / dlq_requeue", () => {
     // B's DLQ is untouched and still visible to B only.
     const listB = data(await b.client.callTool({ name: "dlq_status", arguments: { limit: 10 } }));
     expect((listB.entries as Array<{ message_id: string }>).map((e) => e.message_id)).toEqual(["b-dead"]);
+  });
+
+  it("follow the connection's current identity across a session transition", async () => {
+    const a = await connectedShell(["ta-dead"]);
+    const b = await connectedShell(["tb-dead"]);
+    await deadLetter(a.redis, a.shell.agentName, "ta-dead");
+    await deadLetter(b.redis, b.shell.agentName, "tb-dead");
+    const backend = new RedisClient(null, URL);
+    const client = await bareConnection(backend);
+    // Bound to A's session: sees only A's DLQ.
+    await backend.reconnectSession(a.shell.sessionId);
+    expect(await dlqIds(client)).toEqual(["ta-dead"]);
+    // Rebound to B's session: the same connection now sees only B's DLQ, and
+    // A's entry is no longer restorable through it.
+    await backend.reconnectSession(b.shell.sessionId);
+    expect(backend.agentName).toBe(b.shell.agentName);
+    expect(await dlqIds(client)).toEqual(["tb-dead"]);
+    const stale = await client.callTool({ name: "dlq_requeue", arguments: { message_id: "ta-dead" } });
+    expect(stale.isError).toBe(true);
+    expect(JSON.stringify(stale)).toContain("dlq_entry_not_found");
+    expect(await a.redis.llen(DLQ_KEYS.list(a.shell.agentName))).toBe(1);
+    expect(await a.redis.llen(SESSION_KEYS.queue(a.shell.agentName))).toBe(0);
+  });
+
+  it("refuse a registered connection with no session binding", async () => {
+    const a = await connectedShell([]);
+    // A name without a session (e.g. a lost or not-yet-bound session) is refused, not trusted.
+    const client = await bareConnection(new RedisClient(a.shell.agentName, URL));
+    for (const [name, args] of [["dlq_status", {}], ["dlq_requeue", { message_id: "x" }]] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain("SESSION_UNAVAILABLE");
+    }
   });
 
   it("refuse an unregistered connection", async () => {

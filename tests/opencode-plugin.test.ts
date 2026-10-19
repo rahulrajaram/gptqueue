@@ -118,6 +118,9 @@ describe("OpenCode plugin frontend", () => {
       "gptqueue_dlq_status", "gptqueue_dlq_requeue",
     ]);
     expect(plugin.tool.gptqueue_claim_tasks!.args).not.toHaveProperty("session_id");
+    // The sidecar's safety tags reach the OpenCode surface (parity F1).
+    expect(plugin.tool.gptqueue_dlq_status!.description).toMatch(/^\[safety: readonly\]/u);
+    expect(plugin.tool.gptqueue_dlq_requeue!.description).toMatch(/^\[safety: writable\]/u);
     const output = { system: [] as string[] };
     await plugin["experimental.chat.system.transform"]({ sessionID: identity.sessionID }, output);
     expect(output.system[0]).toContain("already registered");

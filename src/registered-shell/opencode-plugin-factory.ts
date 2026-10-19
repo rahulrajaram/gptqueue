@@ -393,11 +393,11 @@ export const createOpenCodePlugin = (
     ),
     gptqueue_dlq_status: forwarded(
       "gptqueue_dlq_status", "dlq_status",
-      "List this bound session's own dead-lettered messages, newest first.", boundDlqStatusSchema,
+      "[safety: readonly] List this bound session's own dead-lettered messages, newest first.", boundDlqStatusSchema,
     ),
     gptqueue_dlq_requeue: forwarded(
       "gptqueue_dlq_requeue", "dlq_requeue",
-      "Restore one of this bound session's own dead-lettered messages to its inbox with a fresh recovery budget.", boundSchema(dlqRequeueSchema),
+      "[safety: writable] Restore one of this bound session's own dead-lettered messages to its inbox with a fresh recovery budget.", boundSchema(dlqRequeueSchema),
     ),
   });
 
