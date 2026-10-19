@@ -94,7 +94,11 @@ the gptqueue session only by its `sid-sha256:` tag, never by the raw id.
 - If the inbox is empty and no watcher is running for this Claude `session_id`
   (`watch-<session_id>.pid`), the hook blocks once and gives the exact command to start one.
   A watcher counts only if its pidfile names this session's Claude process (pid and start time),
-  so a watcher orphaned by a crashed Claude does not satisfy a resumed session. The command uses
+  so a watcher orphaned by a crashed Claude does not satisfy a resumed session. It also counts
+  only while its parent is still the launcher its pidfile records: a watcher started with `&` or
+  disown, whose launching shell has exited, does not count, even before it notices and exits 7
+  (see below). Pidfiles written before launcher tracking have no launcher and count by the
+  other rules alone. The command uses
   the path the hook was invoked by (the installed wrapper or `<prefix>/current/bin`), not a
   resolved release directory.
   `GPTQ_CLAUDE_WATCH=off` turns this reminder off.
@@ -112,6 +116,28 @@ on the inbox has expired (`expired_claims` in the line). It exits 6 when the Cla
 serves has gone, checked every block period. An explicit `--dir D` names the inbox derived from
 `D`, like `--name`, and ignores this session's record. Started
 with `run_in_background`, its exit wakes the idle session.
+
+Start the watcher only with the session's background-task mechanism (`run_in_background`), never
+with `&`, `disown` or `nohup` inside a foreground command. Such a watcher's launching shell exits
+when the command ends, so the watcher's own exit wakes nobody. With `--session` (the `--name` and
+`--dir` modes without `--session` are unchanged):
+
+- It records its parent process (pid and start time) as its launcher in the pidfile
+  (`launcher_pid`, `launcher_start`), before the session-record wait.
+- It exits 7 with `{"agent", "error": "watcher_orphaned", "message"}` once its parent is no
+  longer that launcher, and removes its pidfile if the pidfile is still its own. It checks
+  before writing the pidfile and then every block period, alongside the Claude-process check
+  (exit 6 wins when both apply). A watcher already adopted by init (parent pid 1) when it starts
+  exits 7 at once, before the record wait; its `agent` is the `--name`/`--dir` inbox or null.
+  On a host where a child subreaper (for example a systemd user manager) adopts orphans instead
+  of pid 1, such an immediate orphan is not caught at startup; a name-free one finds no session
+  record and exits 5, and the Stop hook does not count it.
+- It exits 8 with `{"agent", "error": "watcher_already_running", "pid"}`, without touching the
+  pidfile, when the pidfile names a watcher the Stop hook would count as running: alive (same pid
+  and start time), still under its launcher, for the same agent and the same Claude process. A
+  recorded watcher that is dead, orphaned, or serves another Claude process does not count; the
+  new watcher replaces its pidfile. Two watchers started at the same instant can both pass this
+  check.
 
 ## Listing an inbox
 
