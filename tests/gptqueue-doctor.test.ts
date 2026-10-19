@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
-import { SESSION_KEYS, SYSTEM_SENDER } from "../src/core/keys.js";
+import { CLAIM_KEYS, SESSION_KEYS, SYSTEM_SENDER } from "../src/core/keys.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import {
   probeActivationReady,
@@ -352,6 +352,122 @@ describe("gptqueue-doctor CLI", () => {
     expect(JSON.parse(dirty.stdout).reserved_sender).toEqual({ registry: true, sessions: 2 });
     await redis.hdel(SESSION_KEYS.registry, SYSTEM_SENDER);
     await redis.del(SESSION_KEYS.agentSessions(SYSTEM_SENDER));
+  });
+
+  // Operator recovery for a refused runtime mailbox adoption (P1).
+  describe("remap-runtime-mailbox", () => {
+    // A pid that existed and has exited (spawnSync reaps it before returning).
+    const deadPid = spawnSync(process.execPath, ["-e", ""]).pid!;
+    const seed = async () => {
+      const runtimeId = randomUUID();
+      const from = `remap-from-${randomUUID()}`;
+      const to = `remap-to-${randomUUID()}`;
+      const key = SESSION_KEYS.runtimeMailbox("codex", runtimeId);
+      const mapping = JSON.stringify({ agent: from, working_directory: "/workspace/project" });
+      await redis.set(key, mapping);
+      await redis.hset(SESSION_KEYS.registry, from, JSON.stringify({ name: from, pid: deadPid }),
+        to, JSON.stringify({ name: to, pid: process.pid, metadata: { working_directory: "/workspace/project" } }));
+      await redis.set(SESSION_KEYS.heartbeat(to), "alive", "EX", 60);
+      await redis.sadd(SESSION_KEYS.provisional, to);
+      // Retained work on both names, which the preview must disclose.
+      await redis.rpush(SESSION_KEYS.queue(from), JSON.stringify({ id: "q1" }), JSON.stringify({ id: "q2" }));
+      const expiry = Date.now() + 600_000;
+      await redis.zadd(CLAIM_KEYS.index(from), expiry, "claim-from", Date.now() - 60_000, "claim-expired");
+      await redis.rpush(SESSION_KEYS.queue(to), JSON.stringify({ id: "q3" }));
+      const args = (...extra: string[]) => ["remap-runtime-mailbox", "--redis-url", TEST_REDIS_URL, "--client", "codex",
+        "--runtime-id", runtimeId, "--from", from, "--to", to, ...extra];
+      return { runtimeId, from, to, key, mapping, expiry, args };
+    };
+    const unchanged = async (s: Awaited<ReturnType<typeof seed>>) => {
+      expect(await redis.get(s.key)).toBe(s.mapping);
+      expect(await redis.sismember(SESSION_KEYS.provisional, s.to)).toBe(1);
+      expect(await redis.xlen(SESSION_KEYS.continuityAudit)).toBe(0);
+    };
+
+    it("dry run previews both mailboxes' retained work and the guards, writing nothing", async () => {
+      const s = await seed();
+      const result = run(s.args());
+      expect(result.status, result.stderr).toBe(0);
+      const out = JSON.parse(result.stdout);
+      expect(out).toMatchObject({ mode: "dry_run", outcome: { status: "dry_run_ok" }, ok: true,
+        mapping: { key: s.key, agent: s.from, working_directory: "/workspace/project" } });
+      expect(out).not.toHaveProperty("cas");
+      expect(out.mailboxes.from).toMatchObject({ name: s.from, registered: true, pid: deadPid, pid_alive: false, queue_length: 2,
+        unexpired_claims: [{ claim_id: "claim-from", expires_at: new Date(s.expiry).toISOString() }], expired_claims: 1,
+        runtime_binding: false, heartbeat: false, provisional: false });
+      expect(out.mailboxes.to).toMatchObject({ name: s.to, registered: true, pid: process.pid, pid_alive: true, queue_length: 1,
+        unexpired_claims: [], heartbeat: true, runtime_binding: false, provisional: true, working_directory: "/workspace/project" });
+      expect(out.guards.map((g: { guard: string; ok: boolean }) => [g.guard, g.ok])).toEqual([
+        ["distinct_mailboxes", true], ["mapping_names_from", true], ["to_registered", true],
+        ["to_pid_alive", true], ["to_live_registration", true], ["from_dormant", true]]);
+      expect(out.notes.join(" ")).toMatch(/moves no work: 2 queued message\(s\) and 1 unexpired claim\(s\) stay at/);
+      expect(out.notes.join(" ")).toMatch(/pid liveness is checked by this process/);
+      await unchanged(s);
+    });
+
+    it("--apply yes repoints the mapping, clears TO's provisional mark and audits operator_remap", async () => {
+      const s = await seed();
+      const result = run(s.args("--apply", "yes"));
+      expect(result.status, result.stderr).toBe(0);
+      const out = JSON.parse(result.stdout);
+      expect(out).toMatchObject({ mode: "apply", outcome: { status: "applied" } });
+      expect(JSON.parse((await redis.get(s.key))!)).toEqual({ agent: s.to, working_directory: "/workspace/project" });
+      expect(await redis.sismember(SESSION_KEYS.provisional, s.to)).toBe(0);
+      const entries = await redis.xrange(SESSION_KEYS.continuityAudit, "-", "+");
+      expect(entries).toHaveLength(1);
+      expect(entries[0]![0]).toBe(out.outcome.audit_id);
+      expect(entries[0]![1]).toEqual(["event", "operator_remap", "target", s.to, "source", s.from, "runtime_id", s.runtimeId, "client", "codex"]);
+      // No work moves: FROM keeps its queue and claims.
+      expect(await redis.llen(SESSION_KEYS.queue(s.from))).toBe(2);
+      expect(await redis.zcard(CLAIM_KEYS.index(s.from))).toBe(2);
+    });
+
+    const refusals: Array<[string, (s: Awaited<ReturnType<typeof seed>>) => Promise<unknown>]> = [
+      ["mapping_names_from", (s) => redis.set(s.key, JSON.stringify({ agent: `other-${randomUUID()}`, working_directory: "/workspace/project" }))],
+      ["to_registered", (s) => redis.hdel(SESSION_KEYS.registry, s.to)],
+      ["to_pid_alive", (s) => redis.hset(SESSION_KEYS.registry, s.to, JSON.stringify({ name: s.to, pid: deadPid }))],
+      ["to_live_registration", (s) => redis.del(SESSION_KEYS.heartbeat(s.to))],
+      ["from_dormant", (s) => redis.set(SESSION_KEYS.runtimeBinding(s.from), "bound")],
+      ["from_dormant", (s) => redis.set(SESSION_KEYS.heartbeat(s.from), "alive", "EX", 60)],
+    ];
+    it.each(refusals)("refuses %s with exit 6 and a clear message, writing nothing (dry run and apply)", async (guard, mutate) => {
+      const s = await seed();
+      await mutate(s);
+      const current = await redis.get(s.key);
+      for (const extra of [[], ["--apply", "yes"]]) {
+        const result = run(s.args(...extra));
+        expect(result.status, result.stderr).toBe(6);
+        expect(result.stderr).toMatch(new RegExp(`^refused: ${guard}: \\S`, "mu"));
+        expect(JSON.parse(result.stdout)).toMatchObject({ outcome: { status: "refused" }, ok: false });
+      }
+      expect(await redis.get(s.key)).toBe(current);
+      expect(await redis.sismember(SESSION_KEYS.provisional, s.to)).toBe(1);
+      expect(await redis.xlen(SESSION_KEYS.continuityAudit)).toBe(0);
+    });
+
+    it("refuses FROM equal to TO", async () => {
+      const s = await seed();
+      const result = run(["remap-runtime-mailbox", "--redis-url", TEST_REDIS_URL, "--client", "codex",
+        "--runtime-id", s.runtimeId, "--from", s.from, "--to", s.from, "--apply", "yes"]);
+      expect(result.status).toBe(6);
+      expect(result.stderr).toMatch(/^refused: distinct_mailboxes: /mu);
+      await unchanged(s);
+    });
+
+    it("rejects a bad client, an --apply other than yes, and unknown options before touching state", async () => {
+      const s = await seed();
+      const badClient = run(["remap-runtime-mailbox", "--redis-url", TEST_REDIS_URL, "--client", "opencode",
+        "--runtime-id", s.runtimeId, "--from", s.from, "--to", s.to]);
+      expect(badClient.status).toBe(2);
+      expect(badClient.stderr).toContain("--client must be codex or pi");
+      const badApply = run(s.args("--apply", "true"));
+      expect(badApply.status).toBe(2);
+      expect(badApply.stderr).toContain("--apply yes");
+      const unknown = run(s.args("--cwd", "/workspace"));
+      expect(unknown.status).toBe(2);
+      expect(unknown.stderr).toContain("Unknown option(s) for remap-runtime-mailbox: --cwd");
+      await unchanged(s);
+    });
   });
 });
 

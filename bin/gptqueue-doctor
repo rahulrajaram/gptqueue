@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Shipped as a release entry point (bin/gptqueue-doctor); scripts/gptqueue-doctor.mjs is a compatibility shim.
-// Read-only by default. Continuity apply is an explicit local operator operation.
+// Read-only by default. Continuity apply and runtime-mailbox remap apply are explicit local operator operations.
 import { readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -8,13 +8,14 @@ import { Redis } from 'ioredis';
 import { SESSION_KEYS } from '../dist/core/keys.js';
 import { AgentDiagnostics } from '../dist/core/agent-diagnostics.js';
 import { prepareContinuity, applyContinuity } from '../dist/core/mailbox-continuity.js';
+import { planRuntimeMailboxRemap, applyRuntimeMailboxRemap, remapPreview } from '../dist/core/runtime-mailbox-remap.js';
 import { probeActivationReady, bindingAgrees } from '../dist/core/doctor-probe.js';
 import { reservedSenderRegistrations, sweepProvisional } from '../dist/core/provisional-sweeper.js';
 import { reapOfflineIdentities } from '../dist/core/registry-reaper.js';
 import { CodexSocketClient } from '../dist/registered-shell/codex-socket.js';
 
 const [command, ...args] = process.argv.slice(2);
-const allowed = ['agent', 'find', 'delivery', 'connection', 'config', 'continuity-plan', 'continuity-apply', 'sweep-provisional', 'reap-offline'];
+const allowed = ['agent', 'find', 'delivery', 'connection', 'config', 'continuity-plan', 'continuity-apply', 'sweep-provisional', 'reap-offline', 'remap-runtime-mailbox'];
 if (!allowed.includes(command)) {
   console.log('Usage: node scripts/gptqueue-doctor.mjs <agent|find|delivery|connection|config|continuity-plan|continuity-apply|sweep-provisional|reap-offline> --redis-url redis://host/db [--agent NAME] [--message-id ID] [--query TEXT] [--thread-id ID] [--client codex|pi --runtime-id ID --cwd PATH --legacy yes --out PLAN] [--plan PLAN --apply yes] [--tier base|sandbox-auto|sandbox-max] [--limit N]');
   console.log('       node scripts/gptqueue-doctor.mjs reap-offline --redis-url URL [--dry-run | --apply] [--min-age-hours N] [--limit N] [--max-keys N] [--timeout-seconds N] [--json]   (dry run unless --apply)');
@@ -23,6 +24,10 @@ if (!allowed.includes(command)) {
   console.log('       reap-offline exit codes: 0 evaluated (skips/remaining are normal), 4 batch refused with nothing written (report.refused),');
   console.log('       5 evaluated but report.anomalies > 0 unexpected_key_type skips (other names may be reaped; unhealthy),');
   console.log('       3 client timeout (server outcome unknown), 1 usage, 2 connection/other error. Precedence 3 > 4 > 5 > 0.');
+  console.log('       node scripts/gptqueue-doctor.mjs remap-runtime-mailbox --redis-url URL --client codex|pi --runtime-id ID --from MAILBOX --to MAILBOX [--apply yes]');
+  console.log('       Repoint one runtime\'s mailbox mapping from a dormant FROM to a live TO (dry run unless --apply yes). Previews both');
+  console.log('       mailboxes\' retained work; moves none. Exit codes: 0 applied or dry run with every guard holding, 6 refused');
+  console.log('       (nothing written; each refusal on stderr), 1 usage, 2 connection/other error.');
   process.exit(command === '--help' ? 0 : 1);
 }
 let redis = null;
@@ -175,6 +180,26 @@ try {
       if (report.refused) { if (!flags.has('--json')) console.log(`  REFUSED: ${report.refused}`); process.exitCode = 4; }
       // Exit 5: evaluated (writes may have happened for other names) but some names had unexpected key types.
       else if (report.anomalies > 0) { if (!flags.has('--json')) console.log(`  ANOMALIES: ${report.anomalies} name(s) skipped as unexpected_key_type`); process.exitCode = 5; }
+      break;
+    }
+    // Operator recovery for a refused runtime mailbox adoption. Dry run unless --apply yes.
+    case 'remap-runtime-mailbox': {
+      const unknown = Object.keys(options).filter(key => !['--redis-url', '--client', '--runtime-id', '--from', '--to', '--apply'].includes(key));
+      if (unknown.length) throw new Error(`Unknown option(s) for remap-runtime-mailbox: ${unknown.join(', ')}`);
+      const client = required('--client');
+      if (client !== 'codex' && client !== 'pi') throw new Error('--client must be codex or pi');
+      if (options['--apply'] !== undefined && options['--apply'] !== 'yes') throw new Error('Pass --apply yes to apply; omit --apply for a dry run');
+      const apply = options['--apply'] === 'yes';
+      // TO's pid liveness is checked here, in this process, before the atomic apply.
+      const plan = await planRuntimeMailboxRemap(redis, { client, runtimeId: required('--runtime-id'), from: required('--from'), to: required('--to') });
+      const outcome = apply ? await applyRuntimeMailboxRemap(redis, plan)
+        : plan.ok ? { status: 'dry_run_ok' }
+          : { status: 'refused', refusals: plan.guards.filter(g => !g.ok).map(g => ({ reason: g.guard, detail: g.detail })) };
+      result = { mode: apply ? 'apply' : 'dry_run', ...remapPreview(plan), outcome };
+      if (outcome.status === 'refused') {
+        for (const refusal of outcome.refusals) console.error(`refused: ${refusal.reason}: ${refusal.detail}`);
+        process.exitCode = 6;
+      }
       break;
     }
     case 'continuity-apply':

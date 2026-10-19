@@ -348,3 +348,42 @@ Do not repoint a busy successor with its own outstanding conversations. For that
 case, preserve both mailboxes and arrange an explicitly authorized resend to the
 verified current address; do not silently rewrite historical envelopes. The doctor
 never reloads the shared Codex daemon or migrates live mailboxes automatically.
+
+### Refused runtime mailbox adoption
+
+When a reconnecting sidecar cannot adopt its mapped mailbox, no inbox dispatcher
+runs. `get_runtime_status` reports `dispatcher: "off"`, `readiness:
+"awaiting_adoption"` and a `continuity` record with these fields:
+- the sidecar's `current_mailbox` and the mapped `target`;
+- a `reason`: `mapping_changed`, `registration_missing`, `source_session_invalid`,
+  `source_ownership_conflict`, `target_occupied` or `source_busy`;
+- the first blocking `signal` (other checks may also block);
+- `first_refused_at`, `last_attempt_at` and `operator_action_required`;
+- `recheck_after`, a hint and not a promise. It is the earliest unexpired claim
+  expiry or the outbound-activity TTL. Other claims may remain, and renewals or
+  further sends move it.
+
+`continuity` is null when no adoption is pending. The lifecycle log records
+`native_binding_retrying` with code `adoption_refused`, reason, signal and target
+when the refusal changes, not on every retry.
+
+If the mapped mailbox stays dormant while the sidecar keeps working under its current
+name, an operator can repoint that one runtime's mapping to the live name:
+
+```sh
+node scripts/gptqueue-doctor.mjs remap-runtime-mailbox --redis-url redis://127.0.0.1:6379/0 --client codex --runtime-id EXACT_NATIVE_THREAD --from MAPPED_MAILBOX --to LIVE_MAILBOX
+```
+
+Without `--apply yes` this is a dry run. It previews both mailboxes' retained work:
+queue length, unexpired claims with their expiry, registration pid and liveness,
+runtime binding and heartbeat. It also reports the guards:
+- the mapping names FROM;
+- TO is registered with a running pid, checked by the doctor process;
+- TO has a heartbeat or a live session lease;
+- FROM has no runtime binding and no heartbeat.
+
+Applying re-checks the mapping, TO's registration and liveness, and FROM's dormancy
+in one atomic step. It then repoints the mapping, clears TO's provisional mark and
+records an `operator_remap` audit event. The remap moves no work: FROM's queued
+messages and claims stay at FROM. Exit code 6 means the remap was refused and
+nothing was written.
