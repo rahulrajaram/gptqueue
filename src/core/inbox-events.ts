@@ -11,22 +11,57 @@ const outstanding = SESSION_KEYS.outstanding;
 const awaitsOutstanding = (message: QueueMessage): message is QueueMessage & { payload: { in_reply_to: string } } =>
   (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 
+/** A raw inbox-list entry as a message object, or null when it is not JSON or not a JSON object. */
+export const parseQueueEntry = (raw: string): QueueMessage | null => {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value as QueueMessage : null;
+  } catch { return null; }
+};
+
+/** Mail the dispatcher considers at all: addressed to `agent`, with a string id and a payload. */
+const addressedTo = (agent: string, message: QueueMessage): boolean =>
+  message.to === agent && typeof message.id === "string" && !!message.payload;
+
+/**
+ * The outstanding-request key whose value decides whether `message` wakes
+ * `agent`: set for a result or error addressed to `agent` that names the
+ * request it answers (payload.in_reply_to), null for every other message.
+ */
+export const replyOwnerKey = (agent: string, message: QueueMessage): string | null =>
+  addressedTo(agent, message) && awaitsOutstanding(message) ? outstanding(message.to, message.payload.in_reply_to) : null;
+
+/**
+ * The dispatcher's wake-eligibility rule, pure: whether `message` in
+ * `agent`'s inbox wakes `agent`. A task always does. A result or error does
+ * only when it answers `agent`'s own outstanding request: `owner`, the value
+ * stored at replyOwnerKey(agent, message), names the reply's sender. Status,
+ * ping, unsolicited or misaddressed mail never wakes.
+ */
+export const wakesRecipient = (agent: string, message: QueueMessage, owner: string | null): boolean =>
+  addressedTo(agent, message) && (message.type === "task" || (awaitsOutstanding(message) && owner === message.from));
+
+/**
+ * The owner lookup wakesRecipient needs, index-aligned with `messages` (null
+ * where a message needs none or the request is no longer outstanding).
+ */
+export const replyOwners = async (redis: Pick<Redis, "mget">, agent: string, messages: readonly QueueMessage[]): Promise<readonly (string | null)[]> => {
+  const keys = messages.map((message) => replyOwnerKey(agent, message));
+  const lookups = keys.flatMap((key, index) => key === null ? [] : [[index, key] as const]);
+  // One MGET resolves every reply's outstanding-request owner instead of a GET per message.
+  const owners = lookups.length === 0 ? [] : await redis.mget(lookups.map(([, key]) => key));
+  const ownerAt = new Map(lookups.map(([index], i) => [index, owners[i] ?? null]));
+  return Object.freeze(keys.map((_, index) => ownerAt.get(index) ?? null));
+};
+
 export class InboxEvents {
   constructor(private readonly redis: Redis) {}
 
   async pending(agent: string): Promise<readonly QueueMessage[]> {
     const raw = await this.redis.lrange(SESSION_KEYS.queue(agent), 0, -1);
-    const candidates = raw.flatMap((value) => {
-      let message: QueueMessage;
-      try { message = JSON.parse(value) as QueueMessage; } catch { return []; }
-      if (message?.to !== agent || typeof message.id !== "string" || !message.payload) return [];
-      return message.type === "task" || awaitsOutstanding(message) ? [message] : [];
-    });
-    // One MGET resolves every reply's outstanding-request owner instead of a GET per message.
-    const replies = candidates.filter(awaitsOutstanding);
-    const owners = replies.length === 0 ? [] : await this.redis.mget(replies.map((m) => outstanding(m.to, m.payload.in_reply_to)));
-    const ownerOf = new Map<QueueMessage, string | null>(replies.map((m, i) => [m, owners[i] ?? null]));
-    return Object.freeze(candidates.filter((m) => m.type === "task" || ownerOf.get(m) === m.from));
+    const messages = raw.flatMap((value) => { const message = parseQueueEntry(value); return message === null ? [] : [message]; });
+    const owners = await replyOwners(this.redis, agent, messages);
+    return Object.freeze(messages.filter((message, index) => wakesRecipient(agent, message, owners[index] ?? null)));
   }
 
   /**
