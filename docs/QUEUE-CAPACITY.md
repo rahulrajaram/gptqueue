@@ -24,6 +24,11 @@ Classification is evaluated at admission time over the whole current queue,
 so a reply that was waking when it arrived becomes quiet once its outstanding
 key expires or changes. Raw envelopes are never modified.
 
+A non-string `payload.in_reply_to` (for example a number, which only a raw
+writer could store) is quiet in the Lua classifier. `send_message` only
+produces strings: its schema declares `in_reply_to: z.string().optional()`
+(`src/mcp-server/tools/send-message.ts:36-39`).
+
 ## Admission of ordinary sends
 
 `max_size` is the ordinary-send quota for each class:
