@@ -116,10 +116,15 @@ with `run_in_background`, its exit wakes the idle session.
 ## Listing an inbox
 
 `gptqueue-inbox-peek --list [--name N] [--dir D] [--limit K] [--json]` lists an inbox's unclaimed
-messages, oldest first, and its open claims, without consuming anything. An operator or observer
+messages in queue order, and its open claims, without consuming anything. Queue order is mostly
+oldest first, but mail recovered from an expired claim is appended at the tail, so an older message
+can appear after newer ones (and beyond a small `--limit`); `oldest_unclaimed_age_s` always covers
+the whole queue. An operator or observer
 can use it on another agent's mailbox. It names the inbox like the count form: `--name`, `--dir`,
 or this session's identity. It reads only: one MULTI/EXEC of TIME, LLEN, LRANGE on the queue and
 ZRANGE on the claim index, then MGET on outstanding-request keys and HMGET on the claim records.
+The second phase is best effort: a claim acknowledged or renewed in between can show null record
+fields or a later expiry, and `wakes` reflects reply ownership at that later moment.
 `--limit` caps the listed messages (default 50, max 500). `--list` with `--watch` is a usage error
 (exit 2). A Redis failure prints `gptqueue-inbox-peek: <code>: <message>` on stderr and exits 1.
 

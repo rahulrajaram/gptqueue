@@ -114,7 +114,7 @@ const execResults = (replies: [Error | null, unknown][] | null): readonly unknow
   return replies.map(([error, value]) => { if (error) throw error; return value; });
 };
 
-/** List `agent`'s inbox (up to `limit` messages, oldest first) without consuming anything. */
+/** List `agent`'s inbox (up to `limit` messages, in queue order: recovered mail is appended at the tail) without consuming anything. */
 export const listInbox = async (redis: Redis, agent: string, limit: number): Promise<ListResult> => {
   try {
     const queue = SESSION_KEYS.queue(agent);

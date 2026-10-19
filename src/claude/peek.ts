@@ -3,7 +3,7 @@
  *   gptqueue-inbox-peek [--name N] [--dir D] [--json]
  *       print the unclaimed count (or, with --json, every count and the identity)
  *   gptqueue-inbox-peek --list [--name N] [--dir D] [--limit K] [--json]
- *       list the unclaimed messages (oldest first, at most K, default 50, max
+ *       list the unclaimed messages (queue order, at most K, default 50, max
  *       500) and the open claims, marking the mail that would wake the
  *       recipient (the dispatcher's own rule); see inbox-list.ts.
  *   gptqueue-inbox-peek --watch [--name N] [--session ID] [--timeout S] [--block-ms MS]
@@ -37,7 +37,7 @@ import { ensureRuntimeDir, processAlive, readProcess, readWatcherPid, watcherPid
 const USAGE = `Non-consuming gptqueue inbox check; never pops a message.
   gptqueue-inbox-peek [--name N] [--dir D] [--json]          print the pending count
   gptqueue-inbox-peek --list [--name N] [--dir D] [--limit K] [--json]
-      list unclaimed messages oldest first (at most K: default 50, max 500)
+      list unclaimed messages in queue order (at most K: default 50, max 500)
       and open claims. "wakes" marks mail that would wake the recipient: a
       task, or a result/error answering its own outstanding request.
       Status mail never wakes. --list cannot be combined with --watch.
