@@ -23,6 +23,20 @@ export const traceClaimed = async (events: InboxEvents, agent: string, claim: Re
 export const traceAcknowledged = (events: InboxEvents, agent: string, claimId: string): Promise<void> =>
   events.trace(agent, { stage: "task_acknowledged", timestamp: now(), claim_id: claimId });
 
+/**
+ * message_acknowledged per message a subset ack (acknowledge_messages)
+ * settled. Never task_acknowledged: that stage means the WHOLE claim was
+ * acknowledged, and diagnostics read it that way.
+ */
+export const traceMessagesAcknowledged = async (
+  events: InboxEvents, agent: string, claimId: string, messageIds: readonly string[],
+): Promise<void> => {
+  const at = now();
+  for (const id of messageIds) {
+    await events.trace(agent, { stage: "message_acknowledged", timestamp: at, claim_id: claimId, message_id: id });
+  }
+};
+
 /** reply_sent for a sent result/error message. */
 export const traceReplySent = async (
   events: InboxEvents,

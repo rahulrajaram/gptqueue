@@ -12,6 +12,7 @@ import { z } from "zod";
 import { sendMessageSchema } from "../mcp-server/tools/send-message.js";
 import { claimTasksSchema } from "../mcp-server/tools/claim-tasks.js";
 import { acknowledgeTasksSchema } from "../mcp-server/tools/acknowledge-tasks.js";
+import { acknowledgeMessagesSchema } from "../mcp-server/tools/acknowledge-messages.js";
 import { renewClaimSchema } from "../mcp-server/tools/renew-claim.js";
 import { queueStatusSchema } from "../mcp-server/tools/queue-status.js";
 import { listAgentsSchema } from "../mcp-server/tools/list-agents.js";
@@ -347,6 +348,10 @@ export const createOpenCodePlugin = (
     gptqueue_acknowledge_tasks: forwarded(
       "gptqueue_acknowledge_tasks", "acknowledge_tasks",
       "Acknowledge a completed claim after sending required replies.", boundSchema(acknowledgeTasksSchema),
+    ),
+    gptqueue_acknowledge_messages: forwarded(
+      "gptqueue_acknowledge_messages", "acknowledge_messages",
+      "Acknowledge selected messages of a claim after replying to them; the rest stay claimed.", boundSchema(acknowledgeMessagesSchema),
     ),
     gptqueue_renew_claim: forwarded(
       "gptqueue_renew_claim", "renew_claim",

@@ -195,7 +195,7 @@ export const startRegisteredShell = async (
       metadata: { ...registration.metadata, protocol_version: 2,
         tool_names: ["send_message", "receive_message", "list_agents", "get_queue_status",
           "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status",
-          "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] },
+          "acknowledge_messages", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile"] },
     }));
     const transportStarted = lifecycle.elapsed();
     const previousInitialized = server.server.oninitialized;

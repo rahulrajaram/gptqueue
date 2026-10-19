@@ -57,7 +57,11 @@ export type TaskClaimStoreErrorCode =
   | "claim_expired"
   | "budget_exceeded"
   | "store_corrupt"
-  | "dlq_entry_not_found";
+  | "dlq_entry_not_found"
+  | "invalid_message_selector"
+  | "unknown_message"
+  | "ambiguous_claim"
+  | "unreadable_envelope";
 
 export type TaskClaimStoreError = Readonly<{
   code: TaskClaimStoreErrorCode;
@@ -71,6 +75,20 @@ export type ClaimResult =
 export type AcknowledgeResult =
   | Readonly<{ ok: true; acknowledged: number }>
   | Readonly<{ ok: false; error: TaskClaimStoreError }>;
+
+export type AcknowledgeMessagesResult =
+  | Readonly<{
+      ok: true;
+      acknowledged: number;
+      remaining: number;
+      claim_deleted: boolean;
+      /** The acknowledged message ids, in selector order. */
+      message_ids: readonly string[];
+    }>
+  | Readonly<{ ok: false; error: TaskClaimStoreError }>;
+
+/** Most message ids one acknowledge_messages call may select (a claim's max_batch). */
+export const ACK_MESSAGES_MAX = 16;
 
 export type RenewResult =
   | Readonly<{ ok: true; claim_id: string; expires_at: string }>
@@ -141,6 +159,11 @@ export interface AcknowledgeInput {
   readonly session_id: string;
 }
 
+export interface AcknowledgeMessagesInput extends AcknowledgeInput {
+  /** 1..ACK_MESSAGES_MAX distinct message ids, every one in the claim. */
+  readonly message_ids: readonly string[];
+}
+
 export interface RenewInput {
   readonly claim_id: string;
   readonly actor_id: string;
@@ -181,6 +204,7 @@ export class TaskClaimStore {
   private readonly recoverScript: string;
   private readonly batchClaimScript: string;
   private readonly ackScript: string;
+  private readonly ackMessagesScript: string;
   private readonly renewScript: string;
   private readonly requeueScript: string;
   private readonly purgeScript: string;
@@ -193,6 +217,7 @@ export class TaskClaimStore {
     this.recoverScript = claimLuaScript("claims-recover.lua");
     this.batchClaimScript = claimLuaScript("claims-batch-claim.lua");
     this.ackScript = readFileSync(join(LUA_DIR, "claims-ack.lua"), "utf-8");
+    this.ackMessagesScript = readFileSync(join(LUA_DIR, "claims-ack-messages.lua"), "utf-8");
     this.renewScript = claimLuaScript("claims-renew.lua");
     this.requeueScript = claimLuaScript("claims-requeue.lua");
     this.purgeScript = `${purgeActorClaimsLua}
@@ -443,6 +468,64 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
       "not_claim_owner",
       `claim '${input.claim_id}' is owned by another session`
     );
+  }
+
+  /**
+   * Acknowledge SELECTED messages of an outstanding claim (subset ack). The
+   * ownership rule is acknowledge()'s: only the claiming session, and like a
+   * whole-claim ack a late ack of an expired-but-unrecovered claim succeeds.
+   * The remainder keeps its raw order, claimed_at, expires_at and index
+   * score; recovery counters are deleted only for acknowledged messages. A
+   * claim emptied this way is removed from the hash and the index. Every
+   * refusal (empty, duplicate or unknown selector ids, a claim holding two
+   * envelopes with one id, an unreadable envelope that could be the selected
+   * one, or store corruption) writes nothing.
+   */
+  async acknowledgeMessages(input: AcknowledgeMessagesInput): Promise<AcknowledgeMessagesResult> {
+    const ids = input.message_ids;
+    if (ids.length < 1 || ids.length > ACK_MESSAGES_MAX || ids.some((id) => typeof id !== "string" || id.length === 0)) {
+      return fail(
+        "invalid_message_selector",
+        `message_ids must hold 1..${ACK_MESSAGES_MAX} non-empty message ids`
+      );
+    }
+    const [code, a, b, c] = (await this.redis.eval(
+      this.ackMessagesScript,
+      2,
+      CLAIM_KEYS.claims,
+      CLAIM_KEYS.index(input.actor_id),
+      input.claim_id,
+      input.actor_id,
+      input.session_id,
+      ...ids
+    )) as [number, number | string, number?, number?];
+    const claimRef = `claim '${input.claim_id}'`;
+    switch (code) {
+      case 1:
+        return Object.freeze({
+          ok: true as const,
+          acknowledged: Number(a),
+          remaining: Number(b),
+          claim_deleted: c === 1,
+          message_ids: Object.freeze([...ids]),
+        });
+      case 2:
+        return fail("unknown_claim", `no outstanding claim '${input.claim_id}' for actor '${input.actor_id}'`);
+      case 3:
+        return fail("not_claim_owner", `${claimRef} is owned by another session`);
+      case 4:
+        return fail("invalid_message_selector", `message_ids names '${String(a)}' more than once`);
+      case 5:
+        return fail("unknown_message", `${claimRef} holds no message '${String(a)}'`);
+      case 6:
+        return fail("ambiguous_claim", `${claimRef} holds more than one envelope with id '${String(a)}'; refusing to choose`);
+      case 7:
+        return fail("unreadable_envelope", `${claimRef} has no readable message '${String(a)}' but holds an envelope whose id cannot be read; refusing to guess`);
+      case 8:
+        return fail("invalid_message_selector", "message_ids must not be empty");
+      default:
+        return fail("store_corrupt", `${claimRef}: stored state is inconsistent (${String(a)}); nothing was changed`);
+    }
   }
 
   /**

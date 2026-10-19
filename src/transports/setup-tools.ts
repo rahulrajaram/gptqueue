@@ -33,12 +33,13 @@ import {
   acknowledgeTasksSchema,
   acknowledgeTasks,
 } from "../mcp-server/tools/acknowledge-tasks.js";
+import { acknowledgeMessagesSchema, acknowledgeMessages } from "../mcp-server/tools/acknowledge-messages.js";
 import { renewClaimSchema, renewClaim } from "../mcp-server/tools/renew-claim.js";
 import { dlqStatusSchema, dlqStatus } from "../mcp-server/tools/dlq-status.js";
 import { dlqRequeueSchema, dlqRequeue } from "../mcp-server/tools/dlq-requeue.js";
 import { stableToolError } from "../mcp-server/tool-result.js";
 import { InboxEvents } from "../core/inbox-events.js";
-import { traceAcknowledged, traceClaimed, traceReplySent } from "../mcp-server/tool-trace.js";
+import { traceAcknowledged, traceClaimed, traceMessagesAcknowledged, traceReplySent } from "../mcp-server/tool-trace.js";
 
 /**
  * Machine-readable MCP annotations mirroring the prose [safety: ...] prefixes.
@@ -200,6 +201,24 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
       const result = await acknowledgeTasks(redisClient, parsed);
       const agent = redisClient.agentName;
       if (!result.isError && agent) await traceAcknowledged(events, agent, parsed.claim_id);
+      return result;
+    })
+  );
+
+  // registerTool with the whole strict schema (not .shape): the SDK would
+  // otherwise wrap the shape in a non-strict object and strip unknown fields.
+  server.registerTool(
+    "acknowledge_messages",
+    {
+      description: "[safety: writable] Acknowledge selected messages (message_ids, 1-16) of a claim_id held by this session, leaving the rest claimed with the same expiry. Use acknowledge_tasks to acknowledge a whole claim. A claim emptied this way is deleted. Empty, duplicate or unknown ids, or an ambiguous claim, are refused with nothing changed.",
+      inputSchema: acknowledgeMessagesSchema,
+      annotations: WRITABLE,
+    },
+    async (params) => safeToolCall(async () => {
+      const parsed = acknowledgeMessagesSchema.parse(params);
+      const result = await acknowledgeMessages(redisClient, parsed);
+      const agent = redisClient.agentName;
+      if (!result.isError && agent) await traceMessagesAcknowledged(events, agent, parsed.claim_id, parsed.message_ids);
       return result;
     })
   );

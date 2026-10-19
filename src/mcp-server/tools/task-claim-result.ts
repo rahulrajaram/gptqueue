@@ -2,6 +2,7 @@ import { toolResult } from "../tool-result.js";
 import type {
   ClaimResult,
   AcknowledgeResult,
+  AcknowledgeMessagesResult,
   RenewResult,
   DeadLetterEntriesResult,
   RequeueResult,
@@ -40,6 +41,20 @@ export function acknowledgeTasksResult(result: AcknowledgeResult) {
     return errorResult(result);
   }
   return toolResult({ status: "ok", acknowledged: result.acknowledged });
+}
+
+/** Map a TaskClaimStore subset-acknowledge result to an MCP tool result. */
+export function acknowledgeMessagesResult(result: AcknowledgeMessagesResult) {
+  if (!result.ok) {
+    return errorResult(result);
+  }
+  return toolResult({
+    status: "ok",
+    acknowledged: result.acknowledged,
+    remaining: result.remaining,
+    claim_deleted: result.claim_deleted,
+    message_ids: result.message_ids,
+  });
 }
 
 /** Map a TaskClaimStore renew result to an MCP tool result. */

@@ -7,7 +7,7 @@ import { SHELL_TOOL_NAMES } from "../src/registered-shell/tool-names.js";
 describe("registered-shell tool catalog", () => {
   it("registers exactly the tools the shared catalog names, in order", () => {
     const names: string[] = [];
-    const server = { tool: (name: string) => { names.push(name); } } as unknown as McpServer;
+    const server = { tool: (name: string) => { names.push(name); }, registerTool: (name: string) => { names.push(name); } } as unknown as McpServer;
     registerRuntimeTools(server, {} as RedisClient, {} as RuntimeTools);
     expect(names).toEqual([...SHELL_TOOL_NAMES]);
   });

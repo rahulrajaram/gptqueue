@@ -3,10 +3,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RedisClient } from "../mcp-server/redis-client.js";
 import { claimTasks, claimTasksSchema } from "../mcp-server/tools/claim-tasks.js";
 import { acknowledgeTasks, acknowledgeTasksSchema } from "../mcp-server/tools/acknowledge-tasks.js";
+import { acknowledgeMessages, acknowledgeMessagesSchema } from "../mcp-server/tools/acknowledge-messages.js";
 import { renewClaim, renewClaimSchema } from "../mcp-server/tools/renew-claim.js";
 import { stableToolError, toolResult } from "../mcp-server/tool-result.js";
 import { InboxEvents } from "../core/inbox-events.js";
-import { traceAcknowledged, traceClaimed } from "../mcp-server/tool-trace.js";
+import { traceAcknowledged, traceClaimed, traceMessagesAcknowledged } from "../mcp-server/tool-trace.js";
 import { runtimeBindingSchema, type RuntimeBinding } from "./runtime.js";
 import { registerDiagnosticTools } from "./diagnostic-tools.js";
 
@@ -53,5 +54,16 @@ export const registerRuntimeTools = (server: McpServer, client: RedisClient, run
     runtimeBindingSchema.shape, WRITABLE, async (params) => safe(async () => toolResult(await runtime.bind(runtimeBindingSchema.parse(params)))));
   server.tool("get_runtime_status", "Report this connection's exact runtime binding and automatic inbox activation readiness.",
     z.object({}).shape, READ_ONLY, async () => toolResult(runtime.status()));
+  const ackMessagesSchema = acknowledgeMessagesSchema.omit({ session_id: true }).strict();
+  // registerTool with the whole strict schema so unknown fields are refused, not stripped.
+  server.registerTool("acknowledge_messages", {
+    description: "Acknowledge selected messages (message_ids) of your claim after replying to them; the rest stay claimed. Use acknowledge_tasks for the whole claim.",
+    inputSchema: ackMessagesSchema, annotations: WRITABLE,
+  }, async (params) => safe(async () => {
+    const parsed = ackMessagesSchema.parse(params);
+    const result = await acknowledgeMessages(client, parsed);
+    if (!result.isError) await traceMessagesAcknowledged(events, client.requireRegistered(), parsed.claim_id, parsed.message_ids);
+    return result;
+  }));
   registerDiagnosticTools(server, client, runtime);
 };

@@ -224,7 +224,10 @@ export class AgentDiagnostics {
       .map(([, fields]) => Object.fromEntries(Array.from({ length: Math.floor(fields.length / 2) }, (_, i) => [fields[i * 2], fields[i * 2 + 1]])));
     if (status === "unknown_history") {
       const claim = traces.find(t => t.message_id === messageId && t.stage === "task_claimed");
-      const ack = claim && traces.find(t => t.stage === "task_acknowledged" && t.claim_id === claim.claim_id && t.timestamp >= claim.timestamp);
+      // A whole-claim ack covers every message of the claim; a subset ack
+      // (message_acknowledged) covers only the message it names.
+      const ack = claim && traces.find(t => t.claim_id === claim.claim_id && t.timestamp >= claim.timestamp
+        && (t.stage === "task_acknowledged" || (t.stage === "message_acknowledged" && t.message_id === messageId)));
       if (ack) { status = "acknowledged"; claim_id = claim.claim_id; }
     }
     return Object.freeze({ agent, message_id: messageId, status, claim_id, evidence_at: at, snapshot: "bounded_non_atomic" });

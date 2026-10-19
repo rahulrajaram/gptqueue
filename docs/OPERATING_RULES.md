@@ -11,6 +11,15 @@ is redelivered whenever its claim expires without acknowledgement. Your
 handlers must therefore be idempotent or tolerate duplicate processing —
 this is YOUR obligation, not the server's.
 
+To settle part of a claim, use `acknowledge_messages` (`claim_id`,
+`message_ids`): the selected messages are acknowledged and the rest stay in
+the same claim with the same expiry, so they are still redelivered if that
+claim expires. It is a separate tool, not an `acknowledge_tasks` option,
+because an older server would ignore an unknown option and acknowledge the
+whole claim. Any invalid selection (empty, duplicate, unknown or ambiguous
+ids) is refused with nothing changed. Deferring ("parking") tasks beyond the
+claim lifetime is not supported yet.
+
 Producer-side dedup is a different thing: `send_message` with an
 `idempotency_key` prevents the same sender creating duplicate *tasks* on
 retry (bounded to 24 hours). It does not make your handler idempotent.

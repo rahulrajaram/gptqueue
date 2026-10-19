@@ -10,13 +10,19 @@ export const RUNTIME_TOOL_NAMES = Object.freeze([
   "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status",
 ] as const);
 
+/**
+ * Claim-protocol extensions a runtime may use but does not require, so a
+ * newer runtime still works against an older shell server without them.
+ */
+export const OPTIONAL_RUNTIME_TOOL_NAMES = Object.freeze(["acknowledge_messages"] as const);
+
 /** Read-mostly diagnostics; useful but optional. */
 export const DIAGNOSTIC_TOOL_NAMES = Object.freeze([
   "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile",
 ] as const);
 
 /** Every registered-shell tool, runtime first. */
-export const SHELL_TOOL_NAMES = Object.freeze([...RUNTIME_TOOL_NAMES, ...DIAGNOSTIC_TOOL_NAMES] as const);
+export const SHELL_TOOL_NAMES = Object.freeze([...RUNTIME_TOOL_NAMES, ...OPTIONAL_RUNTIME_TOOL_NAMES, ...DIAGNOSTIC_TOOL_NAMES] as const);
 
 /** The runtimes that receive an inbox wake prompt, and how each exposes our tools. */
 export type ToolNamingClient = "codex" | "pi" | "opencode";
