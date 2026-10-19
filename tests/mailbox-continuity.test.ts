@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID, createHash } from "node:crypto";
 import { Redis } from "ioredis";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
@@ -19,6 +19,7 @@ const binding = (id = randomUUID()): RuntimeBinding => ({
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const client of clients.splice(0)) client.forceDisconnect();
   for (const redis of connections.splice(0)) { await flushTestKeys(redis, redisUrl); await redis.quit(); }
 });
@@ -270,6 +271,46 @@ describe("mailbox continuity operator API", () => {
     expect((error as AdoptionRefusedError).refusal).toMatchObject({ code: -5, reason: "source_busy", signal });
     expect((error as Error).message).toMatch(/^Continuity apply refused \(-5\): source_busy/);
     expect(JSON.parse((await redis.get(plan.mappingKey))!).agent).toBe(plan.source);
+  });
+
+  // Merge-gate F6: a stale operator plan is classified the same whether the
+  // preflight reads or the atomic script see the change first.
+  const STALE_PLAN: Array<[string, (redis: Redis, s: { canonical: string; provisional: string; key: string }) => Promise<unknown>, object]> = [
+    ["mapping", (redis, s) => redis.set(s.key, JSON.stringify({ agent: `other-${randomUUID()}`, working_directory: "/workspace" })),
+      { code: -1, reason: "mapping_changed", signal: null }],
+    ["target registration", (redis, s) => redis.hset(SESSION_KEYS.registry, s.canonical, JSON.stringify({ name: s.canonical, changed: true })),
+      { code: -2, reason: "registration_changed", signal: "target_registration" }],
+    ["source registration", (redis, s) => redis.hset(SESSION_KEYS.registry, s.provisional, JSON.stringify({ name: s.provisional, changed: true })),
+      { code: -3, reason: "registration_changed", signal: "source_registration" }],
+  ];
+  it.each(STALE_PLAN)("classifies a changed %s identically in the preflight and in the script", async (_name, change, expected) => {
+    for (const path of ["preflight", "script"] as const) {
+      const { redis, canonical, provisional, b } = await setup();
+      const plan = await prepareContinuity(redis, b, canonical);
+      const s = { canonical, provisional, key: plan.mappingKey };
+      if (path === "preflight") await change(redis, s);
+      else {
+        // The change lands after the preflight reads, just before the atomic script runs.
+        const original = redis.eval.bind(redis) as (...args: unknown[]) => Promise<unknown>;
+        vi.spyOn(redis, "eval").mockImplementationOnce((async (...args: unknown[]) => { await change(redis, s); return original(...args); }) as never);
+      }
+      const error = await rejection(applyContinuity(redis, plan));
+      expect(error, path).toBeInstanceOf(AdoptionRefusedError);
+      expect((error as AdoptionRefusedError).refusal, path).toMatchObject(expected);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("keeps malformed plans and Redis failures separate from refusals", async () => {
+    const { redis, canonical, b } = await setup();
+    const plan = await prepareContinuity(redis, b, canonical);
+    const malformed = await rejection(applyContinuity(redis, { ...plan, mappingKey: "arbitrary:key" }));
+    expect(malformed).toBeInstanceOf(Error);
+    expect(malformed).not.toBeInstanceOf(AdoptionRefusedError);
+    vi.spyOn(redis, "eval").mockRejectedValueOnce(new Error("Connection is closed."));
+    const failed = await rejection(applyContinuity(redis, plan));
+    expect(failed).toMatchObject({ message: "Connection is closed." });
+    expect(failed).not.toBeInstanceOf(AdoptionRefusedError);
   });
 
   // F6: idempotent replay must revalidate the target fingerprint. A target

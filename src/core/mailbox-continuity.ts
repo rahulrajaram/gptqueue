@@ -42,6 +42,13 @@ export const prepareContinuity = async (redis: Redis, binding: RuntimeBinding, t
     targetFingerprint: fingerprint(targetRaw), legacy_adoption: !mapping }));
 };
 
+/** A classified operator refusal for a guard reply (a code, or [code, signal]). */
+const operatorRefusal = (reply: unknown): AdoptionRefusedError => {
+  const refusal = parseGuardReply(reply, OPERATOR_CONTINUITY_REFUSALS);
+  if (!refusal) throw new Error("Continuity guard reply is not a refusal");
+  return new AdoptionRefusedError("Continuity apply refused", refusal);
+};
+
 /** Local operator-only CAS: preserves queues, addresses, envelopes and correlations. */
 export const applyContinuity = async (redis: Redis, plan: ContinuityPlan): Promise<"applied" | "idempotent"> => {
   const p = continuityPlanSchema.parse(plan);
@@ -55,10 +62,13 @@ export const applyContinuity = async (redis: Redis, plan: ContinuityPlan): Promi
   // F6: idempotent replay must revalidate the recorded target fingerprint,
   // not just mapping equality — a target registry entry deleted/recreated or
   // reclaimed between applies must not yield a false success. A changed
-  // fingerprint falls through to the mismatch throw below.
+  // fingerprint falls through to the classified refusals below.
   if (current === desired && targetRaw && fingerprint(targetRaw) === p.targetFingerprint) return "idempotent";
-  if (current !== p.expectedMapping || fingerprint(sourceRaw) !== p.sourceFingerprint || !targetRaw || fingerprint(targetRaw) !== p.targetFingerprint)
-    throw new Error("Continuity fingerprints or mapping changed");
+  // A stale plan is classified exactly like the in-script guard (same codes,
+  // same order), whichever step sees the change first.
+  if (current !== p.expectedMapping) throw operatorRefusal(-1);
+  if (!targetRaw || fingerprint(targetRaw) !== p.targetFingerprint) throw operatorRefusal([-2, "target_registration"]);
+  if (fingerprint(sourceRaw) !== p.sourceFingerprint) throw operatorRefusal([-3, "source_registration"]);
   if ((!p.source) !== p.legacy_adoption) throw new Error("Invalid legacy adoption plan");
   const wrapperKey = SESSION_KEYS.wrapperClaim;
   // D5: the occupied() guard is generated from the shared signal table
