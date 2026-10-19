@@ -162,11 +162,11 @@ describe("Codex binding supervision (WK-6)", () => {
 
 describe("get_runtime_status while unbound (WK-6)", () => {
   const retrying: CodexBindingState = { readiness: "unbound_retrying", binding_attempts: 31,
-    next_attempt_at: "2026-10-06T05:00:30.000Z", last_binding_outcome: "daemon_unavailable" };
+    next_attempt_at: "2026-10-06T05:00:30.000Z", last_attempt_at: "2026-10-06T05:00:00.000Z", last_binding_outcome: "daemon_unavailable" };
   it("reports unbound_retrying with the next attempt time, and nothing once a runtime is bound", () => {
     const unbound = { status: "ok", agent, activation_ready: false, runtime: null };
     expect(withBindingState(unbound, retrying)).toEqual({ ...unbound, readiness: "unbound_retrying", binding_attempts: 31,
-      next_attempt_at: "2026-10-06T05:00:30.000Z", last_binding_outcome: "daemon_unavailable" });
+      next_attempt_at: "2026-10-06T05:00:30.000Z", last_attempt_at: "2026-10-06T05:00:00.000Z", last_binding_outcome: "daemon_unavailable" });
     const bound = { status: "ok", agent, activation_ready: true, runtime: { runtime_id: own } };
     expect(withBindingState(bound, retrying)).toEqual(bound);
     expect(withBindingState(unbound, undefined)).toEqual(unbound);
@@ -228,7 +228,7 @@ describe("an incomplete hook bind does not stop binding supervision (review roun
 
   it("get_runtime_status reports binding_incomplete for a runtime without a live dispatcher", () => {
     const state: CodexBindingState = { readiness: "unbound_retrying", binding_attempts: 2,
-      next_attempt_at: "2026-10-06T06:00:00.000Z", last_binding_outcome: "bind_failed" };
+      next_attempt_at: "2026-10-06T06:00:00.000Z", last_attempt_at: "2026-10-06T05:59:30.000Z", last_binding_outcome: "bind_failed" };
     const incomplete = { status: "ok", agent, activation_ready: false, runtime: { runtime_id: own } };
     expect(withBindingState(incomplete, state)).toMatchObject({ readiness: "binding_incomplete", binding_attempts: 2,
       next_attempt_at: "2026-10-06T06:00:00.000Z", last_binding_outcome: "bind_failed" });

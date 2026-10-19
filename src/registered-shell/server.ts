@@ -212,14 +212,15 @@ export const startRegisteredShell = async (
     shutdown.signal.throwIfAborted();
     if (options.client === "codex") {
       lifecycle.emit({ event: "native_binding_started", phase: "binding", session_id: sessionId });
+      // Status follows every attempt; the lifecycle log only state changes.
+      const onProgress = (state: CodexBindingState) => { bindingState = state; };
       const onState = (state: CodexBindingState) => {
-        bindingState = state;
         lifecycle.emit({ ...bindingLifecycleEntry(state, runtime.status()), session_id: sessionId });
       };
       const provisional = redis.requireRegistered();
       // The current name: a bind may adopt a different mailbox (COR-F4).
       void bootstrapCodexBinding(runtime, () => redis.agentName ?? provisional, identity.working_directory, shutdown.signal,
-        undefined, { onState })
+        undefined, { onState, onProgress })
         .catch(() => lifecycle.emit({ event: "native_binding_unavailable", phase: "binding",
           session_id: sessionId, code: "native_transport_error" }));
     }

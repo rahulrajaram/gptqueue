@@ -280,9 +280,9 @@ describe("binding supervision with a refused adoption", () => {
     const status = { status: "ok", agent: "provisional", activation_ready: false, dispatcher: "off", readiness: "awaiting_adoption",
       continuity, runtime: { client: "codex", runtime_id: "r", epoch: "r", working_directory: "/w" } };
     const retrying: CodexBindingState = { readiness: "binding_incomplete", binding_attempts: 7,
-      next_attempt_at: "2026-10-18T19:41:00.000Z", last_binding_outcome: "adoption_refused" };
+      next_attempt_at: "2026-10-18T19:41:00.000Z", last_attempt_at: "2026-10-18T19:40:30.000Z", last_binding_outcome: "adoption_refused" };
     expect(withBindingState(status, retrying)).toEqual({ ...status, binding_attempts: 7,
-      next_attempt_at: "2026-10-18T19:41:00.000Z", last_binding_outcome: "adoption_refused" });
+      next_attempt_at: "2026-10-18T19:41:00.000Z", last_attempt_at: "2026-10-18T19:40:30.000Z", last_binding_outcome: "adoption_refused" });
     // Without a pending adoption the supervisor's readiness still applies.
     const { readiness: _readiness, ...unrefused } = status;
     expect(withBindingState({ ...unrefused, continuity: null }, retrying)).toMatchObject({ readiness: "binding_incomplete", continuity: null });
@@ -327,6 +327,47 @@ describe("binding supervision with a refused adoption", () => {
       { event: "native_binding_retrying", phase: "binding", code: "adoption_refused", reason: "target_occupied", signal: "claims_index", target: "bound-target" },
       { event: "native_binding_ready", phase: "binding", code: "bound" },
     ]);
+  });
+
+  it("status stays current across unchanged refusals while the log records the change once (F3)", async () => {
+    const own = "01a10062-ae13-76e3-8760-5289291f4d03";
+    const rpc = {
+      close: vi.fn(async () => undefined),
+      request: vi.fn(async (method: string, params: Record<string, unknown>) => {
+        if (method === "thread/loaded/list") return { data: [own] };
+        if (method === "thread/read") return { thread: { id: params.threadId, cwd: "/w" } };
+        return { structuredContent: { status: "ok", agent: "provisional", runtime: null } };
+      }),
+    };
+    const stop = new AbortController();
+    let attempts = 0;
+    let clock = Date.parse("2026-10-19T00:00:00Z");
+    const runtime = {
+      status: () => ({ status: "ok", agent: "provisional", activation_ready: false, dispatcher: "off",
+        readiness: attempts ? "awaiting_adoption" : undefined, continuity: attempts ? { ...continuity, signal: "heartbeat" } : null,
+        runtime: attempts ? { runtime_id: own } : null }),
+      bind: vi.fn(async () => {
+        if (++attempts === 3) stop.abort();
+        throw new RuntimeMailboxAdoptionRefused(new AdoptionRefusedError("Continuity adoption refused",
+          { code: -5, reason: "target_occupied", signal: "heartbeat", recheckAfterMs: null }), "bound-target");
+      }),
+    };
+    const statuses: Array<Record<string, unknown>> = [];
+    const logged: Array<Record<string, unknown>> = [];
+    expect(await bootstrapCodexBinding(runtime, "provisional", "/w", stop.signal, rpc, {
+      fastAttempts: 10, fastDelayMs: 1, random: () => 1, now: () => (clock += 1_000),
+      onProgress: (state) => statuses.push(withBindingState(runtime.status(), state)),
+      onState: (state) => logged.push({ ...bindingLifecycleEntry(state, runtime.status()) }),
+    })).toBe(false);
+    // Every attempt refreshes the observable retry state ...
+    const retries = statuses.filter((s) => typeof s.binding_attempts === "number" && (s.binding_attempts as number) > 0);
+    expect(retries.map((s) => s.binding_attempts)).toEqual([1, 2, 3]);
+    expect(new Set(retries.map((s) => s.next_attempt_at)).size).toBe(3);
+    expect(new Set(retries.map((s) => s.last_attempt_at)).size).toBe(3);
+    for (const s of retries) expect(s).toMatchObject({ readiness: "awaiting_adoption", last_binding_outcome: "adoption_refused", continuity: { signal: "heartbeat" } });
+    // ... while three identical refusals log once (plus the start and the stop).
+    expect(logged.filter((e) => e.code === "adoption_refused" && e.event === "native_binding_retrying")).toHaveLength(1);
+    expect(logged.map((e) => e.event)).toEqual(["native_binding_retrying", "native_binding_retrying", "native_binding_stopped"]);
   });
 
   it("an infrastructure bind failure keeps the bind_failed outcome", async () => {

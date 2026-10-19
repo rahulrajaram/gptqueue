@@ -37,6 +37,8 @@ export type CodexBindingState = Readonly<{
   readiness: "unbound_retrying" | "binding_incomplete" | "bound" | "stopped";
   binding_attempts: number;
   next_attempt_at: string | null;
+  /** When the last attempt finished; updated on every attempt, even when nothing is logged. */
+  last_attempt_at: string | null;
   /** Why the last attempt did not bind (a stable code, never daemon text). */
   last_binding_outcome: "no_unique_owned_thread" | "daemon_unavailable" | "bind_failed" | "adoption_refused" | "bound" | null;
 }>;
@@ -51,6 +53,12 @@ export type CodexBootstrapOptions = Readonly<{
   now?: () => number;
   /** Every state change; a caller logs these (never once per attempt). */
   onState?: (state: CodexBindingState) => void;
+  /**
+   * Every attempt's state, including unchanged retries that onState skips:
+   * the externally observable retry status (binding_attempts, next_attempt_at,
+   * last_attempt_at) must stay current while duplicate log lines are suppressed.
+   */
+  onProgress?: (state: CodexBindingState) => void;
 }>;
 
 /**
@@ -76,8 +84,10 @@ export const bootstrapCodexBinding = async (
   const random = options.random ?? Math.random;
   const now = options.now ?? Date.now;
   let state: CodexBindingState = Object.freeze({
-    readiness: "unbound_retrying", binding_attempts: 0, next_attempt_at: null, last_binding_outcome: null });
-  const publish = (next: CodexBindingState) => { state = next; options.onState?.(next); };
+    readiness: "unbound_retrying", binding_attempts: 0, next_attempt_at: null, last_attempt_at: null, last_binding_outcome: null });
+  // observe: every attempt (status); publish: also a state change (log).
+  const observe = (next: CodexBindingState) => { state = next; options.onProgress?.(next); };
+  const publish = (next: CodexBindingState) => { observe(next); options.onState?.(next); };
   publish(state);
   // Bound means activation-ready (runtime AND live dispatcher), never merely a
   // runtime recorded by a bind that may still fail (restore/dispatcher start).
@@ -113,19 +123,21 @@ export const bootstrapCodexBinding = async (
         outcome = "daemon_unavailable";
       }
       if (outcome === "bound") {
-        publish(Object.freeze({ readiness: "bound", binding_attempts: attempt + 1, next_attempt_at: null, last_binding_outcome: "bound" }));
+        publish(Object.freeze({ readiness: "bound", binding_attempts: attempt + 1, next_attempt_at: null,
+          last_attempt_at: new Date(now()).toISOString(), last_binding_outcome: "bound" }));
         return true;
       }
       const backoff = attempt + 1 < fastAttempts ? fastDelay
         : Math.min(maxBackoff, fastDelay * 2 ** Math.min(attempt + 1 - fastAttempts + 1, 20));
       const wait = Math.max(1, Math.round(backoff * (0.5 + random() / 2)));
+      const at = now();
       const next = Object.freeze({ readiness: midBind() ? "binding_incomplete" as const : "unbound_retrying" as const, binding_attempts: attempt + 1,
-        next_attempt_at: new Date(now() + wait).toISOString(), last_binding_outcome: outcome });
+        next_attempt_at: new Date(at + wait).toISOString(), last_attempt_at: new Date(at).toISOString(), last_binding_outcome: outcome });
       // State changes only: a new outcome, a new refusal (target, reason or signal), or the switch from fast attempts to backoff.
       const refusedNow = outcome === "adoption_refused" ? refusal() : "";
       const refusalChanged = refusedNow !== lastRefusal;
       lastRefusal = refusedNow;
-      if (outcome !== state.last_binding_outcome || refusalChanged || next.readiness !== state.readiness || attempt + 1 === fastAttempts) publish(next); else state = next;
+      if (outcome !== state.last_binding_outcome || refusalChanged || next.readiness !== state.readiness || attempt + 1 === fastAttempts) publish(next); else observe(next);
       wake = new AbortController();
       await delay(wait, undefined, { signal: AbortSignal.any([signal, wake.signal]) }).catch(() => undefined);
     }
@@ -145,7 +157,8 @@ export const withBindingState = (
 ): Record<string, unknown> => state && state.readiness !== "stopped" && state.readiness !== "bound" && status.activation_ready !== true
   // A runtime recorded without a live dispatcher is an incomplete bind, not readiness.
   ? { ...status, readiness: status.readiness === "awaiting_adoption" ? "awaiting_adoption" : status.runtime ? "binding_incomplete" : "unbound_retrying",
-    binding_attempts: state.binding_attempts, next_attempt_at: state.next_attempt_at, last_binding_outcome: state.last_binding_outcome }
+    binding_attempts: state.binding_attempts, next_attempt_at: state.next_attempt_at, last_attempt_at: state.last_attempt_at,
+    last_binding_outcome: state.last_binding_outcome }
   : status;
 
 /**
