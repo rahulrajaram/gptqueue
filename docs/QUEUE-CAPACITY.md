@@ -17,8 +17,16 @@ the inbox dispatcher uses to decide whether mail wakes its recipient
   (`gptq:outstanding:<inbox>:<in_reply_to>` equals the sender).
 - **Quiet:** everything else: `status`, `ping`, unowned or stale replies
   (the outstanding key expired or names someone else), mail addressed to
-  another name, and malformed entries (not JSON, not an object, or missing a
-  string `id` or a `payload`).
+  another name, and malformed entries that still decode as JSON (not an
+  object, or missing a string `id` or a `payload`).
+- **Undecodable entries count as waking.** The admission check decodes with
+  Redis's cjson, which rejects some text `JSON.parse` accepts (an escaped
+  unpaired surrogate, nesting past its depth limit). Consumers may wake for
+  such an entry, so admission counts every entry it cannot decode as waking
+  and never undercounts the mail consumers act on. No gptqueue writer
+  produces one, since every ordinary send cjson-decodes its envelope; the cost
+  is that undecodable junk written into an inbox by hand occupies waking
+  capacity.
 
 Classification is evaluated at admission time over the whole current queue,
 so a reply that was waking when it arrived becomes quiet once its outstanding
@@ -45,8 +53,10 @@ Quiet mail therefore never refuses waking mail. While classification is
 stable, ordinary sends bound an inbox at about `2 x max_size` entries. That
 figure is not a general bound: when an owned reply's outstanding key expires
 or changes owner, the reply turns quiet and frees a waking slot, so ownership
-changes alone can let ordinary sends grow an inbox beyond `2 x max_size`, up
-to the 1024-entry ceiling below. Admission, the classification scan
+changes alone can let ordinary sends grow an inbox beyond `2 x max_size`,
+until it passes the 1024-entry ceiling below. The ceiling is a pre-send
+threshold: a send that finds exactly 1024 entries is still evaluated, so an
+inbox can reach 1025. Admission, the classification scan
 and the enqueue are one atomic Lua script. A refused send writes nothing: no
 queue entry, metadata, inbox event, task ledger, answered marker,
 outstanding key or idempotency record. An idempotent retry of a send that was

@@ -208,13 +208,13 @@ describe("waking admission (real Lua)", () => {
     expect(await redis.llen(SESSION_KEYS.queue(to))).toBe(1025);
   });
 
-  it("(j) malformed entries count as quiet", async () => {
+  it("(j) decodable malformed entries count as quiet", async () => {
     const to = mailbox();
     const store = new MailboxStore(redis, redis, 2);
     await redis.set(SESSION_KEYS.outstanding(to, "r-num"), "peer");
     track(SESSION_KEYS.outstanding(to, "r-num"));
     await legacy(to, [
-      "not json", "[1,2]", "42", "null", JSON.stringify({ to, type: "task", payload: { content: "x" } }),
+      "[1,2]", "42", "null", "true", JSON.stringify({ to, type: "task", payload: { content: "x" } }),
       JSON.stringify({ id: "x", to, type: "task" }), JSON.stringify({ id: "x", to, type: "task", payload: null }),
       JSON.stringify({ id: "x", to, type: "task", payload: 0 }), JSON.stringify({ id: 7, to, type: "task", payload: {} }),
       JSON.stringify({ ...envelope("someone-else", "task") }),
@@ -229,13 +229,13 @@ describe("waking admission (real Lua)", () => {
   it("(k) get_queue_status reports waking and quiet counts", async () => {
     const to = mailbox();
     const store = new MailboxStore(redis, redis, BOUND);
-    await legacy(to, [envelope(to, "task"), await owned(to), envelope(to, "status"), envelope(to, "result", { in_reply_to: "gone" }), "junk"]);
+    await legacy(to, [envelope(to, "task"), await owned(to), envelope(to, "status"), envelope(to, "result", { in_reply_to: "gone" }), "[]"]);
     expect(await statusOf(store, to)).toEqual({ agent: to, depth: 5, max_size: BOUND, waking_count: 2, quiet_count: 3 });
     const empty = mailbox();
     expect(await statusOf(store, empty)).toMatchObject({ depth: 0, waking_count: 0, quiet_count: 0 });
   });
 
-  it("the Lua classifier agrees with wakesRecipient on every entry shape", async () => {
+  it("the Lua classifier agrees with wakesRecipient on every entry both decoders accept", async () => {
     const to = mailbox();
     const lib = readFileSync(join(LUA_DIR, "waking-admission-lib.lua"), "utf8");
     const classify = `${lib}\nlocal out = {}\nfor i, raw in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do out[i] = adm_entry_wakes(raw, ARGV[1], ARGV[2]) and 1 or 0 end\nreturn out`;
@@ -250,7 +250,7 @@ describe("waking admission (real Lua)", () => {
       { ...live, type: "error" }, { ...live, from: "other" }, { ...live, to: "elsewhere" },
       envelope(to, "result", { in_reply_to: "" }), envelope(to, "result", { in_reply_to: wrongType }),
       envelope(to, "error", { in_reply_to: randomUUID() }), { ...envelope(to, "task"), payload: { content: "" } },
-    ].map((m) => JSON.stringify(m)).concat(["", "x", "[]", "{}", "1", "true", "null", JSON.stringify({ id: "a", to, type: "task", payload: [] }),
+    ].map((m) => JSON.stringify(m)).concat(["[]", "{}", "1", "true", "null", JSON.stringify({ id: "a", to, type: "task", payload: [] }),
       JSON.stringify({ id: "a", to, type: "task", payload: "s" }), JSON.stringify({ id: "a", to, type: "result", from: "peer", payload: "s" })]);
     await redis.rpush(SESSION_KEYS.queue(to), ...entries);
     const lua = (await redis.eval(classify, 1, SESSION_KEYS.queue(to), to, OUTSTANDING_PREFIX)) as number[];
@@ -260,6 +260,38 @@ describe("waking admission (real Lua)", () => {
     const ts = parsed.map((m, i) => (m !== null && wakesRecipient(to, m, ownerKeys[i] ?? null) ? 1 : 0));
     expect(lua).toEqual(ts);
     expect(ts.filter((v) => v === 1).length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("(F5) entries cjson cannot decode count as waking, so admission never undercounts consumers", async () => {
+    const to = mailbox();
+    const store = new MailboxStore(redis, redis, BOUND);
+    const deep = (depth: number) => "[".repeat(depth) + "]".repeat(depth);
+    const task = (payloadJson: string) => `{"id":"${randomUUID()}","from":"peer","to":${JSON.stringify(to)},"type":"task","payload":${payloadJson}}`;
+    // Raw text, not JSON.stringify: these exercise decoder acceptance limits.
+    const cases: Record<string, { raw: string; lua: 0 | 1 | null }> = {
+      unpaired_surrogate_task: { raw: task('{"content":"\\ud800"}'), lua: 1 },
+      too_deep_task: { raw: task(`{"content":"d","n":${deep(1100)}}`), lua: 1 },
+      not_json: { raw: "x", lua: 1 },
+      empty: { raw: "", lua: 1 },
+      hex_number_task: { raw: task('{"content":"h","n":0x10}'), lua: null }, // cjson may accept what JSON.parse rejects
+    };
+    for (const [name, { raw, lua }] of Object.entries(cases)) {
+      await redis.del(SESSION_KEYS.queue(to));
+      await redis.rpush(SESSION_KEYS.queue(to), raw);
+      const luaWakes = (await store.status(to))[0]!.waking_count === 1;
+      const message = parseQueueEntry(raw);
+      const tsWakes = message !== null && wakesRecipient(to, message, (await replyOwners(redis, to, [message]))[0] ?? null);
+      expect({ name, undercount: tsWakes && !luaWakes }).toEqual({ name, undercount: false });
+      if (lua !== null) expect({ name, lua: luaWakes ? 1 : 0 }).toEqual({ name, lua });
+    }
+    // The surrogate task really wakes consumers, and occupies the only waking slot.
+    const surrogate = cases.unpaired_surrogate_task!.raw;
+    expect(parseQueueEntry(surrogate)?.type).toBe("task");
+    const tight = new MailboxStore(redis, redis, 1);
+    await redis.del(SESSION_KEYS.queue(to));
+    await redis.rpush(SESSION_KEYS.queue(to), surrogate);
+    expect(await tight.sendWithOutcome(envelope(to, "task"), 1)).toMatchObject({ status: "full", reason: "waking_full" });
+    expect(await redis.llen(SESSION_KEYS.queue(to))).toBe(1);
   });
 
   it("send_message reports QUEUE_FULL with its reason; get_queue_status shows the counts", async () => {

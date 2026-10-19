@@ -6,9 +6,15 @@
 --   * waking mail (a task, or a result/error that answers the recipient's own
 --     outstanding request) is admitted iff fewer than max_size WAKING entries
 --     are queued, whatever the total length, so quiet mail never refuses it;
---   * quiet mail (everything else, including malformed entries) is admitted
---     iff LLEN < max_size, exactly the rule before waking admission.
--- Ordinary sends therefore bound a queue at about 2 x max_size. Lossless
+--   * quiet mail (everything else, including entries that decode but are
+--     malformed) is admitted iff LLEN < max_size, exactly the rule before
+--     waking admission.
+-- While classification is stable, ordinary sends bound a queue at about
+-- 2 x max_size; a reply turning quiet (its outstanding key expiring or
+-- changing) frees a waking slot, so ownership changes alone can grow a queue
+-- further, until the ceiling. ADM_CEILING is a pre-send threshold: a send
+-- that finds exactly ADM_CEILING entries is still evaluated, so a queue can
+-- reach ADM_CEILING + 1. Lossless
 -- writers (claim recovery/requeue, DLQ requeue, provisional forwarding,
 -- rename migration, sweeper replies) do not run this check and may overshoot;
 -- the classification counts the whole actual queue, never a prefix. Above
@@ -17,7 +23,14 @@
 -- adm_entry_wakes is the Lua twin of wakesRecipient/replyOwnerKey/
 -- parseQueueEntry in src/core/inbox-events.ts (tests/waking-admission.test.ts
 -- checks they agree): a reply wakes only when `from` and `payload.in_reply_to`
--- are non-empty strings and the outstanding owner equals `from`. Refusal reasons: 'waking_full' | 'full' | 'oversize'.
+-- are non-empty strings and the outstanding owner equals `from`. The twins
+-- agree on every entry both decoders accept. An entry cjson cannot decode
+-- counts as WAKING: JSON.parse accepts some text cjson rejects (an escaped
+-- unpaired surrogate, nesting past cjson's depth limit), and consumers may
+-- wake for such an entry, so admission must never count it quiet. No in-repo
+-- writer produces one (every ordinary push cjson-decodes its envelope); the
+-- cost is that undecodable junk written by hand occupies waking capacity.
+-- Refusal reasons: 'waking_full' | 'full' | 'oversize'.
 local ADM_CEILING = 1024
 
 -- JavaScript truthiness of a decoded JSON value (cjson.null is JSON null).
@@ -31,10 +44,12 @@ local function adm_owner(key)
   return redis.call('GET', key)
 end
 
--- Whether a raw queue entry currently wakes `mailbox`. Malformed is quiet.
+-- Whether a raw queue entry currently wakes `mailbox`. Undecodable counts as
+-- waking (never undercount consumers); decodable but malformed is quiet.
 local function adm_entry_wakes(raw, mailbox, prefix)
   local ok, entry = pcall(cjson.decode, raw)
-  if not ok or type(entry) ~= 'table' then return false end
+  if not ok then return true end
+  if type(entry) ~= 'table' then return false end
   if entry.to ~= mailbox or type(entry.id) ~= 'string' or not adm_truthy(entry.payload) then return false end
   if entry.type == 'task' then return true end
   if entry.type ~= 'result' and entry.type ~= 'error' then return false end
