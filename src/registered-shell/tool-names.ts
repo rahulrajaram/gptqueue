@@ -13,12 +13,13 @@ export const RUNTIME_TOOL_NAMES = Object.freeze([
 /**
  * Claim-protocol extensions a runtime may use but does not require, so a
  * newer runtime still works against an older shell server without them.
+ * dlq_requeue restores one of the caller's own dead-lettered messages.
  */
-export const OPTIONAL_RUNTIME_TOOL_NAMES = Object.freeze(["acknowledge_messages"] as const);
+export const OPTIONAL_RUNTIME_TOOL_NAMES = Object.freeze(["acknowledge_messages", "dlq_requeue"] as const);
 
 /** Read-mostly diagnostics; useful but optional. */
 export const DIAGNOSTIC_TOOL_NAMES = Object.freeze([
-  "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile",
+  "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile", "dlq_status",
 ] as const);
 
 /** Every registered-shell tool, runtime first. */

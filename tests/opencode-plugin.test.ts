@@ -115,6 +115,7 @@ describe("OpenCode plugin frontend", () => {
       "gptqueue_claim_tasks", "gptqueue_acknowledge_tasks", "gptqueue_acknowledge_messages", "gptqueue_renew_claim",
       "gptqueue_send_message", "gptqueue_receive_message", "gptqueue_get_queue_status", "gptqueue_list_agents",
       "gptqueue_get_runtime_status", "gptqueue_find_agents", "gptqueue_get_agent_details", "gptqueue_get_delivery_status",
+      "gptqueue_dlq_status", "gptqueue_dlq_requeue",
     ]);
     expect(plugin.tool.gptqueue_claim_tasks!.args).not.toHaveProperty("session_id");
     const output = { system: [] as string[] };

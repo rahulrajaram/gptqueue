@@ -7,6 +7,7 @@ import type { RuntimeTools } from "./runtime-tools.js";
 import { AgentDiagnostics } from "../core/agent-diagnostics.js";
 import { SESSION_KEYS } from "../core/keys.js";
 import { discoveryPagingShape } from "../core/agent-discovery.js";
+import { dlqStatus, dlqStatusSchema } from "../mcp-server/tools/dlq-status.js";
 
 /** Machine-readable MCP annotations mirroring the prose [safety: ...] prefixes. */
 const READ_ONLY = { readOnlyHint: true } as const;
@@ -23,6 +24,8 @@ export const findAgentsSchema = z.object({ query: z.string().max(200).optional()
 }).strict();
 export const agentDetailsSchema = z.object({ agent: z.string().min(1).max(500).optional(), probe: z.boolean().default(false) }).strict();
 export const deliveryStatusSchema = agentDetailsSchema.extend({ message_id: z.string().min(1).max(200) }).strict();
+/** Caller-bound: the bound mailbox only, never a session_id or target agent. */
+export const boundDlqStatusSchema = dlqStatusSchema.omit({ session_id: true }).strict();
 
 /** Additive tools: original messaging/discovery schemas retain their contracts. */
 export const registerDiagnosticTools = (server: McpServer, client: RedisClient, runtime: RuntimeTools): void => {
@@ -64,4 +67,12 @@ export const registerDiagnosticTools = (server: McpServer, client: RedisClient, 
       await client.adapterConnection.set(SESSION_KEYS.agentProfile(client.requireRegistered()), JSON.stringify(profile));
       return { status: "ok", agent: client.requireRegistered(), profile };
     }));
+  // registerTool with the whole strict schema so unknown fields are refused, not stripped.
+  server.registerTool("dlq_status", {
+    description: "[safety: readonly] List your own bound mailbox's dead-lettered messages, newest first (limit default 50, max 1000), with dropped counting entries the DLQ bound discarded. Restore one with dlq_requeue.",
+    inputSchema: boundDlqStatusSchema, annotations: READ_ONLY,
+  }, async (params) => {
+    try { return await dlqStatus(client, boundDlqStatusSchema.parse(params)); }
+    catch (error) { return stableToolError(error); }
+  });
 };

@@ -11,4 +11,9 @@ describe("registered-shell tool catalog", () => {
     registerRuntimeTools(server, {} as RedisClient, {} as RuntimeTools);
     expect(names).toEqual([...SHELL_TOOL_NAMES]);
   });
+
+  it("includes caller-bound DLQ self-service (dlq_status, dlq_requeue)", () => {
+    expect(SHELL_TOOL_NAMES).toContain("dlq_status");
+    expect(SHELL_TOOL_NAMES).toContain("dlq_requeue");
+  });
 });

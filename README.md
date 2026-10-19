@@ -69,7 +69,7 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 
 ### Registered shell (additional tools)
 
-The registered shell (`bin/gptqueue-session`) registers four additive tools on top of the table above:
+The registered shell (`bin/gptqueue-session`) registers six additive tools on top of the table above:
 
 | Tool | Description |
 |---|---|
@@ -77,6 +77,10 @@ The registered shell (`bin/gptqueue-session`) registers four additive tools on t
 | `get_agent_details` | Inspect an exact mailbox, runtime binding, published capabilities, declared role and activation readiness. Omit `agent` for the current connection. No message content or credentials |
 | `get_delivery_status` | Inspect one message's queue, claim, acknowledgement or dead-letter evidence without consuming it. Missing retained evidence means unknown, not delivered |
 | `set_agent_profile` | Declare this connection's readable label, purpose and kind. A declaration is a discovery hint, never proof of controller authority or permission to take over another mailbox |
+| `dlq_status` | The general `dlq_status`, bound to this connection's mailbox: lists only your own dead-lettered messages (`limit`, default 50, range 1–1000). It accepts no `session_id` or target mailbox; unknown fields are refused |
+| `dlq_requeue` | The general `dlq_requeue`, bound to this connection's mailbox: restores one of your own dead-lettered messages (`message_id`) to your inbox tail with a fresh recovery budget. Another mailbox's entry is `dlq_entry_not_found`; unknown fields are refused |
+
+These two are the self-serve recovery path for a runtime whose tasks were dead-lettered: inspect with `dlq_status`, restore with `dlq_requeue`, then claim as usual. OpenCode exposes them as `gptqueue_dlq_status` and `gptqueue_dlq_requeue`.
 
 `package.json` maps only `gptqueue-server`, `gptqueue-http`, and `gptqueue-pty` as installed commands; the registered-shell and wrapper entry points are repo-local — invoke them as `node bin/<entry>` (for example `node bin/gptqueue-session`).
 

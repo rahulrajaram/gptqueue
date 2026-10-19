@@ -33,14 +33,15 @@ const tsFiles = (dir: string): string[] =>
 const TOOL_SITES_BASELINE: Record<string, number> = {
   "src/experimental-wrapper/bridge.ts": 4,
   "src/experimental-wrapper/pi-tools.ts": 2,
-  "src/registered-shell/diagnostic-tools.ts": 4,
+  "src/registered-shell/diagnostic-tools.ts": 5,
   "src/registered-shell/pi-extension.ts": 2,
-  "src/registered-shell/runtime-tools.ts": 6,
+  "src/registered-shell/runtime-tools.ts": 7,
   "src/transports/setup-tools.ts": 18,
 };
 // Since f4a22d0 the only additions are the claim-protocol tool
 // acknowledge_messages (subset ack), one site each in runtime-tools.ts and
-// setup-tools.ts; agent tracking itself still adds none.
+// setup-tools.ts, and the sidecar's caller-bound dlq_requeue (runtime-tools.ts)
+// and dlq_status (diagnostic-tools.ts); agent tracking itself still adds none.
 const TOOL_SITE = /server\.tool\(|registerTool\(|\.tool\("/g;
 
 describe("AT12 overhead non-regression", () => {
@@ -56,7 +57,8 @@ describe("AT12 overhead non-regression", () => {
   it("keeps the registered-shell tool catalog unchanged", () => {
     expect([...SHELL_TOOL_NAMES]).toEqual([
       "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status",
-      "acknowledge_messages", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile",
+      "acknowledge_messages", "dlq_requeue", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile",
+      "dlq_status",
     ]);
   });
 

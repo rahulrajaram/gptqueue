@@ -5,6 +5,7 @@ import { claimTasks, claimTasksSchema } from "../mcp-server/tools/claim-tasks.js
 import { acknowledgeTasks, acknowledgeTasksSchema } from "../mcp-server/tools/acknowledge-tasks.js";
 import { acknowledgeMessages, acknowledgeMessagesSchema } from "../mcp-server/tools/acknowledge-messages.js";
 import { renewClaim, renewClaimSchema } from "../mcp-server/tools/renew-claim.js";
+import { dlqRequeue, dlqRequeueSchema } from "../mcp-server/tools/dlq-requeue.js";
 import { stableToolError, toolResult } from "../mcp-server/tool-result.js";
 import { InboxEvents } from "../core/inbox-events.js";
 import { traceAcknowledged, traceClaimed, traceMessagesAcknowledged } from "../mcp-server/tool-trace.js";
@@ -65,5 +66,11 @@ export const registerRuntimeTools = (server: McpServer, client: RedisClient, run
     if (!result.isError) await traceMessagesAcknowledged(events, client.requireRegistered(), parsed.claim_id, parsed.message_ids);
     return result;
   }));
+  // Caller-bound like claim_tasks: no session_id or target mailbox is accepted.
+  const requeueSchema = dlqRequeueSchema.omit({ session_id: true }).strict();
+  server.registerTool("dlq_requeue", {
+    description: "[safety: writable] Move one of your own dead-lettered messages (message_id from dlq_status) back to your bound inbox tail with a fresh recovery budget. Not found is a structured dlq_entry_not_found error.",
+    inputSchema: requeueSchema, annotations: WRITABLE,
+  }, async (params) => safe(() => dlqRequeue(client, requeueSchema.parse(params))));
   registerDiagnosticTools(server, client, runtime);
 };

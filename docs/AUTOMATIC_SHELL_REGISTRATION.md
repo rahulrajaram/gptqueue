@@ -275,7 +275,11 @@ checks native transport and execution without using external model credentials.
 ### Discovering the intended peer and diagnosing delivery
 
 New registered sidecars publish protocol version 2 and add `find_agents`,
-`get_agent_details`, `get_delivery_status`, and `set_agent_profile`. The original
+`get_agent_details`, `get_delivery_status`, `set_agent_profile`, and the caller-bound
+`dlq_status` / `dlq_requeue` (OpenCode: `gptqueue_dlq_status` / `gptqueue_dlq_requeue`).
+When a runtime's tasks were dead-lettered, it recovers them itself: `dlq_status` lists
+only its own mailbox's DLQ and `dlq_requeue` returns one entry to its inbox with a fresh
+recovery budget. Neither accepts a target mailbox. The original
 seven shared MCP tool request/response contracts are unchanged. Existing loaded
 sidecars retain their old implementation until their MCP connection is refreshed.
 Pi accepts the previous nine-tool runtime catalog and the new optional diagnostic

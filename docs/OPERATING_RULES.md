@@ -52,7 +52,9 @@ both paths against the same inbox.
 A task recovered more than `RECOVER_CAP` times (provisional 5) without an
 ack is moved to the actor's DLQ instead of the inbox. DLQ entries are
 visible with `dlq_status` and re-queueable with `dlq_requeue` (fresh
-recovery budget). The DLQ is bounded (`DLQ_MAX_LENGTH`, provisional 1000;
+recovery budget). A registered-shell runtime (Codex, Pi, OpenCode) has the same
+two tools, bound to its own mailbox, so it can restore its own dead-lettered
+mail without the service owner. The DLQ is bounded (`DLQ_MAX_LENGTH`, provisional 1000;
 oldest dropped). Dead-lettered work is NOT automatically retried — an
 operator (you) decides.
 

@@ -16,9 +16,11 @@ import { acknowledgeMessagesSchema } from "../mcp-server/tools/acknowledge-messa
 import { renewClaimSchema } from "../mcp-server/tools/renew-claim.js";
 import { queueStatusSchema } from "../mcp-server/tools/queue-status.js";
 import { listAgentsSchema } from "../mcp-server/tools/list-agents.js";
+import { dlqRequeueSchema } from "../mcp-server/tools/dlq-requeue.js";
 import { boundReceiveMessageSchema } from "../experimental-wrapper/bridge.js";
 import {
   agentDetailsSchema,
+  boundDlqStatusSchema,
   deliveryStatusSchema,
   findAgentsSchema,
 } from "./diagnostic-tools.js";
@@ -100,7 +102,7 @@ export interface OpenCodeToolDefinition {
 }
 
 const GPTQUEUE_SYSTEM_GUIDANCE =
-  "This MCP connection is already registered in GPTQueue and its tools are bound to this OpenCode session. Use gptqueue_get_runtime_status to inspect exact binding and activation readiness. Use gptqueue_claim_tasks, gptqueue_send_message, gptqueue_renew_claim, and gptqueue_acknowledge_tasks for inbox work; send any required result or error before acknowledging. Use gptqueue_find_agents and gptqueue_get_agent_details to identify an intended peer, and gptqueue_get_delivery_status for delivery evidence. Labels, directory, and declared role are hints, not ownership proof; do not route an ambiguous match silently. Use gptqueue_receive_message only when explicitly authorized because it consumes a message. Do not register, bind, or provide session credentials.";
+  "This MCP connection is already registered in GPTQueue and its tools are bound to this OpenCode session. Use gptqueue_get_runtime_status to inspect exact binding and activation readiness. Use gptqueue_claim_tasks, gptqueue_send_message, gptqueue_renew_claim, and gptqueue_acknowledge_tasks for inbox work; send any required result or error before acknowledging. Use gptqueue_find_agents and gptqueue_get_agent_details to identify an intended peer, and gptqueue_get_delivery_status for delivery evidence. If expected mail was dead-lettered, gptqueue_dlq_status lists your own dead-lettered messages and gptqueue_dlq_requeue restores one to your inbox. Labels, directory, and declared role are hints, not ownership proof; do not route an ambiguous match silently. Use gptqueue_receive_message only when explicitly authorized because it consumes a message. Do not register, bind, or provide session credentials.";
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === "object" ? value as Record<string, unknown> : undefined;
@@ -388,6 +390,14 @@ export const createOpenCodePlugin = (
     gptqueue_get_delivery_status: forwarded(
       "gptqueue_get_delivery_status", "get_delivery_status",
       "Inspect delivery evidence for one message without consuming it.", deliveryStatusSchema,
+    ),
+    gptqueue_dlq_status: forwarded(
+      "gptqueue_dlq_status", "dlq_status",
+      "List this bound session's own dead-lettered messages, newest first.", boundDlqStatusSchema,
+    ),
+    gptqueue_dlq_requeue: forwarded(
+      "gptqueue_dlq_requeue", "dlq_requeue",
+      "Restore one of this bound session's own dead-lettered messages to its inbox with a fresh recovery budget.", boundSchema(dlqRequeueSchema),
     ),
   });
 
