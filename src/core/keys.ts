@@ -208,6 +208,18 @@ export const DLQ_KEYS = {
 export const SYSTEM_SENDER = "gptqueue-system";
 
 /**
+ * Parse a stored DLQ drop counter for a read-only observer view: a missing key
+ * is 0; a value that is not a canonical non-negative safe integer is null
+ * (unreadable), never a guessed number. dlq_status keeps its own stricter
+ * store_corrupt refusal.
+ */
+export const parseDeadLetterDropped = (raw: string | null | undefined): number | null => {
+  if (raw === null || raw === undefined) return 0;
+  const value = Number(raw);
+  return /^(0|[1-9]\d*)$/.test(raw) && Number.isSafeInteger(value) ? value : null;
+};
+
+/**
  * PROVISIONAL dead-letter / recovery-quarantine / claim-lifecycle policy
  * constants. These are named, documented placeholders pending principal
  * calibration: the recovery cap, the DLQ length bound, the per-message

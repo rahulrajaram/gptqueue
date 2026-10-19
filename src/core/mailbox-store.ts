@@ -8,7 +8,7 @@
 import { Redis } from "ioredis";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL } from "./keys.js";
+import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL, parseDeadLetterDropped } from "./keys.js";
 import type { QueueMessage } from "./types.js";
 import { LUA_DIR } from "./stored-read.js";
 import { taskSubject } from "./task-ledger.js";
@@ -52,6 +52,21 @@ const CLASS_COUNTS_SCRIPT = `${admissionLib}\nlocal waking, quiet = adm_counts(K
 const eligible = (message: QueueMessage): boolean =>
   message.type === "task" || (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 
+
+/** One get_queue_status entry (MailboxStore.status). */
+export type QueueStatusEntry = {
+  agent: string;
+  depth: number;
+  max_size: number;
+  waking_count: number;
+  quiet_count: number;
+  /** Current DLQ length for this mailbox (0 when it has none). */
+  dead_lettered_count: number;
+  /** Entries the DLQ length bound has discarded; null when the counter is unreadable. */
+  dead_lettered_dropped: number | null;
+};
+/** Pipelined commands per mailbox in status(): LLEN, HGET, class counts, DLQ LLEN, drop GET. */
+const STATUS_COMMANDS = 5;
 
 export class MailboxStore {
   private readonly redis: Redis;
@@ -337,10 +352,13 @@ export class MailboxStore {
     return this.redis.llen(SESSION_KEYS.queue(agentName));
   }
 
-  /** Get queue status for one or all agents. */
-  async status(
-    agentName?: string
-  ): Promise<{ agent: string; depth: number; max_size: number; waking_count: number; quiet_count: number }[]> {
+  /**
+   * Get queue status for one or all agents. `dead_lettered_count` is the
+   * mailbox's DLQ length (LLEN) and `dead_lettered_dropped` the DLQ drop
+   * counter (GET; null when unreadable); both are plain reads that create no
+   * key, and a missing key reads as 0.
+   */
+  async status(agentName?: string): Promise<QueueStatusEntry[]> {
     const targets = agentName
       ? [agentName]
       : Object.keys(await this.redis.hgetall(SESSION_KEYS.registry));
@@ -350,16 +368,22 @@ export class MailboxStore {
     const pipe = this.redis.pipeline();
     for (const name of targets) {
       pipe.llen(SESSION_KEYS.queue(name)).hget(SESSION_KEYS.mailboxMeta(name), "max_size")
-        .eval(CLASS_COUNTS_SCRIPT, 1, SESSION_KEYS.queue(name), name, OUTSTANDING_PREFIX);
+        .eval(CLASS_COUNTS_SCRIPT, 1, SESSION_KEYS.queue(name), name, OUTSTANDING_PREFIX)
+        .llen(DLQ_KEYS.list(name)).get(DLQ_KEYS.dropped(name));
     }
     const results = (await pipe.exec()) ?? [];
     return targets.map((name, i) => {
-      const [depthError, depth] = results[i * 3] ?? [null, 0];
-      const [boundError, bound] = results[i * 3 + 1] ?? [null, null];
-      const [countError, counts] = results[i * 3 + 2] ?? [null, [0, 0]];
+      const at = i * STATUS_COMMANDS;
+      const [depthError, depth] = results[at] ?? [null, 0];
+      const [boundError, bound] = results[at + 1] ?? [null, null];
+      const [countError, counts] = results[at + 2] ?? [null, [0, 0]];
+      const [deadError, dead] = results[at + 3] ?? [null, 0];
+      const [droppedError, dropped] = results[at + 4] ?? [null, null];
       if (depthError) throw depthError;
       if (boundError) throw boundError;
       if (countError) throw countError;
+      if (deadError) throw deadError;
+      if (droppedError) throw droppedError;
       const [waking, quiet] = counts as [number, number];
       return {
         agent: name,
@@ -370,6 +394,8 @@ export class MailboxStore {
         ),
         waking_count: Number(waking),
         quiet_count: Number(quiet),
+        dead_lettered_count: Number(dead),
+        dead_lettered_dropped: parseDeadLetterDropped(dropped as string | null),
       };
     });
   }

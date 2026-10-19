@@ -139,7 +139,10 @@ continue using the integration they loaded earlier.
 
 Tests and verification scripts never use a shared Redis: each vitest run and
 each verify script starts its own private, socket-only instance
-(`scripts/lib/owned-redis.mjs`; `docs/OPERATING_RULES.md` §10). Real CLI
+(`scripts/lib/owned-redis.mjs`; `docs/OPERATING_RULES.md` §10). The exception
+is the operator tool `scripts/verify-claude-mcp.mjs`, which drives the server
+the configured `REDIS_URL` names; its `selftest` writes throwaway
+registrations and messages there (private-instance isolation is a backlog item). Real CLI
 startup probes use db14 of their own private instance and remove only records
 owned by each probe. Verification receipts live under
 `.gptqueue/automatic-shell/`; they record actual startup, session retirement,

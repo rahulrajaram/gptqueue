@@ -218,8 +218,8 @@ oldest first, but mail recovered from an expired claim is appended at the tail, 
 can appear after newer ones (and beyond a small `--limit`); `oldest_unclaimed_age_s` always covers
 the whole queue. An operator or observer
 can use it on another agent's mailbox. It names the inbox like the count form: `--name`, `--dir`,
-or this session's identity. It reads only: one MULTI/EXEC of TIME, LLEN, LRANGE on the queue and
-ZRANGE on the claim index, then MGET on outstanding-request keys and HMGET on the claim records.
+or this session's identity. It reads only: one MULTI/EXEC of TIME, LLEN, LRANGE on the queue,
+ZRANGE on the claim index and LLEN/GET on the dead-letter queue and its drop counter, then MGET on outstanding-request keys and HMGET on the claim records.
 The second phase is best effort: a claim acknowledged or renewed in between can show null record
 fields or a later expiry, and `wakes` reflects reply ownership at that later moment.
 `--limit` caps the listed messages (default 50, max 500). `--list` with `--watch` is a usage error
@@ -233,6 +233,15 @@ whole queue, since recovered mail returns to the tail; null when empty or no tim
 (among the listed messages), each claim (`claim_id`, `session_id`, `claimed_at`, `age_s`,
 `expires_at`, `expired`, `task_count`) and `expired_claims`. `--json` prints one object; without
 it, a table and summary lines.
+
+The listing also reports `dead_lettered_count` (the mailbox's dead-letter queue length, LLEN) and
+`dead_lettered_dropped` (entries the DLQ bound of 1000 has discarded; `null` when the stored counter
+is unreadable), read in the same MULTI/EXEC as LLEN and GET; a missing key reads as 0 and nothing is
+created. These are counts only: no DLQ content, message ids or senders. The human form ends with
+`dead-lettered: <count>, dropped <dropped>` (`?` when unreadable). A non-zero count means tasks were
+quarantined, usually after repeated claim-expiry recoveries: the mailbox's owner inspects them with
+`dlq_status` and re-queues them with `dlq_requeue` (also on the sidecar after the parity release).
+`get_queue_status` reports the same two fields per queue (`docs/QUEUE-CAPACITY.md`).
 
 `wakes` is the dispatcher's own rule (`wakesRecipient` in `src/core/inbox-events.ts`). A `task`
 always wakes the recipient. A `result` or `error` wakes it only when it answers the recipient's own

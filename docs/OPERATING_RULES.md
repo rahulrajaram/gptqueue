@@ -116,7 +116,7 @@ explicit inventory.
 The live server uses the production Redis (TCP `127.0.0.1:6379`, db0). Tests
 and verify scripts reach Redis only through a private, socket-only instance
 they own. The test helpers refuse every TCP Redis URL, and every Redis endpoint
-variable handed to a child names that private instance (see below).
+variable handed to a child names that private instance (see below). The one exception is the operator tool `scripts/verify-claude-mcp.mjs` (see below).
 
 ### A private Redis per run
 
@@ -183,6 +183,11 @@ Overrides:
 Verify scripts (`scripts/verify-*.mjs`), the release installer
 (`scripts/install-runtime.mjs`) and acceptance fixtures (`startOwnedRedis`)
 start their own instance through the same helper.
+The exception is `scripts/verify-claude-mcp.mjs`, an operator tool: it drives
+whatever server the configured `REDIS_URL` names (the production Redis by
+default), and its `selftest` writes throwaway `claude-verify-*` registrations
+and messages there. Running it against a private instance is a backlog item;
+until then, run it only when writing to that server is acceptable.
 `node scripts/with-owned-redis.mjs -- <command>` runs a non-vitest command
 against one.
 

@@ -115,7 +115,7 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
 
   server.tool(
     "get_queue_status",
-    "[safety: readonly] Get queue depth, max_size and the waking/quiet entry counts for an agent or all agents. Works before registration.",
+    "[safety: readonly] Get queue depth, max_size and the waking/quiet entry counts and dead-lettered counts (dead_lettered_count, dead_lettered_dropped) for an agent or all agents. Works before registration.",
     queueStatusSchema.shape,
     READ_ONLY,
     async (params) => safeToolCall(() => getQueueStatus(redisClient, queueStatusSchema.parse(params)))

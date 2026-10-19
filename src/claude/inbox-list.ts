@@ -4,12 +4,13 @@
  * dispatcher's own rule, core/inbox-events.ts) and the inbox's open claims.
  *
  * Reads only. One MULTI/EXEC snapshot holds TIME, LLEN and LRANGE on the
- * queue and ZRANGE on the claim index; then MGET reads the outstanding-request
+ * queue, ZRANGE on the claim index, and LLEN on the dead-letter queue plus GET
+ * on its drop counter (counts only: DLQ content is never read); then MGET reads the outstanding-request
  * owners of the listed replies and HMGET reads the claim records. It never
  * pops, claims, leases or writes anything.
  */
 import type { Redis } from "ioredis";
-import { CLAIM_KEYS, SESSION_KEYS } from "../core/keys.js";
+import { CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS, parseDeadLetterDropped } from "../core/keys.js";
 import { parseQueueEntry, replyOwners, wakesRecipient } from "../core/inbox-events.js";
 import type { QueueMessage } from "../core/types.js";
 import { probeFailure, type ProbeErrorCode } from "./inbox-probe.js";
@@ -53,6 +54,10 @@ export type InboxListing = Readonly<{
   messages: readonly ListedEntry[];
   claims: readonly ListedClaim[];
   expired_claims: number;
+  /** Current dead-letter queue length (LLEN; 0 when the mailbox has none). */
+  dead_lettered_count: number;
+  /** Entries the DLQ length bound has discarded; null when the counter is unreadable. */
+  dead_lettered_dropped: number | null;
 }>;
 export type ListResult =
   | Readonly<{ ok: true; listing: InboxListing }>
@@ -122,7 +127,8 @@ export const listInbox = async (redis: Redis, agent: string, limit: number): Pro
     // index in one Lua call, so separate reads could straddle it. The whole
     // list is read because claims-recover.lua RPUSHes recovered (older) tasks
     // to the tail, so the oldest unclaimed mail may lie beyond `limit`.
-    const [time, unclaimed, raw, index] = execResults(await redis.multi().time().llen(queue).lrange(queue, 0, -1).zrange(CLAIM_KEYS.index(agent), 0, -1, "WITHSCORES").exec()) as [[string, string], number, string[], string[]];
+    const [time, unclaimed, raw, index, deadLettered, droppedRaw] = execResults(await redis.multi().time().llen(queue).lrange(queue, 0, -1).zrange(CLAIM_KEYS.index(agent), 0, -1, "WITHSCORES")
+      .llen(DLQ_KEYS.list(agent)).get(DLQ_KEYS.dropped(agent)).exec()) as [[string, string], number, string[], string[], number, string | null];
     const nowMs = Number(time[0]) * 1000 + Math.floor(Number(time[1]) / 1000);
     const entries = raw.map(parseQueueEntry);
     const shown = entries.slice(0, limit);
@@ -151,6 +157,8 @@ export const listInbox = async (redis: Redis, agent: string, limit: number): Pro
       messages: Object.freeze(messages),
       claims: Object.freeze(claims),
       expired_claims: claims.filter((claim) => claim.expired).length,
+      dead_lettered_count: deadLettered,
+      dead_lettered_dropped: parseDeadLetterDropped(droppedRaw),
     }) });
   } catch (error) {
     return probeFailure(error);
@@ -167,7 +175,7 @@ const table = (rows: readonly (readonly string[])[]): readonly string[] => {
   return rows.map((row) => row.map((cell, column) => column === row.length - 1 ? cell : cell.padEnd(widths[column] ?? 0)).join("  ").trimEnd());
 };
 
-/** The human form of a listing: a summary line, the message table, then the claims. */
+/** The human form of a listing: a summary line, the message table, the claims, then the dead-letter counts. */
 export const formatListing = (listing: InboxListing): string => {
   const summary = `${printable(listing.agent)}: ${listing.unclaimed} unclaimed, ${listing.listed} listed`
     + `${listing.truncated ? ` (truncated; --limit up to ${LIST_LIMIT.max})` : ""}, ${listing.wake_eligible_count} would wake, oldest ${seconds(listing.oldest_unclaimed_age_s)}`;
@@ -180,6 +188,7 @@ export const formatListing = (listing: InboxListing): string => {
     ...(messageRows.length === 0 ? [] : table([["#", "AGE", "TYPE", "WAKES", "FROM", "ID", "PREVIEW"], ...messageRows])),
     listing.claims.length === 0 ? "claims: none" : `claims: ${listing.claims.length} open, ${listing.expired_claims} expired`,
     ...(claimRows.length === 0 ? [] : table([["CLAIM", "SESSION", "AGE", "EXPIRES", "EXPIRED", "TASKS"], ...claimRows])),
+    `dead-lettered: ${listing.dead_lettered_count}, dropped ${listing.dead_lettered_dropped ?? "?"}`,
   ];
   return `${lines.join("\n")}\n`;
 };

@@ -7,7 +7,7 @@ import { auditClaudeSession, auditOrGapLua, auditRuntime, REGISTRATION_AUDIT_MAX
 import { occupancyGuardLua, recheckHintLua } from "../core/occupancy-guard.js";
 import { AdoptionRefusedError, parseGuardReply, RUNTIME_ADOPTION_REFUSALS } from "../core/adoption-refusal.js";
 import { sweepProvisional } from "../core/provisional-sweeper.js";
-import { MailboxStore } from "../core/mailbox-store.js";
+import { MailboxStore, type QueueStatusEntry } from "../core/mailbox-store.js";
 import { SessionStore } from "../core/session-store.js";
 import { CustodyStore } from "../core/custody-store.js";
 import { ActorDirectory } from "../core/actor-directory.js";
@@ -666,7 +666,7 @@ export class RedisClient {
 
   async getQueueStatus(
     agent?: string
-  ): Promise<{ agent: string; depth: number; max_size: number; waking_count: number; quiet_count: number }[]> {
+  ): Promise<QueueStatusEntry[]> {
     return this.mailbox.status(agent);
   }
 

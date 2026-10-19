@@ -83,9 +83,22 @@ and acknowledge, or move entries to the DLQ) to restore ordinary admission.
 
 ## Status
 
-`get_queue_status` reports `depth`, `max_size`, `waking_count` and
-`quiet_count`. The counts use the admission classification and are read in
-the same pipeline as `depth`, not the same transaction.
+`get_queue_status` reports `depth`, `max_size`, `waking_count`,
+`quiet_count`, `dead_lettered_count` and `dead_lettered_dropped`. The waking
+and quiet counts use the admission classification and are read in the same
+pipeline as `depth`, not the same transaction.
+
+`dead_lettered_count` is the mailbox's current dead-letter queue length (LLEN
+of `gptq:dlq:<agent>`): tasks that lazy claim recovery quarantined after
+repeated claim expiry, or mail dead-lettered for a retired recipient.
+`dead_lettered_dropped` is the DLQ drop counter (`gptq:dlq-dropped:<agent>`):
+entries the per-mailbox DLQ bound (`DLQ_MAX_LENGTH`, 1000) has discarded, which
+are gone for good; it is `null` when the stored counter is unreadable. Both
+are plain reads in the same pipeline; a missing key reads as 0 and no key is
+created. A non-zero `dead_lettered_count` means work is stuck: the mailbox's
+owner inspects it with `dlq_status` and re-queues entries with `dlq_requeue`
+(the sidecar exposes both too, after the parity release). Observers see the
+counts only, never the entries.
 
 ## Mixed versions
 

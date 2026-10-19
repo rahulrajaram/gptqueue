@@ -200,6 +200,7 @@ describe("gptqueue-inbox-peek --list", () => {
     expect(await list(me)).toEqual({
       agent: me, source: "env", note: "name given with --name", unclaimed: 0, listed: 0, truncated: false,
       oldest_unclaimed_age_s: null, wake_eligible_count: 0, messages: [], claims: [], expired_claims: 0,
+      dead_lettered_count: 0, dead_lettered_dropped: 0,
     });
   });
 
@@ -231,7 +232,7 @@ describe("gptqueue-inbox-peek --list", () => {
     expect(await snapshot()).toEqual(before);
     // ioredis's connection setup: the URL's database, client-library tags and the ready check.
     const connectionSetup = /^(select|client setinfo|info)\b/;
-    const reads = ["multi", "time", "llen", "lrange", "zrange", "exec", "mget", "hmget"];
+    const reads = ["multi", "time", "llen", "lrange", "zrange", "get", "exec", "mget", "hmget"];
     const commands = sent.filter((line) => !connectionSetup.test(line)).map((line) => line.split(" ")[0]!);
     expect(commands.filter((name) => !reads.includes(name))).toEqual([]);
     expect(reads.filter((name) => !commands.includes(name))).toEqual([]); // every listing read was exercised
