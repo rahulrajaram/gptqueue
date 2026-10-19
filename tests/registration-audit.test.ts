@@ -15,7 +15,7 @@ import { runtimeMailboxKey } from "../src/core/mailbox-continuity.js";
 import { AdoptionRefusedError } from "../src/core/adoption-refusal.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { sessionTag } from "../src/core/session-tag.js";
-import { auditClaudeSession, auditRuntime, coverageOf, parseRegistrationsArgs, queryRegistrations } from "../src/core/registration-audit.js";
+import { auditClaudeSession, auditRuntime, coverageOf, parseGap, parseRegistrationsArgs, queryRegistrations, withGap } from "../src/core/registration-audit.js";
 import { startClaudeSessionRecord } from "../src/claude/mcp-record.js";
 import { findSessionRecord, readProcess } from "../src/claude/session-record.js";
 
@@ -55,6 +55,22 @@ const waitFor = async (check: () => Promise<boolean>, ms = 120_000) => {
 };
 
 describe("registration audit: pure parts", () => {
+  it("F8: parseGap accepts only safe integers whose instant and instant + 1 are valid Dates; anything else is invalid and coverage unknown", () => {
+    const MAX = 8.64e15;
+    expect(parseGap("string", String(MAX - 1))).toEqual({ kind: "at", ms: MAX - 1 });
+    expect(parseGap("string", String(MAX))).toEqual({ kind: "invalid" });
+    expect(parseGap("string", "9999999999999999")).toEqual({ kind: "invalid" });
+    expect(parseGap("string", "0001234")).toEqual({ kind: "at", ms: 1234 });
+    expect(parseGap("string", "0")).toEqual({ kind: "at", ms: 0 });
+    expect(parseGap("string", "")).toEqual({ kind: "invalid" });
+    expect(parseGap("string", "-1")).toEqual({ kind: "invalid" });
+    expect(parseGap("string", null)).toEqual({ kind: "absent" });
+    const base = { coverage: "complete" as const, complete_from: new Date(1_000).toISOString() };
+    expect(withGap(base, parseGap("string", "9999999999999999"), 0)).toEqual({ coverage: "unknown", complete_from: null });
+    expect(() => withGap(base, parseGap("string", String(MAX - 1)), 0)).not.toThrow();
+    expect(withGap(base, parseGap("string", String(MAX - 1)), 0)).toEqual({ coverage: "incomplete", complete_from: new Date(MAX).toISOString() });
+  });
+
   it("classifies the runtime from values the registrant already has", () => {
     expect(auditRuntime(undefined, {})).toBe("generic");
     expect(auditRuntime(null, { GPTQ_CLAUDE_SESSION_RECORD: "1" })).toBe("claude");
@@ -227,11 +243,13 @@ describe("registration audit against Redis", { timeout: 300_000 }, () => {
    * with gap "wrong-type", the gap marker by a hash); restores both after.
    */
   const withBrokenAudit = async (gap: "absent" | "wrong-type", body: () => Promise<void>) => {
+    // Reads only before the try: every mutation of these global keys happens
+    // inside it, so a failing setup step still restores them (F9).
     const saved = await Promise.all([AUDIT, GAP].map((k) => redis.dumpBuffer(k)));
-    await redis.del(AUDIT, GAP);
-    await redis.set(AUDIT, "not-a-stream");
-    if (gap === "wrong-type") await redis.hset(GAP, "foreign", "value");
     try {
+      await redis.del(AUDIT, GAP);
+      await redis.set(AUDIT, "not-a-stream");
+      if (gap === "wrong-type") await redis.hset(GAP, "foreign", "value");
       await body();
     } finally {
       await redis.del(AUDIT, GAP);
@@ -323,9 +341,10 @@ describe("registration audit against Redis", { timeout: 300_000 }, () => {
   it("the registry bookkeeping keys still fail the publish on a wrong type, before any write, with no event or gap", async () => {
     const name = `audit-pend-${randomUUID().slice(0, 8)}`;
     const saved = await Promise.all([SESSION_KEYS.registryPending, GAP].map((k) => redis.dumpBuffer(k)));
-    await redis.del(SESSION_KEYS.registryPending, GAP);
-    await redis.set(SESSION_KEYS.registryPending, "not-a-hash");
     try {
+      // Setup mutations inside the restoring try (F9).
+      await redis.del(SESSION_KEYS.registryPending, GAP);
+      await redis.set(SESSION_KEYS.registryPending, "not-a-hash");
       const events = (await redis.type(AUDIT)) === "stream" ? await redis.xlen(AUDIT) : 0;
       const store = new SessionStore(redis);
       await expect(store.publishRegistration(name, "{}", { name, session_tag: sessionTag("x"), runtime: "generic", pid: 1, cwd: "/", claude_session: "", via: "register" }))

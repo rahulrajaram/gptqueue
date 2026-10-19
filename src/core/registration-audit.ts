@@ -178,10 +178,22 @@ export type GapMarker =
   | Readonly<{ kind: "at"; ms: number }>
   | Readonly<{ kind: "invalid" }>;
 
+/** The largest |epoch ms| a JS Date can represent (ECMA-262 TimeClip). */
+const MAX_DATE_MS = 8.64e15;
+const isDateMs = (ms: number): boolean => Math.abs(ms) <= MAX_DATE_MS;
+
+/**
+ * A marker is "at" only when it is a digit string holding a safe integer whose
+ * instant and instant + 1 are both representable Dates, since withGap renders
+ * gap + 1 as an ISO date. Anything else (including digits beyond the Date
+ * range) is invalid, so the query reports coverage "unknown" rather than
+ * throwing in toISOString.
+ */
 export const parseGap = (type: string, value: string | null): GapMarker => {
   if (type === "none" || (type === "string" && value === null)) return { kind: "absent" };
   if (type !== "string" || value === null || !/^\d{1,16}$/.test(value)) return { kind: "invalid" };
-  return { kind: "at", ms: Number(value) };
+  const ms = Number(value);
+  return Number.isSafeInteger(ms) && isDateMs(ms) && isDateMs(ms + 1) ? { kind: "at", ms } : { kind: "invalid" };
 };
 
 /**
