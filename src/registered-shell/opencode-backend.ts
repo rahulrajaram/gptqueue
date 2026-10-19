@@ -19,10 +19,14 @@ import type { RuntimeTools } from "./runtime-tools.js";
 import type { RuntimeAdapter } from "./runtime.js";
 import { VERSION } from "../version.js";
 import { GptQueueError } from "../mcp-server/errors.js";
+import { isExplicitWorker } from "../claude/worker-mode.js";
+import { HEADLESS_WORKER_MESSAGE } from "./worker-shell.js";
 
 export type OpenCodeBackendOptions = Readonly<{
   redisUrl: string;
   runtimePort: OpenCodeRuntimePort;
+  /** Environment for the worker-mode guard (default process.env). */
+  env?: NodeJS.ProcessEnv;
   epoch?: string;
   runtimeOptions?: OpenCodeRuntimeOptions;
   dispatcherOptions?: Readonly<{ intervalMs?: number; maxAttempts?: number }>;
@@ -88,6 +92,8 @@ export const createOpenCodeBackend = async (
   options: OpenCodeBackendOptions,
 ): Promise<OpenCodeSessionBackend> => {
   validateIdentity(identity);
+  // Defense in depth: the plugin never calls this in worker mode; refuse before any Redis connection.
+  if (isExplicitWorker(options.env ?? process.env)) throw new Error(HEADLESS_WORKER_MESSAGE);
   const agentName = opencodeAgentName(identity.sessionID);
   const redis = new RedisClient(null, options.redisUrl);
   const shutdown = new AbortController();

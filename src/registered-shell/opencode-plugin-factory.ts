@@ -9,6 +9,8 @@ import type {
 } from "./opencode-runtime.js";
 import type { OpenCodeSessionHandle, OpenCodeSessionIdentity } from "./opencode-sessions.js";
 import { z } from "zod";
+import { isExplicitWorker } from "../claude/worker-mode.js";
+import { HEADLESS_WORKER_MESSAGE } from "./worker-shell.js";
 import { sendMessageSchema } from "../mcp-server/tools/send-message.js";
 import { claimTasksSchema } from "../mcp-server/tools/claim-tasks.js";
 import { acknowledgeTasksSchema } from "../mcp-server/tools/acknowledge-tasks.js";
@@ -61,6 +63,8 @@ export interface OpenCodePluginOptions {
   readonly deferredRetryMs?: number;
   /** Observes the load-time binding of pre-existing sessions (tests, diagnostics). */
   readonly onBootstrapped?: (result: OpenCodeBootstrapResult) => void;
+  /** Environment for the worker-mode check (default process.env). */
+  readonly env?: NodeJS.ProcessEnv;
 }
 
 export type OpenCodeBootstrapResult = Readonly<{
@@ -197,6 +201,96 @@ export const createOpenCodeRuntimePort = (
   },
 });
 
+type ToolFactory = (exposedName: string, backendName: string, description: string, schema: z.ZodObject<any>) => OpenCodeToolDefinition;
+
+/** The plugin's tool table; worker mode reuses it with a refusing factory. */
+const openCodeTools = (forwarded: ToolFactory) =>
+Object.freeze({
+  gptqueue_claim_tasks: forwarded(
+    "gptqueue_claim_tasks", "claim_tasks",
+    "Claim a recoverable batch from this bound session's inbox.", boundSchema(claimTasksSchema),
+  ),
+  gptqueue_acknowledge_tasks: forwarded(
+    "gptqueue_acknowledge_tasks", "acknowledge_tasks",
+    "Acknowledge a completed claim after sending required replies.", boundSchema(acknowledgeTasksSchema),
+  ),
+  gptqueue_acknowledge_messages: forwarded(
+    "gptqueue_acknowledge_messages", "acknowledge_messages",
+    "Acknowledge selected messages of a claim after replying to them; the rest stay claimed.", boundSchema(acknowledgeMessagesSchema),
+  ),
+  gptqueue_renew_claim: forwarded(
+    "gptqueue_renew_claim", "renew_claim",
+    "Renew a claim while authorized work remains underway.", boundSchema(renewClaimSchema),
+  ),
+  gptqueue_send_message: forwarded(
+    "gptqueue_send_message", "send_message",
+    "Send a message from this bound session.", boundSchema(sendMessageSchema),
+  ),
+  gptqueue_receive_message: forwarded(
+    "gptqueue_receive_message", "receive_message",
+    "Receive and consume one message from this bound session's inbox when explicitly authorized.", boundReceiveMessageSchema,
+  ),
+  gptqueue_get_queue_status: forwarded(
+    "gptqueue_get_queue_status", "get_queue_status",
+    "Inspect GPTQueue queue status.", queueStatusSchema,
+  ),
+  gptqueue_list_agents: forwarded(
+    "gptqueue_list_agents", "list_agents",
+    "List discoverable GPTQueue agents, bounded (default 50, max 500); filter with name_prefix/online_only and page with next_cursor.", listAgentsSchema,
+  ),
+  gptqueue_get_runtime_status: forwarded(
+    "gptqueue_get_runtime_status", "get_runtime_status",
+    "Report this session's exact runtime binding and activation readiness.", z.object({}),
+  ),
+  gptqueue_find_agents: forwarded(
+    "gptqueue_find_agents", "find_agents",
+    "Find exact GPTQueue peer candidates by declared purpose and identity.", findAgentsSchema,
+  ),
+  gptqueue_get_agent_details: forwarded(
+    "gptqueue_get_agent_details", "get_agent_details",
+    "Inspect one exact GPTQueue mailbox and readiness evidence.", agentDetailsSchema,
+  ),
+  gptqueue_get_delivery_status: forwarded(
+    "gptqueue_get_delivery_status", "get_delivery_status",
+    "Inspect delivery evidence for one message without consuming it.", deliveryStatusSchema,
+  ),
+  gptqueue_dlq_status: forwarded(
+    "gptqueue_dlq_status", "dlq_status",
+    "[safety: readonly] List this bound session's own dead-lettered messages, newest first.", boundDlqStatusSchema,
+  ),
+  gptqueue_dlq_requeue: forwarded(
+    "gptqueue_dlq_requeue", "dlq_requeue",
+    "[safety: writable] Restore one of this bound session's own dead-lettered messages to its inbox with a fresh recovery budget.", boundSchema(dlqRequeueSchema),
+  ),
+});
+
+const HEADLESS_WORKER_GUIDANCE =
+  "GPTQueue is not available in this OpenCode session: it runs as a headless worker (GPTQUEUE_WORKER=1) with no mailbox. gptqueue_* tools return HEADLESS_WORKER. Continue the user's work normally.";
+
+/**
+ * Worker mode (GPTQUEUE_WORKER=1): no backend, no Redis connection, no
+ * registration. Session hooks are no-ops; every tool refuses with HEADLESS_WORKER.
+ */
+const createHeadlessWorkerPlugin = (): OpenCodePluginHooks => {
+  console.error(`[gptqueue] OpenCode plugin: ${HEADLESS_WORKER_MESSAGE}`);
+  const refuse: ToolFactory = (exposedName, _backendName, description, schema) => ({
+    description, args: schema.shape,
+    execute: async () => {
+      throw new Error(JSON.stringify({ status: "error", code: "HEADLESS_WORKER", message: HEADLESS_WORKER_MESSAGE, tool: exposedName }));
+    },
+  });
+  return Object.freeze({
+    event: async () => undefined,
+    "chat.message": async () => undefined,
+    "experimental.chat.system.transform": async (_input: { sessionID?: string }, output: { system: string[] }) => {
+      output.system.push(HEADLESS_WORKER_GUIDANCE);
+    },
+    tool: openCodeTools(refuse),
+    deferredSessions: () => Object.freeze([]),
+    dispose: async () => undefined,
+  });
+};
+
 /**
  * OpenCode plugin frontend. Native event identity is the only source of
  * session routing; idle events never retire a backend.
@@ -205,6 +299,8 @@ export const createOpenCodePlugin = (
   input: OpenCodePluginInput,
   options: OpenCodePluginOptions,
 ): OpenCodePluginHooks => {
+  // Before any backend or Redis connection exists (sv-2).
+  if (isExplicitWorker(options.env ?? process.env)) return createHeadlessWorkerPlugin();
   const runtimePort = options.runtimePort ?? ((client, identity) => createOpenCodeRuntimePort(client, identity));
   // I-7: OpenCode's session.idle event, fanned out to that session's runtime port.
   const idleListeners = new Map<string, Set<() => void>>();
@@ -342,64 +438,7 @@ export const createOpenCodePlugin = (
     },
   });
 
-  const tool = Object.freeze({
-    gptqueue_claim_tasks: forwarded(
-      "gptqueue_claim_tasks", "claim_tasks",
-      "Claim a recoverable batch from this bound session's inbox.", boundSchema(claimTasksSchema),
-    ),
-    gptqueue_acknowledge_tasks: forwarded(
-      "gptqueue_acknowledge_tasks", "acknowledge_tasks",
-      "Acknowledge a completed claim after sending required replies.", boundSchema(acknowledgeTasksSchema),
-    ),
-    gptqueue_acknowledge_messages: forwarded(
-      "gptqueue_acknowledge_messages", "acknowledge_messages",
-      "Acknowledge selected messages of a claim after replying to them; the rest stay claimed.", boundSchema(acknowledgeMessagesSchema),
-    ),
-    gptqueue_renew_claim: forwarded(
-      "gptqueue_renew_claim", "renew_claim",
-      "Renew a claim while authorized work remains underway.", boundSchema(renewClaimSchema),
-    ),
-    gptqueue_send_message: forwarded(
-      "gptqueue_send_message", "send_message",
-      "Send a message from this bound session.", boundSchema(sendMessageSchema),
-    ),
-    gptqueue_receive_message: forwarded(
-      "gptqueue_receive_message", "receive_message",
-      "Receive and consume one message from this bound session's inbox when explicitly authorized.", boundReceiveMessageSchema,
-    ),
-    gptqueue_get_queue_status: forwarded(
-      "gptqueue_get_queue_status", "get_queue_status",
-      "Inspect GPTQueue queue status.", queueStatusSchema,
-    ),
-    gptqueue_list_agents: forwarded(
-      "gptqueue_list_agents", "list_agents",
-      "List discoverable GPTQueue agents, bounded (default 50, max 500); filter with name_prefix/online_only and page with next_cursor.", listAgentsSchema,
-    ),
-    gptqueue_get_runtime_status: forwarded(
-      "gptqueue_get_runtime_status", "get_runtime_status",
-      "Report this session's exact runtime binding and activation readiness.", z.object({}),
-    ),
-    gptqueue_find_agents: forwarded(
-      "gptqueue_find_agents", "find_agents",
-      "Find exact GPTQueue peer candidates by declared purpose and identity.", findAgentsSchema,
-    ),
-    gptqueue_get_agent_details: forwarded(
-      "gptqueue_get_agent_details", "get_agent_details",
-      "Inspect one exact GPTQueue mailbox and readiness evidence.", agentDetailsSchema,
-    ),
-    gptqueue_get_delivery_status: forwarded(
-      "gptqueue_get_delivery_status", "get_delivery_status",
-      "Inspect delivery evidence for one message without consuming it.", deliveryStatusSchema,
-    ),
-    gptqueue_dlq_status: forwarded(
-      "gptqueue_dlq_status", "dlq_status",
-      "[safety: readonly] List this bound session's own dead-lettered messages, newest first.", boundDlqStatusSchema,
-    ),
-    gptqueue_dlq_requeue: forwarded(
-      "gptqueue_dlq_requeue", "dlq_requeue",
-      "[safety: writable] Restore one of this bound session's own dead-lettered messages to its inbox with a fresh recovery budget.", boundSchema(dlqRequeueSchema),
-    ),
-  });
+  const tool = openCodeTools(forwarded);
 
   return Object.freeze({
     event: async ({ event }: { event: OpenCodeEvent }): Promise<void> => {

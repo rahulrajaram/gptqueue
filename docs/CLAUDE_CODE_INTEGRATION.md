@@ -141,10 +141,25 @@ tools, also without the gptqueue MCP server (for example `--strict-mcp-config` w
 reviewer-specific MCP config) and in its own worktree. Never set `GPTQ_AGENT_NAME` for a reviewer
 unless it should own a mailbox.
 
-### Registered-shell sidecar (Codex, Pi, OpenCode)
+### Other entry points (sidecar, Pi, OpenCode)
 
-The registered-shell sidecar `bin/gptqueue-session`, which Codex (`gptqueue-shared`), Pi and
-OpenCode launch, is not a Claude print-mode child, so it honors only the explicit form
+`GPTQUEUE_WORKER=1` is honored at four entry points:
+
+| Entry point | Check | Worker-mode behavior |
+|---|---|---|
+| Claude hooks and MCP (`gptqueue-claude-mcp`) | `isWorkerSession` (explicit or print-mode inference) | as described above |
+| Sidecar binary `bin/gptqueue-session` (Codex `gptqueue-shared`) | `isExplicitWorker`, in the sidecar process | serves MCP, no Redis; tools return `HEADLESS_WORKER` |
+| Pi extension | `isExplicitWorker`, in the Pi process before any connection | spawns no sidecar, registers no gptqueue tools; stays degraded with code `headless_worker` and no retry |
+| OpenCode plugin | `isExplicitWorker`, in the OpenCode process before any backend exists | opens no Redis connection, registers nothing; session hooks are no-ops; `gptqueue_*` tools fail with `HEADLESS_WORKER` |
+
+The Pi check runs in the Pi process because Pi starts the sidecar through the MCP stdio
+transport, which forwards only a default environment whitelist; `GPTQUEUE_WORKER` would not reach
+the sidecar.
+
+#### Sidecar details
+
+The registered-shell sidecar `bin/gptqueue-session`, which Codex (`gptqueue-shared`) and Pi
+launch, is not a Claude print-mode child, so it honors only the explicit form
 (`isExplicitWorker` in `src/claude/worker-mode.ts`): `GPTQUEUE_WORKER=1` selects worker mode;
 `0`, unset or any other value keeps today's behavior. In worker mode the sidecar:
 

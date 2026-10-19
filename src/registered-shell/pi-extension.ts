@@ -10,6 +10,7 @@ import { canConsumeMail, inboxPromptFor, mailCapabilities, runtimeBindingSchema 
 import { z } from "zod";
 import { VERSION } from "../version.js";
 import { RUNTIME_TOOL_NAMES, SHELL_TOOL_NAMES } from "./tool-names.js";
+import { isExplicitWorker } from "../claude/worker-mode.js";
 
 export const GPTQUEUE_TOOLS = ["send_message", "receive_message", "list_agents", "get_queue_status"] as const;
 /** Every registered-shell tool; the runtime subset is required. */
@@ -95,7 +96,9 @@ export const validateCatalog = (catalog: { tools?: CatalogTool[] }, runtimeEnabl
 
 /** Typed tool error while the extension is degraded; Pi keeps running. */
 export type PiGptqueueUnavailableCode =
-  "gptqueue_unavailable" | "runtime_binding_refused" | "runtime_binding_failed" | "runtime_unsupported";
+  "gptqueue_unavailable" | "runtime_binding_refused" | "runtime_binding_failed" | "runtime_unsupported"
+  /** GPTQUEUE_WORKER=1 in the Pi process: never connects, never retries. */
+  | "headless_worker";
 export class PiGptqueueUnavailableError extends Error {
   constructor(readonly code: PiGptqueueUnavailableCode, readonly reason: string) {
     super(JSON.stringify({ status: "error", code, message: `GPTQueue is unavailable in this Pi session: ${reason}` }));
@@ -135,10 +138,29 @@ const bindError = (code: string | undefined, text: string): Error => {
   }
 };
 
+export const PI_HEADLESS_WORKER_REASON =
+  "headless worker (GPTQUEUE_WORKER=1): this session has no mailbox; unset it (or set 0) to use gptqueue";
+/**
+ * Worker mode: no sidecar spawn, no registration, no GPTQueue tools. The
+ * extension stays in its degraded state with a fixed reason and no retry.
+ */
+const installHeadlessWorker = (pi: PiAPI): void => {
+  const degraded = new PiGptqueueUnavailableError("headless_worker", PI_HEADLESS_WORKER_REASON);
+  console.error(`[gptqueue] Pi extension: ${PI_HEADLESS_WORKER_REASON}`);
+  const note = `GPTQueue is not available in this session (${degraded.code}: ${PI_HEADLESS_WORKER_REASON}). Continue the user's work normally.`;
+  pi.on("before_agent_start", async (event) => ({ systemPrompt: `${event.systemPrompt}\n\n${note}` }));
+  pi.on("session_start", (_event, context) => {
+    try { context?.ui?.setStatus?.(STATUS_KEY, `GPTQueue unavailable (${degraded.code})`); } catch { /* best effort */ }
+  });
+  pi.on("session_shutdown", async () => undefined);
+};
+
 export const createPiExtension = (
   makeClient: (signal: AbortSignal, context?: PiContext) => Promise<SessionClient>, timeout = STARTUP_TIMEOUT_MS,
-  options: { readonly runtimeEnabled?: boolean; readonly retry?: PiRetryOptions } = {}
+  options: { readonly runtimeEnabled?: boolean; readonly retry?: PiRetryOptions; readonly env?: NodeJS.ProcessEnv } = {}
 ) => async (pi: PiAPI): Promise<void> => {
+  // Checked in the Pi process: the stdio transport does not forward GPTQUEUE_WORKER to the sidecar.
+  if (isExplicitWorker(options.env ?? process.env)) { installHeadlessWorker(pi); return; }
   let client: SessionClient | undefined;
   let runtime: ReturnType<typeof createPiRuntime> | undefined;
   let binding: RuntimeBinding | undefined;
