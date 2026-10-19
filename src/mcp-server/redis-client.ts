@@ -3,7 +3,7 @@ import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS, DLQ_PROVISIONAL, SESSION_DEFAULTS } from "../core/keys.js";
 import { sessionTag } from "../core/session-tag.js";
-import { auditClaudeSession, auditRuntime, REGISTRATION_AUDIT_MAXLEN } from "../core/registration-audit.js";
+import { auditClaudeSession, auditOrGapLua, auditRuntime, REGISTRATION_AUDIT_MAXLEN, type RegistrationAuditEvent } from "../core/registration-audit.js";
 import { occupancyGuardLua, recheckHintLua } from "../core/occupancy-guard.js";
 import { AdoptionRefusedError, parseGuardReply, RUNTIME_ADOPTION_REFUSALS } from "../core/adoption-refusal.js";
 import { sweepProvisional } from "../core/provisional-sweeper.js";
@@ -211,6 +211,7 @@ export class RedisClient {
     const result = await this.redis.eval(`
       ${occupancyGuardLua("occupied_target")}
       ${recheckHintLua("recheck")}
+      ${auditOrGapLua}
       if redis.call('GET', KEYS[1]) ~= ARGV[4] then return -1 end
       local sourceRaw = redis.call('HGET', KEYS[2], ARGV[1])
       local targetRaw = redis.call('HGET', KEYS[2], ARGV[2])
@@ -225,8 +226,13 @@ export class RedisClient {
       if redis.call('ZCARD', KEYS[9]) > 0 then return {-6, 'claims_index', recheck_claim(KEYS[9])} end
       if redis.call('EXISTS', KEYS[10]) == 1 then return {-6, 'outbound_activity', recheck_ttl(KEYS[10])} end
       if redis.call('EXISTS', KEYS[11]) == 1 then return {-6, 'wrapper_claim', false} end
-      -- F2/F3: scripts do not roll back, so every predictable failure (a
-      -- wrong-type key) is checked here, before the first write.
+      -- Scripts do not roll back. A wrong type on any key below already failed
+      -- the adoption before the registration audit existed, part-way through
+      -- its writes; it is checked here instead, before the first write and
+      -- under the same conditions (the target queue, its inbox events and the
+      -- outstanding-owner keys only matter when the source queue holds work),
+      -- so such a failure now changes nothing. The audit stream is not among
+      -- them: it never fails an adoption (audit_or_gap below).
       local function want(key, a, b)
         local t = redis.call('TYPE', key).ok
         if t ~= a and t ~= b then return redis.error_reply('WRONGTYPE adoption key ' .. key .. ' is ' .. t) end
@@ -234,9 +240,11 @@ export class RedisClient {
       end
       for _, k in ipairs({KEYS[3], KEYS[14], KEYS[15]}) do local e = want(k, 'hash', 'none'); if e then return e end end
       for _, k in ipairs({KEYS[6], '${SESSION_KEYS.provisional}'}) do local e = want(k, 'set', 'none'); if e then return e end end
-      for _, k in ipairs({KEYS[8], KEYS[16]}) do local e = want(k, 'list', 'none'); if e then return e end end
-      for _, k in ipairs({KEYS[13], KEYS[17], KEYS[19]}) do local e = want(k, 'stream', 'none'); if e then return e end end
-      do
+      do local e = want(KEYS[8], 'list', 'none'); if e then return e end end
+      do local e = want(KEYS[13], 'stream', 'none'); if e then return e end end
+      if redis.call('LLEN', KEYS[8]) > 0 then
+        do local e = want(KEYS[16], 'list', 'none'); if e then return e end end
+        do local e = want(KEYS[17], 'stream', 'none'); if e then return e end end
         local fromField = '"to":' .. cjson.encode(ARGV[1])
         for _, raw in ipairs(redis.call('LRANGE', KEYS[8], 0, -1)) do
           local at = string.find(raw, fromField, 1, true)
@@ -276,15 +284,16 @@ export class RedisClient {
       if moved > 0 then redis.call('XADD', KEYS[17], '*', 'type', 'forwarded') end
       redis.call('SREM', '${SESSION_KEYS.provisional}', ARGV[1])
       redis.call('XADD', KEYS[13], 'MAXLEN', '~', 1000, '*', 'event', 'runtime_continuity', 'target', ARGV[2], 'source', ARGV[1], 'runtime_id', ARGV[5], 'session_id', ARGV[3])
-      redis.call('XADD', KEYS[19], 'MAXLEN', '~', ARGV[11], '*', 'event', 'registered', 'name', ARGV[2], 'session_tag', ARGV[10],
-        'runtime', runtime, 'pid', ARGV[7], 'cwd', cwd, 'claude_session', ARGV[9], 'via', 'adoption')
+      -- Best-effort: an unusable audit key records an audit gap instead.
+      audit_or_gap(KEYS[19], KEYS[20], ARGV[11], {'event', 'registered', 'name', ARGV[2], 'session_tag', ARGV[10],
+        'runtime', runtime, 'pid', ARGV[7], 'cwd', cwd, 'claude_session', ARGV[9], 'via', 'adoption'})
       return 1
-    `, 19, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
+    `, 20, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
       SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), wrapper(target),
       SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), SESSION_KEYS.outboundActivity(source), wrapper(source),
       SESSION_KEYS.heartbeat(source), SESSION_KEYS.continuityAudit, SESSION_KEYS.registryPending, SESSION_KEYS.registryRestore,
       SESSION_KEYS.queue(target), SESSION_KEYS.inboxEvents(target), CLAIM_KEYS.index(target), SESSION_KEYS.registrationAudit,
-      source, target, this._sessionId, expectedMapping, runtimeId ?? "",
+      SESSION_KEYS.registrationAuditGap, source, target, this._sessionId, expectedMapping, runtimeId ?? "",
       defaultRuntime, String(process.pid), process.cwd(), auditClaudeSession(defaultRuntime, process.env), sessionTag(this._sessionId),
       String(REGISTRATION_AUDIT_MAXLEN));
     // Throws a plain Error for an unexpected reply: infrastructure, never a refusal.
@@ -487,25 +496,9 @@ export class RedisClient {
     };
     // A completed value: publishing it also drops the name's rollback
     // bookkeeping, so no failed attempt's undo can overwrite it (R2).
-    const runtime = auditRuntime(metadata?.client, process.env);
-    try {
-      await this.sessionStore.publishRegistration(name, JSON.stringify(registration), {
-        name, session_tag: sessionTag(session.session_id), runtime, pid: process.pid, via: "register",
-        cwd: metadata?.working_directory ?? process.cwd(), claude_session: auditClaudeSession(runtime, process.env),
-      });
-    } catch (error) {
-      // F2: the audited publish validates before it writes, so a failure here
-      // changed nothing; undo this attempt's session and provisional registry
-      // value so the visible state is as before. (A rename has already moved
-      // the mailbox; it keeps its new session and only reports the failure.)
-      if (!renaming) {
-        await this.sessionStore.closeSession(session.session_id).catch(() => undefined);
-        await this.sessionStore.undoRegistryWrite(session.registry_write).catch(() => false);
-        this._agentName = oldName;
-        this._sessionId = oldSessionId;
-      }
-      throw error;
-    }
+    // The registration audit event rides along; it is best-effort and never
+    // fails this publish (an unusable audit key records an audit gap).
+    await this.sessionStore.publishRegistration(name, JSON.stringify(registration), this.registrationAuditEvent(name, session.session_id, metadata));
     await this.mailbox.ensureMailbox(name);
 
     // Start both session lease refresh and legacy heartbeat
@@ -518,6 +511,15 @@ export class RedisClient {
       await sweepProvisional(this.redis).catch(() => undefined);
     }
     return { name, session_id: session.session_id };
+  }
+
+  /** The registration audit event for a new session: values this process already has, and the session tag, never its id. */
+  private registrationAuditEvent(name: string, sessionId: string, metadata?: AgentDiscoveryMetadata): RegistrationAuditEvent {
+    const runtime = auditRuntime(metadata?.client, process.env);
+    return {
+      name, session_tag: sessionTag(sessionId), runtime, pid: process.pid, via: "register",
+      cwd: metadata?.working_directory ?? process.cwd(), claude_session: auditClaudeSession(runtime, process.env),
+    };
   }
 
   private startHeartbeat(): void {

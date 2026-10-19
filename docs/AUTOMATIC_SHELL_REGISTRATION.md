@@ -425,16 +425,23 @@ Exit codes:
 Every committed registration of a new session (any runtime: the Claude MCP server, registered
 shells, the plain MCP server, HTTP) appends one entry to the stream `gptq:registration-audit`
 (`MAXLEN ~ 10000`). The entry is written by the same Lua script that publishes the registry entry
-(`PUBLISH_REGISTRATION_AUDITED_SCRIPT` in `src/core/session-store.ts`), so it exists if and only
-if the registration committed. The script type-checks every key it touches before its first write,
-so a failure (for example a wrong-type audit key) changes nothing, and the client then undoes the
-attempt's session and provisional registry value. A failed or rolled-back attempt writes no event
-(there is no `rolled_back` event). A runtime continuity adoption (a live provisional session
-adopting its mapped mailbox name) is audited in the adoption script itself, as `event=registered`
-with `via=adoption` for the target name; ordinary registrations carry `via=register`. The operator
-continuity and remap commands only change a mapping and are not audited here. Unregistering, reaping or rolling back later
-never removes the entry, so it proves a transient registration that a registry snapshot no longer
-shows. A registered shell's later metadata republish is not a new registration and is not audited.
+(`PUBLISH_REGISTRATION_AUDITED_SCRIPT` in `src/core/session-store.ts`), so an entry exists only for
+a registration that committed. A failed or rolled-back attempt never reaches that script and writes
+no event (there is no `rolled_back` event). A runtime continuity adoption (a live provisional
+session adopting its mapped mailbox name) is audited in the adoption script itself, as
+`event=registered` with `via=adoption` for the target name; ordinary registrations carry
+`via=register`. The operator continuity and remap commands only change a mapping and are not
+audited here. Unregistering, reaping or rolling back later never removes the entry, so it proves a
+transient registration that a registry snapshot no longer shows. A registered shell's later
+metadata republish is not a new registration and is not audited.
+
+**The audit is best-effort and never blocks registration.** A registration, rename or adoption
+never fails or rolls back because of the audit: its failure modes are exactly those it had before
+the audit existed (a wrong-type registry or rollback-bookkeeping key still fails it, now checked
+before the script's first write, so such a failure changes nothing). When the audit key cannot take the event (it holds another type), the script
+still publishes the registration and instead records an **audit gap**: it sets the string
+`gptq:registration-audit:gap` to the Redis server's current epoch milliseconds (never lowering
+it). If the gap marker itself holds another type, it is left alone and the query reports `unknown`.
 
 Fields: `event=registered`, `name`, `session_tag` (the `sid-sha256:` tag, never the raw session
 id), `runtime` (`claude` | `codex` | `pi` | `generic` | `unknown`; a declared client outside that
@@ -442,7 +449,7 @@ list, such as `opencode`, is `unknown`), `pid`, `cwd` (the shell's working direc
 declared one, else the registering process's cwd), and `claude_session` (the Claude session UUID
 from `CLAUDE_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` when the Claude MCP path has it, else empty), and `via` (`register` | `adoption`).
 
-Query it read-only (EXISTS, XINFO STREAM and XRANGE only):
+Query it read-only (TYPE, XRANGE, XINFO STREAM and GET only; it never creates a key):
 
 ```
 bin/gptqueue-doctor registrations --since 2026-10-19T00:00:00Z --until 2026-10-19T12:00:00Z \
@@ -460,18 +467,24 @@ session_tag, runtime, pid, cwd, claude_session, via}], truncated}`, with at most
   (`complete_from <= since`). Nothing was removed and the stream's first entry is older, or
   entries were removed (`entries-added > length` for MAXLEN trims, `max-deleted-entry-id` for
   XDEL) but only before `--since`.
-- `incomplete`: events before `complete_from` were trimmed or deleted, or the audit started
-  writing to this Redis after `--since`. When the audit was deployed after `--since`,
-  `complete_from` is the first audited registration, so the caller sees the deploy time there.
-  An empty stream gives `unknown`, since nothing proves when it started.
-  Coverage is computed from stream metadata read after the scan, so a trim or XDEL during the
-  query downgrades it instead of hiding a missed event.
+- `incomplete`: events before `complete_from` were trimmed or deleted, the audit started
+  writing to this Redis after `--since`, or an audit gap was recorded at or after `--since`.
+  When the audit was deployed after `--since`, `complete_from` is the first audited
+  registration, so the caller sees the deploy time there. An audit gap moves `complete_from` to
+  1 ms after the gap (`max(stream bound, gap + 1 ms)`); when the stream itself gives no bound (it
+  is missing or not a stream) a gap in the window still gives `incomplete`, with `complete_from:
+  null`. An empty stream gives `unknown`, since nothing proves when it started.
+- `unknown`: no audit stream on this Redis (missing, or a key of another type), a Redis older
+  than 7.0 without the XINFO fields, or a gap marker that is not a string of epoch milliseconds.
 
-**Mixed versions.** Writers on releases without the audit emit nothing, and the stream cannot tell
-which writers ran which release. An empty `complete` report proves non-registration only when
-every process that could register in the queried interval ran an audit-emitting release
-throughout it.
-- `unknown`: no audit stream on this Redis, or a Redis older than 7.0 without the XINFO fields.
+Coverage is computed from stream metadata and the gap marker, both read after the scan, so a
+trim, an XDEL or an unaudited registration during the query downgrades it instead of hiding a
+missed event.
+
+**Mixed versions.** Writers on releases without the audit emit nothing (no event and no gap
+marker), and the stream cannot tell which writers ran which release. An empty `complete` report
+proves non-registration only when every process that could register in the queried interval ran
+an audit-emitting release throughout it.
 
 Exit codes: 0 success, 2 invalid arguments, 4 Redis unavailable (or the query failed).
 `bin/gptqueue-doctor registrations --help` prints the same summary.

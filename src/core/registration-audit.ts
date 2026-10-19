@@ -3,11 +3,17 @@
  * its read-only query (`gptqueue-doctor registrations`).
  *
  * Every committed registration of a new session appends one event=registered
- * entry, atomically with the registry publication (session-store.ts
- * PUBLISH_REGISTRATION_AUDITED_SCRIPT). A failed or rolled-back attempt never
- * reaches that commit and emits nothing; a later unregister, reap or rollback
- * never removes the event. So the stream proves, for a time window it fully
- * covers, whether a name, directory or Claude session ever registered.
+ * entry in the same Lua script as the registry publication (session-store.ts
+ * PUBLISH_REGISTRATION_AUDITED_SCRIPT; the runtime adoption script likewise).
+ * A failed attempt never reaches that script and emits nothing; a later
+ * unregister, reap or rollback never removes the event. So the stream proves,
+ * for a time window it fully covers, whether a name, directory or Claude
+ * session ever registered.
+ *
+ * The audit is best-effort: it never fails or rolls back a registration. When
+ * the audit key is unusable (not a stream), the script still publishes and
+ * records an audit gap instead (SESSION_KEYS.registrationAuditGap, epoch ms),
+ * which makes the query report coverage "incomplete" from that instant.
  *
  * Events carry the session's sessionTag(), never the raw session id (a bearer
  * credential).
@@ -60,6 +66,32 @@ export const auditClaudeSession = (runtime: AuditRuntime, env: NodeJS.ProcessEnv
   return UUID.test(candidate) ? candidate.toLowerCase() : "";
 };
 
+/**
+ * Lua: defines audit_or_gap(stream, gap, maxlen, fields). It XADDs the event
+ * when `stream` is a stream or missing; otherwise (or if that XADD errors) it
+ * records an audit gap: SET `gap` to the server's epoch ms, never lowering it,
+ * and only when `gap` is a string or missing (anything else is left alone; the
+ * query then reports coverage "unknown"). It never raises, so the enclosing
+ * registration script always completes. Returns 1 audited, 0 not audited.
+ */
+export const auditOrGapLua = `
+local function audit_or_gap(stream, gap, maxlen, fields)
+  local st = redis.call('TYPE', stream).ok
+  if st == 'stream' or st == 'none' then
+    local r = redis.pcall('XADD', stream, 'MAXLEN', '~', maxlen, '*', unpack(fields))
+    if type(r) ~= 'table' or not r.err then return 1 end
+  end
+  local gt = redis.call('TYPE', gap).ok
+  if gt == 'string' or gt == 'none' then
+    local t = redis.call('TIME')
+    local now = t[1] .. string.format('%03d', math.floor(tonumber(t[2]) / 1000))
+    local prev = tonumber(redis.call('GET', gap) or '')
+    if prev == nil or prev < tonumber(now) then redis.pcall('SET', gap, now) end
+  end
+  return 0
+end
+`;
+
 /** Flat XADD field list for one event (event=registered first). */
 export const auditFieldList = (event: RegistrationAuditEvent): string[] => [
   "event", "registered", "name", event.name, "session_tag", event.session_tag, "runtime", event.runtime,
@@ -85,7 +117,9 @@ export type RegistrationsReport = Readonly<{
   coverage: Coverage;
   /**
    * The earliest instant the stream provably holds every event from (ISO), or
-   * null when unknown. coverage is "complete" iff this is at or before since.
+   * null when no such instant is known. coverage is "complete" iff this is at
+   * or before since. A null with "incomplete" means a recorded audit gap falls
+   * in the window but the stream itself gives no bound.
    */
   complete_from: string | null;
   events: ReadonlyArray<Readonly<{ at: string; name: string; session_tag: string; runtime: string; pid: number | null; cwd: string; claude_session: string; via: string }>>;
@@ -104,6 +138,13 @@ export type StreamInfo = Readonly<{
 
 const idMs = (id: string): number => Number(id.split("-")[0]);
 
+const assertNever = (value: never): never => {
+  throw new Error(`Unhandled audit gap marker: ${JSON.stringify(value)}`);
+};
+
+type CoverageResult = Readonly<{ coverage: Coverage; complete_from: string | null }>;
+const UNKNOWN: CoverageResult = { coverage: "unknown", complete_from: null };
+
 /**
  * Coverage from the stream's own history (Redis >= 7 XINFO STREAM fields).
  * - Nothing removed (entries-added == length, max-deleted 0-0): every event
@@ -116,18 +157,64 @@ const idMs = (id: string): number => Number(id.split("-")[0]);
  *   any XDEL bounds holes at max-deleted-entry-id + 1 ms.
  * - No stream, missing fields (older Redis) or no evidence: unknown.
  */
-export const coverageOf = (info: StreamInfo, sinceMs: number): Readonly<{ coverage: Coverage; complete_from: string | null }> => {
-  if (!info.exists || info.maxDeletedEntryId === undefined || info.entriesAdded === undefined) return { coverage: "unknown", complete_from: null };
+export const coverageOf = (info: StreamInfo, sinceMs: number): CoverageResult => {
+  if (!info.exists || info.maxDeletedEntryId === undefined || info.entriesAdded === undefined) return UNKNOWN;
   const trimmed = info.entriesAdded > info.length;
   const deletedMs = info.maxDeletedEntryId === "0-0" ? null : idMs(info.maxDeletedEntryId) + 1;
   const firstMs = info.firstEntryId === null ? null : idMs(info.firstEntryId) + (trimmed ? 1 : 0);
-  if (firstMs === null) return { coverage: "unknown", complete_from: null };
+  if (firstMs === null) return UNKNOWN;
   const fromMs = deletedMs === null ? firstMs : Math.max(firstMs, deletedMs);
   return { coverage: fromMs <= sinceMs ? "complete" : "incomplete", complete_from: new Date(fromMs).toISOString() };
 };
 
+/**
+ * The audit gap marker (SESSION_KEYS.registrationAuditGap): the epoch ms of the
+ * latest registration the audit could not record. absent: no gap recorded;
+ * invalid: the key is not a string or does not hold epoch ms, so whether and
+ * when registrations went unaudited is unknown.
+ */
+export type GapMarker =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "at"; ms: number }>
+  | Readonly<{ kind: "invalid" }>;
+
+export const parseGap = (type: string, value: string | null): GapMarker => {
+  if (type === "none" || (type === "string" && value === null)) return { kind: "absent" };
+  if (type !== "string" || value === null || !/^\d{1,16}$/.test(value)) return { kind: "invalid" };
+  return { kind: "at", ms: Number(value) };
+};
+
+/**
+ * Stream coverage narrowed by the gap marker. An event at the gap instant is
+ * missing, so the stream holds every event only from gap + 1 ms:
+ * complete_from = max(stream bound, gap + 1), and a gap at or after since
+ * makes coverage "incomplete" (with complete_from null when the stream gives
+ * no bound). An unreadable marker makes coverage "unknown".
+ */
+export const withGap = (base: CoverageResult, gap: GapMarker, sinceMs: number): CoverageResult => {
+  switch (gap.kind) {
+    case "absent": return base;
+    case "invalid": return UNKNOWN;
+    case "at": {
+      if (base.complete_from === null) return gap.ms >= sinceMs ? { coverage: "incomplete", complete_from: null } : base;
+      const fromMs = Math.max(Date.parse(base.complete_from), gap.ms + 1);
+      return { coverage: fromMs <= sinceMs ? "complete" : "incomplete", complete_from: new Date(fromMs).toISOString() };
+    }
+    default: return assertNever(gap);
+  }
+};
+
+/** The gap marker that goes with an audit stream key (SESSION_KEYS.registrationAuditGap for the real one). */
+export const gapKeyOf = (key: string): string => `${key}:gap`;
+
+const readGap = async (redis: Redis, key: string): Promise<GapMarker> => {
+  const type = await redis.type(key);
+  return parseGap(type, type === "string" ? await redis.get(key) : null);
+};
+
 const readInfo = async (redis: Redis, key: string): Promise<StreamInfo> => {
-  if ((await redis.exists(key)) === 0) return { exists: false, length: 0, firstEntryId: null };
+  // A missing key or one of another type holds no audit events.
+  if ((await redis.type(key)) !== "stream") return { exists: false, length: 0, firstEntryId: null };
   const raw = (await redis.call("XINFO", "STREAM", key)) as unknown[];
   const fields = new Map<string, unknown>();
   for (let i = 0; i + 1 < raw.length; i += 2) fields.set(String(raw[i]), raw[i + 1]);
@@ -153,7 +240,8 @@ const toObject = (fields: readonly string[]): Record<string, string> => {
 export type QueryHooks = Readonly<{ onPage?: (pageIndex: number) => Promise<void> }>;
 
 /**
- * Read-only: EXISTS, XINFO STREAM and XRANGE only.
+ * Read-only: TYPE, XRANGE, XINFO STREAM and GET only; it never creates a key.
+ * An audit key of another type holds no events (coverage from the gap marker).
  *
  * Coverage comes from an XINFO taken AFTER the last XRANGE page (F4), never
  * from metadata read before the scan. That is sound without a snapshot:
@@ -169,7 +257,7 @@ export type QueryHooks = Readonly<{ onPage?: (pageIndex: number) => Promise<void
 export const queryRegistrations = async (redis: Redis, query: RegistrationsQuery, key: string = SESSION_KEYS.registrationAudit, hooks: QueryHooks = {}): Promise<RegistrationsReport> => {
   const events: Array<RegistrationsReport["events"][number]> = [];
   let truncated = false;
-  if ((await redis.exists(key)) === 1) {
+  if ((await redis.type(key)) === "stream") {
     let start = `${query.sinceMs}-0`;
     const end = `${query.untilMs}-18446744073709551615`;
     let scanned = 0;
@@ -195,7 +283,10 @@ export const queryRegistrations = async (redis: Redis, query: RegistrationsQuery
     }
     if (scanned >= SCAN_CAP) truncated = true;
   }
-  const { coverage, complete_from } = coverageOf(await readInfo(redis, key), query.sinceMs);
+  // Both read after the scan: a registration that could not be audited while
+  // the scan ran has already raised the gap marker by the time it is read.
+  const stream = coverageOf(await readInfo(redis, key), query.sinceMs);
+  const { coverage, complete_from } = withGap(stream, await readGap(redis, gapKeyOf(key)), query.sinceMs);
   return { schema_version: 1, since: new Date(query.sinceMs).toISOString(), until: new Date(query.untilMs).toISOString(), coverage, complete_from, events, truncated };
 };
 
@@ -203,12 +294,16 @@ export const queryRegistrations = async (redis: Redis, query: RegistrationsQuery
 
 export const REGISTRATIONS_HELP = [
   "usage: gptqueue-doctor registrations --since <iso> --until <iso> [--cwd <path>] [--claude-session <uuid>] [--name <n>] [--redis-url <url>] --json",
-  "  Read-only (EXISTS, XINFO STREAM, XRANGE) query of the append-only registration audit stream",
+  "  Read-only (TYPE, XRANGE, XINFO STREAM, GET) query of the append-only registration audit stream",
   `  ${SESSION_KEYS.registrationAudit}: one event per committed registration, kept even after the session`,
   "  unregisters, is reaped or rolled back. At most 500 events (truncated:true beyond).",
+  "  The audit is best-effort and never fails a registration: when the stream key is unusable the",
+  `  registration still commits and sets the gap marker ${SESSION_KEYS.registrationAuditGap} (epoch ms).`,
   "  coverage: complete  = the stream provably holds every registration since --since (complete_from <= since);",
-  "            incomplete = events before complete_from were trimmed, or the audit started after --since;",
-  "            unknown   = no audit stream on this Redis, or a Redis without XINFO max-deleted-entry-id.",
+  "            incomplete = events before complete_from were trimmed or deleted, the audit started after",
+  "                         --since, or an audit gap was recorded at or after --since;",
+  "            unknown   = no audit stream on this Redis, a Redis without XINFO max-deleted-entry-id,",
+  "                        or a gap marker that is not a string of epoch ms.",
   "  --redis-url defaults to $REDIS_URL, then redis://127.0.0.1:6379/0.",
   "  Mixed versions: writers on releases without the audit emit nothing. An empty complete report proves",
   "  non-registration only if every writer that could register in the window ran an audit-emitting release.",

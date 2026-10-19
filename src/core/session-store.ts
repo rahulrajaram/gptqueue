@@ -13,7 +13,7 @@ import { SESSION_KEYS, SESSION_DEFAULTS, SYSTEM_SENDER } from "./keys.js";
 import type { SessionRecord, LeaseState, AgentPresence } from "./types.js";
 import { GptQueueError } from "../mcp-server/errors.js";
 import { sessionTag } from "./session-tag.js";
-import { auditFieldList, REGISTRATION_AUDIT_MAXLEN, type RegistrationAuditEvent } from "./registration-audit.js";
+import { auditFieldList, auditOrGapLua, REGISTRATION_AUDIT_MAXLEN, type RegistrationAuditEvent } from "./registration-audit.js";
 
 /** KEYS order shared by the registry rollback scripts below. */
 const REGISTRY_ROLLBACK_KEYS = [
@@ -206,26 +206,29 @@ return 1
 
 /**
  * PUBLISH_REGISTRATION_SCRIPT plus the registration audit event, in the same
- * script so the event exists iff the registration committed (no event for a
- * failed or rolled-back attempt). Scripts do not roll back, so every
- * predictable failure (a wrong-type key) is checked before the first write
- * (F2): after the checks nothing can fail. KEYS[4] audit stream; ARGV 3
- * MAXLEN, then the event's field/value pairs.
+ * script so an event exists only for a committed registration (no event for a
+ * failed or rolled-back attempt).
+ *
+ * The registry and its rollback bookkeeping (KEYS 1-3) fail the publish on a
+ * wrong type, as before the audit existed; scripts do not roll back, so they
+ * are type-checked before the first write and such a failure changes nothing.
+ * The audit never fails it: audit_or_gap appends the event, or, when the
+ * audit key is unusable, records an audit gap and the publish still commits.
+ * KEYS[4] audit stream, KEYS[5] gap marker; ARGV 3 MAXLEN, then the event's
+ * field/value pairs. Returns 1 audited, 0 published with an audit gap.
  */
 const PUBLISH_REGISTRATION_AUDITED_SCRIPT = `
+${auditOrGapLua}
 for i = 1, 3 do
   local t = redis.call('TYPE', KEYS[i]).ok
   if t ~= 'hash' and t ~= 'none' then return redis.error_reply('WRONGTYPE registration key ' .. KEYS[i] .. ' is ' .. t) end
 end
-local st = redis.call('TYPE', KEYS[4]).ok
-if st ~= 'stream' and st ~= 'none' then return redis.error_reply('WRONGTYPE registration audit key ' .. KEYS[4] .. ' is ' .. st) end
 local fields = {}
 for i = 4, #ARGV do fields[#fields + 1] = ARGV[i] end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('HDEL', KEYS[3], ARGV[1])
-redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[3], '*', unpack(fields))
-return 1
+return audit_or_gap(KEYS[4], KEYS[5], ARGV[3], fields)
 `;
 
 /** The provisional registry value a createSession stored. */
@@ -386,7 +389,9 @@ export class SessionStore {
       await this.redis.eval(PUBLISH_REGISTRATION_SCRIPT, 3, ...REGISTRY_ROLLBACK_KEYS, agentName, value);
       return;
     }
-    await this.redis.eval(PUBLISH_REGISTRATION_AUDITED_SCRIPT, 4, ...REGISTRY_ROLLBACK_KEYS, SESSION_KEYS.registrationAudit,
+    // Best-effort audit: an unusable audit key records a gap, never a failure.
+    await this.redis.eval(PUBLISH_REGISTRATION_AUDITED_SCRIPT, 5, ...REGISTRY_ROLLBACK_KEYS,
+      SESSION_KEYS.registrationAudit, SESSION_KEYS.registrationAuditGap,
       agentName, value, REGISTRATION_AUDIT_MAXLEN, ...auditFieldList(audit));
   }
 

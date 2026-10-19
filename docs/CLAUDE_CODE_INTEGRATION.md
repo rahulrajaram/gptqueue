@@ -144,7 +144,9 @@ unless it should own a mailbox.
 To prove a worker never registered, even transiently, query the registration audit for its time
 window and directory: `gptqueue-doctor registrations --since ... --until ... --cwd <worktree> --json`
 must return no events with `coverage: "complete"`, and every writer that could register in that
-window must run an audit-emitting release (older releases write no events) (see "Registration audit" in
+window must run an audit-emitting release (older releases write no events). The audit is
+best-effort and never blocks a registration; a registration it could not record leaves an audit
+gap marker that makes the window `incomplete` (see "Registration audit" in
 AUTOMATIC_SHELL_REGISTRATION.md).
 
 ## Optional: AskUserQuestion guard

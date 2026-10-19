@@ -122,10 +122,16 @@ export const SESSION_KEYS = {
   identityAudit: "gptq:identity-audit",
   /**
    * Append-only audit of committed registrations (stream, MAXLEN ~ 10000):
-   * one event per registry publication of a new session, written atomically
-   * with it. Carries session tags, never raw session ids.
+   * one event per registry publication of a new session, written in the same
+   * script as it. Best-effort: carries session tags, never raw session ids.
    */
   registrationAudit: "gptq:registration-audit",
+  /**
+   * Audit gap marker (string, epoch ms of the latest registration that could
+   * not be audited because the audit key above was unusable). Registration
+   * never fails over the audit; it records this instead.
+   */
+  registrationAuditGap: "gptq:registration-audit:gap",
   /**
    * DL-2: names registered as a sidecar's per-startup provisional identity
    * and not yet adopted or bound. The provisional sweeper retires a member

@@ -1,4 +1,5 @@
 /** Worker-mode predicate (f-1965) and the pure AskUserQuestion guard decision (f-1915). */
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { decideAsk, renderAsk } from "../src/claude/hook.js";
 import type { Identity, ProbeResult } from "../src/claude/inbox-probe.js";
@@ -26,6 +27,20 @@ describe("isWorkerSession truth table", () => {
     [{ GPTQUEUE_WORKER: "true", CLAUDE_CODE_ENTRYPOINT: "cli" }, false],
   ];
   it.each(cases)("%j -> %s", (env, expected) => { expect(isWorkerSession(env)).toBe(expected); });
+});
+
+describe("test hermeticity (vitest.config.ts)", () => {
+  // A wrapper exporting GPTQUEUE_WORKER=1, or a `claude -p` caller
+  // (CLAUDE_CODE_ENTRYPOINT=sdk-cli), must not put children that tests spawn
+  // with the inherited env into headless worker mode.
+  it("drops the worker-mode env, so children spawned with the inherited env are not headless workers", () => {
+    expect(process.env.GPTQUEUE_WORKER).toBeUndefined();
+    expect(process.env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
+    const child = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify([process.env.GPTQUEUE_WORKER ?? null, process.env.CLAUDE_CODE_ENTRYPOINT ?? null]))"],
+      { env: process.env, encoding: "utf8" });
+    expect(JSON.parse(child.stdout)).toEqual([null, null]);
+    expect(isWorkerSession(process.env)).toBe(false);
+  });
 });
 
 describe("decideAsk", () => {

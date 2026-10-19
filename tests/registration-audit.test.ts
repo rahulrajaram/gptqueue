@@ -8,7 +8,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Redis } from "ioredis";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { SessionStore } from "../src/core/session-store.js";
 import { runtimeMailboxKey } from "../src/core/mailbox-continuity.js";
@@ -16,11 +16,15 @@ import { AdoptionRefusedError } from "../src/core/adoption-refusal.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { sessionTag } from "../src/core/session-tag.js";
 import { auditClaudeSession, auditRuntime, coverageOf, parseRegistrationsArgs, queryRegistrations } from "../src/core/registration-audit.js";
+import { startClaudeSessionRecord } from "../src/claude/mcp-record.js";
+import { findSessionRecord, readProcess } from "../src/claude/session-record.js";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
 const ROOT = resolve(__dirname, "..");
 const BIN = join(ROOT, "bin");
 const AUDIT = SESSION_KEYS.registrationAudit;
+/** The audit gap marker: the audit key plus ":gap" (SESSION_KEYS.registrationAuditGap). */
+const GAP = `${AUDIT}:gap`;
 let redis: Redis;
 let home = "";
 const clients: RedisClient[] = [];
@@ -218,44 +222,121 @@ describe("registration audit against Redis", { timeout: 300_000 }, () => {
   const snapshot = async (): Promise<string[]> => Promise.all(
     [SESSION_KEYS.registry, SESSION_KEYS.registryPending, SESSION_KEYS.registryRestore].map(async (k) => JSON.stringify(Object.entries(await redis.hgetall(k)).sort())));
 
-  it("F2: a wrong-type audit key fails the audited publish before any write", async () => {
-    const name = `audit-f2-${randomUUID().slice(0, 8)}`;
-    await redis.hset(SESSION_KEYS.registryPending, name, "pending-value");
-    await redis.hset(SESSION_KEYS.registryRestore, name, "restore-value");
-    const saved = await redis.dumpBuffer(AUDIT);
-    await redis.del(AUDIT);
+  /**
+   * Run `body` with the real audit key replaced by a non-stream value (and,
+   * with gap "wrong-type", the gap marker by a hash); restores both after.
+   */
+  const withBrokenAudit = async (gap: "absent" | "wrong-type", body: () => Promise<void>) => {
+    const saved = await Promise.all([AUDIT, GAP].map((k) => redis.dumpBuffer(k)));
+    await redis.del(AUDIT, GAP);
     await redis.set(AUDIT, "not-a-stream");
+    if (gap === "wrong-type") await redis.hset(GAP, "foreign", "value");
     try {
-      const before = await snapshot();
-      const store = new SessionStore(redis);
-      await expect(store.publishRegistration(name, "{}", { name, session_tag: sessionTag("x"), runtime: "generic", pid: 1, cwd: "/", claude_session: "", via: "register" }))
-        .rejects.toThrow(/WRONGTYPE/);
-      expect(await snapshot()).toEqual(before);
-      expect(await redis.hexists(SESSION_KEYS.registry, name)).toBe(0);
+      await body();
     } finally {
-      await redis.del(AUDIT);
-      if (saved) await redis.restore(AUDIT, 0, saved);
-      await redis.hdel(SESSION_KEYS.registryPending, name);
-      await redis.hdel(SESSION_KEYS.registryRestore, name);
+      await redis.del(AUDIT, GAP);
+      for (const [i, k] of [AUDIT, GAP].entries()) if (saved[i]) await redis.restore(k, 0, saved[i]!);
+    }
+  };
+  const gapMs = async (): Promise<number> => Number(await redis.get(GAP));
+
+  it("the gap marker key is the audit key plus :gap", () => {
+    expect(SESSION_KEYS.registrationAuditGap).toBe(GAP);
+  });
+
+  it("a wrong-type audit key: registration still commits and publishes, writes no event, records a gap; the query reports incomplete", async () => {
+    const name = `audit-gap-${randomUUID().slice(0, 8)}`;
+    await withBrokenAudit("absent", async () => {
+      const since = Date.now() - 1_000;
+      const client = new RedisClient(null, REDIS_URL);
+      clients.push(client);
+      await expect(client.register("both", name)).resolves.toMatchObject({ name });
+      expect(client.agentName).toBe(name);
+      expect(JSON.parse((await redis.hget(SESSION_KEYS.registry, name)) ?? "null")).toMatchObject({ name });
+      expect(await redis.sismember(SESSION_KEYS.agentSessions(name), client.sessionId!)).toBe(1);
+      expect(await redis.get(AUDIT)).toBe("not-a-stream");
+      expect(await gapMs()).toBeGreaterThanOrEqual(since);
+      expect(await gapMs()).toBeLessThanOrEqual(Date.now() + 1_000);
+      const report = await queryRegistrations(redis, { sinceMs: since, untilMs: Date.now() + 1_000, name });
+      expect(report).toMatchObject({ coverage: "incomplete", complete_from: null, events: [], truncated: false });
+    });
+  });
+
+  it("a wrong-type audit key: a rename with queued mail completes (mailbox moved, lease, heartbeat, identity record) and records a gap", async () => {
+    const id = randomUUID().slice(0, 8);
+    const oldName = `audit-ren-a-${id}`;
+    const newName = `audit-ren-b-${id}`;
+    const client = new RedisClient(null, REDIS_URL);
+    clients.push(client);
+    const first = await client.register("both", oldName);
+    const recordEnv = { GPTQ_CLAUDE_SESSION_RECORD: "1", GPTQ_CLAUDE_PID: String(process.pid), GPTQ_CLAUDE_RUNTIME_DIR: join(home, `rt-${id}`) };
+    const record = startClaudeSessionRecord(client, recordEnv);
+    expect(record).not.toBeNull();
+    const queued = [1, 2, 3].map((i) => JSON.stringify({ id: `m${i}-${id}`, type: "task" }));
+    await redis.rpush(SESSION_KEYS.queue(oldName), ...queued);
+    const leases = vi.spyOn(client.sessions, "startLeaseRefresh");
+    try {
+      await withBrokenAudit("absent", async () => {
+        const since = Date.now() - 1_000;
+        await expect(client.register("both", newName)).resolves.toMatchObject({ name: newName });
+        const sid = client.sessionId!;
+        expect(sid).not.toBe(first.session_id);
+        expect(client.agentName).toBe(newName);
+        // Mailbox migrated, old identity retired, new one published.
+        expect(await redis.lrange(SESSION_KEYS.queue(oldName), 0, -1)).toEqual([]);
+        expect(await redis.lrange(SESSION_KEYS.queue(newName), 0, -1)).toEqual(queued);
+        expect(await client.sessions.getSession(first.session_id)).toBeNull();
+        expect(await redis.hexists(SESSION_KEYS.registry, oldName)).toBe(0);
+        expect(JSON.parse((await redis.hget(SESSION_KEYS.registry, newName)) ?? "null")).toMatchObject({ name: newName });
+        // Lease refreshed and heartbeat live for the new identity.
+        expect(leases).toHaveBeenCalledWith(sid);
+        expect(await redis.pttl(SESSION_KEYS.lease(sid))).toBeGreaterThan(0);
+        await waitFor(async () => (await redis.get(SESSION_KEYS.heartbeat(newName))) === "alive", 5_000);
+        expect(await redis.get(SESSION_KEYS.heartbeat(newName))).toBe("alive");
+        // Identity observers notified: the Claude session record names the new identity.
+        expect(findSessionRecord([readProcess(process.pid)!], recordEnv)).toMatchObject({ kind: "found", record: { agent: newName, gptqueue_session_id: sid } });
+        // No event; a gap instead.
+        expect(await redis.get(AUDIT)).toBe("not-a-stream");
+        expect(await gapMs()).toBeGreaterThanOrEqual(since);
+      });
+    } finally {
+      leases.mockRestore();
+      record?.remove();
     }
   });
 
-  it("F2: register over a wrong-type audit key fails and leaves registry and bookkeeping as before", async () => {
-    const name = `audit-f2r-${randomUUID().slice(0, 8)}`;
-    const saved = await redis.dumpBuffer(AUDIT);
-    await redis.del(AUDIT);
-    await redis.set(AUDIT, "not-a-stream");
-    try {
-      const before = await snapshot();
+  it("wrong-type audit key and gap marker: registration still commits, the marker is left alone, the query reports unknown", async () => {
+    const name = `audit-gap2-${randomUUID().slice(0, 8)}`;
+    await withBrokenAudit("wrong-type", async () => {
+      const since = Date.now() - 1_000;
       const client = new RedisClient(null, REDIS_URL);
       clients.push(client);
-      await expect(client.register("both", name)).rejects.toThrow(/WRONGTYPE/);
-      expect(await snapshot()).toEqual(before);
-      expect(await redis.scard(SESSION_KEYS.agentSessions(name))).toBe(0);
-      expect(client.agentName).toBeNull();
+      await expect(client.register("both", name)).resolves.toMatchObject({ name });
+      expect(await redis.hexists(SESSION_KEYS.registry, name)).toBe(1);
+      expect(await redis.get(AUDIT)).toBe("not-a-stream");
+      expect(await redis.hgetall(GAP)).toEqual({ foreign: "value" });
+      const report = await queryRegistrations(redis, { sinceMs: since, untilMs: Date.now() + 1_000, name });
+      expect(report).toMatchObject({ coverage: "unknown", complete_from: null, events: [] });
+    });
+  });
+
+  it("the registry bookkeeping keys still fail the publish on a wrong type, before any write, with no event or gap", async () => {
+    const name = `audit-pend-${randomUUID().slice(0, 8)}`;
+    const saved = await Promise.all([SESSION_KEYS.registryPending, GAP].map((k) => redis.dumpBuffer(k)));
+    await redis.del(SESSION_KEYS.registryPending, GAP);
+    await redis.set(SESSION_KEYS.registryPending, "not-a-hash");
+    try {
+      const events = (await redis.type(AUDIT)) === "stream" ? await redis.xlen(AUDIT) : 0;
+      const store = new SessionStore(redis);
+      await expect(store.publishRegistration(name, "{}", { name, session_tag: sessionTag("x"), runtime: "generic", pid: 1, cwd: "/", claude_session: "", via: "register" }))
+        .rejects.toThrow(/WRONGTYPE/);
+      expect(await redis.hexists(SESSION_KEYS.registry, name)).toBe(0);
+      expect((await redis.type(AUDIT)) === "stream" ? await redis.xlen(AUDIT) : 0).toBe(events);
+      expect(await eventsFor(name)).toEqual([]);
+      expect(await redis.exists(GAP)).toBe(0);
     } finally {
-      await redis.del(AUDIT);
-      if (saved) await redis.restore(AUDIT, 0, saved);
+      await redis.del(SESSION_KEYS.registryPending, GAP);
+      for (const [i, k] of [SESSION_KEYS.registryPending, GAP].entries()) if (saved[i]) await redis.restore(k, 0, saved[i]!);
     }
   });
 
@@ -296,23 +377,80 @@ describe("registration audit against Redis", { timeout: 300_000 }, () => {
     expect((await queryRegistrations(redis, { sinceMs: since, untilMs: Date.now() + 1_000, name: refused.target })).events).toEqual([]);
   });
 
-  it("F3: a wrong-type audit key refuses the adoption before any write", async () => {
+  it("a wrong-type audit key: a runtime continuity adoption still completes and records a gap", async () => {
     const s = await adoptionSetup();
-    const saved = await redis.dumpBuffer(AUDIT);
-    await redis.del(AUDIT);
-    await redis.set(AUDIT, "not-a-stream");
-    try {
-      const before = await snapshot();
-      const mappingBefore = await redis.get(s.key);
-      await expect(s.client.adoptIdentity(s.source, s.target, s.key, s.mapping, s.binding.runtime_id)).rejects.toThrow(/WRONGTYPE/);
-      expect(await snapshot()).toEqual(before);
-      expect(await redis.get(s.key)).toBe(mappingBefore);
-      expect(await redis.xlen(SESSION_KEYS.continuityAudit).catch(() => -1)).toBeGreaterThanOrEqual(0);
-      expect(await redis.hget(SESSION_KEYS.session(s.client.sessionId!), "agent_name")).toBe(s.source);
-    } finally {
-      await redis.del(AUDIT);
-      if (saved) await redis.restore(AUDIT, 0, saved);
+    const sid = s.client.sessionId!;
+    await withBrokenAudit("absent", async () => {
+      const since = Date.now() - 1_000;
+      await expect(s.client.adoptIdentity(s.source, s.target, s.key, s.mapping, s.binding.runtime_id)).resolves.toBeUndefined();
+      expect(s.client.agentName).toBe(s.target);
+      expect(await redis.hget(SESSION_KEYS.session(sid), "agent_name")).toBe(s.target);
+      expect(await redis.sismember(SESSION_KEYS.agentSessions(s.target), sid)).toBe(1);
+      expect(await redis.hexists(SESSION_KEYS.registry, s.source)).toBe(0);
+      expect(await redis.get(AUDIT)).toBe("not-a-stream");
+      expect(await gapMs()).toBeGreaterThanOrEqual(since);
+    });
+  });
+
+  it("adoption keeps the pre-audit failure conditions: target inbox events of a wrong type fail it only when the source queue holds work", async () => {
+    // Empty source queue: the target's inbox events are never written, so a wrong type does not matter (as before).
+    const idle = await adoptionSetup();
+    scratchKeys.push(SESSION_KEYS.inboxEvents(idle.target));
+    await redis.set(SESSION_KEYS.inboxEvents(idle.target), "not-a-stream");
+    await expect(idle.client.adoptIdentity(idle.source, idle.target, idle.key, idle.mapping, idle.binding.runtime_id)).resolves.toBeUndefined();
+    expect(idle.client.agentName).toBe(idle.target);
+
+    // Work queued under the source: the forward would write them, so the adoption fails, now before any write.
+    const busy = await adoptionSetup();
+    scratchKeys.push(SESSION_KEYS.inboxEvents(busy.target), SESSION_KEYS.queue(busy.source));
+    await redis.set(SESSION_KEYS.inboxEvents(busy.target), "not-a-stream");
+    await redis.rpush(SESSION_KEYS.queue(busy.source), JSON.stringify({ id: "w1", type: "task" }));
+    const before = await snapshot();
+    await expect(busy.client.adoptIdentity(busy.source, busy.target, busy.key, busy.mapping, busy.binding.runtime_id)).rejects.toThrow(/WRONGTYPE/);
+    expect(await snapshot()).toEqual(before);
+    expect(await redis.hget(SESSION_KEYS.session(busy.client.sessionId!), "agent_name")).toBe(busy.source);
+    expect(await redis.llen(SESSION_KEYS.queue(busy.source))).toBe(1);
+  });
+
+  it("audit gap marker: a gap at or after since makes coverage incomplete from gap + 1; an unreadable marker makes it unknown; reads only", async () => {
+    const key = `gptq:test:registration-audit:${randomUUID()}`;
+    const gap = `${key}:gap`;
+    scratchKeys.push(key, gap);
+    for (let i = 0; i < 10; i += 1) {
+      await redis.xadd(key, `${3_000_000 + i}-0`, "event", "registered", "name", "n", "session_tag", sessionTag(`s-${i}`),
+        "runtime", "generic", "pid", "7", "cwd", "/g", "claude_session", "", "via", "register");
     }
+    const window = { sinceMs: 3_000_000, untilMs: 3_000_009 };
+    const at = (ms: number) => new Date(ms).toISOString();
+    expect(await queryRegistrations(redis, window, key)).toMatchObject({ coverage: "complete", complete_from: at(3_000_000) });
+    expect(await redis.exists(gap)).toBe(0);
+    // A gap inside the window: events from the gap instant may be missing.
+    await redis.set(gap, "3000005");
+    const digests = await Promise.all([key, gap].map(digest));
+    const inside = await queryRegistrations(redis, window, key);
+    expect(inside).toMatchObject({ coverage: "incomplete", complete_from: at(3_000_006) });
+    expect(inside.events).toHaveLength(10);
+    expect(await Promise.all([key, gap].map(digest))).toEqual(digests);
+    expect((await queryRegistrations(redis, { sinceMs: 3_000_006, untilMs: 3_000_009 }, key)).coverage).toBe("complete");
+    // A gap before since does not affect the window.
+    await redis.set(gap, "2999999");
+    expect(await queryRegistrations(redis, window, key)).toMatchObject({ coverage: "complete", complete_from: at(3_000_000) });
+    // Unparsable or wrong-type marker: unknown.
+    await redis.set(gap, "yesterday");
+    expect(await queryRegistrations(redis, window, key)).toMatchObject({ coverage: "unknown", complete_from: null });
+    await redis.del(gap);
+    await redis.hset(gap, "foreign", "value");
+    expect(await queryRegistrations(redis, window, key)).toMatchObject({ coverage: "unknown", complete_from: null });
+    // No stream (missing or another type): a gap in the window is incomplete with no bound; otherwise unknown.
+    const missing = `${key}:missing`;
+    scratchKeys.push(missing, `${missing}:gap`);
+    await redis.set(`${missing}:gap`, "3000005");
+    expect(await queryRegistrations(redis, window, missing)).toMatchObject({ coverage: "incomplete", complete_from: null, events: [] });
+    await redis.set(`${missing}:gap`, "2999999");
+    expect(await queryRegistrations(redis, window, missing)).toMatchObject({ coverage: "unknown", complete_from: null, events: [] });
+    await redis.set(missing, "not-a-stream");
+    expect(await queryRegistrations(redis, window, missing)).toMatchObject({ coverage: "unknown", events: [] });
+    expect(await redis.get(missing)).toBe("not-a-stream");
   });
 
   it("F4: coverage is revalidated after the scan: an XDEL or trim between pages downgrades it", async () => {
