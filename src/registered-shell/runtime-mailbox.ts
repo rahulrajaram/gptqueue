@@ -2,14 +2,36 @@ import type { RedisClient } from "../mcp-server/redis-client.js";
 import { runtimeBindingSchema, type RuntimeBinding } from "./runtime.js";
 import { runtimeMailboxKey } from "../core/mailbox-continuity.js";
 import { SESSION_KEYS } from "../core/keys.js";
+import { AdoptionRefusedError, type AdoptionRefusalReason, type AdoptionRefusalSignal } from "../core/adoption-refusal.js";
 import { z } from "zod";
 import { resolve } from "node:path";
 
-/** Adoption of the bound mailbox was refused; `target` is that mailbox. */
-export class RuntimeMailboxAdoptionRefused extends Error {
+/**
+ * Adoption of the bound mailbox `target` did not happen, and this client still
+ * holds its provisional name. This base class alone means an infrastructure or
+ * protocol failure (Redis, an unexpected reply), never a classified refusal.
+ */
+export class RuntimeMailboxAdoptionError extends Error {
   constructor(readonly cause: unknown, readonly target: string) {
     super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "RuntimeMailboxAdoptionError";
+  }
+}
+
+/** The adoption guard refused: its classified reason, first blocking signal and code. */
+export class RuntimeMailboxAdoptionRefused extends RuntimeMailboxAdoptionError {
+  readonly reason: AdoptionRefusalReason;
+  readonly signal: AdoptionRefusalSignal | null;
+  readonly code: number;
+  /** Redis ms when a recheck may be worthwhile: a hint, never a promise. */
+  readonly recheckAfterMs: number | null;
+  constructor(cause: AdoptionRefusedError, target: string) {
+    super(cause, target);
     this.name = "RuntimeMailboxAdoptionRefused";
+    this.reason = cause.refusal.reason;
+    this.signal = cause.refusal.signal;
+    this.code = cause.refusal.code;
+    this.recheckAfterMs = cause.refusal.recheckAfterMs;
   }
 }
 
@@ -44,7 +66,9 @@ export const restoreRuntimeMailbox = async (client: RedisClient, binding: Runtim
     try {
       await client.adoptIdentity(source, parsed.data.agent, key, raw, validated.runtime_id);
     } catch (error) {
-      throw new RuntimeMailboxAdoptionRefused(error, parsed.data.agent);
+      throw error instanceof AdoptionRefusedError
+        ? new RuntimeMailboxAdoptionRefused(error, parsed.data.agent)
+        : new RuntimeMailboxAdoptionError(error, parsed.data.agent);
     }
   }
   return client.requireRegistered();

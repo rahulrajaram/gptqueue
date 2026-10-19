@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Redis } from "ioredis";
 import { runtimeBindingSchema, type RuntimeBinding } from "./runtime-binding.js";
 import { occupancyGuardLua } from "./occupancy-guard.js";
+import { AdoptionRefusedError, OPERATOR_CONTINUITY_REFUSALS, parseGuardReply } from "./adoption-refusal.js";
 import { SESSION_KEYS } from "./keys.js";
 
 /**
@@ -62,20 +63,29 @@ export const applyContinuity = async (redis: Redis, plan: ContinuityPlan): Promi
   const wrapperKey = SESSION_KEYS.wrapperClaim;
   // D5: the occupied() guard is generated from the shared signal table
   // (core/occupancy-guard.ts) — identical to adoptIdentity's target guard.
+  // A refusal returns {code, first blocking signal}; the conditions and
+  // their order are unchanged (core/adoption-refusal.ts).
   const result = await redis.eval(`
     ${occupancyGuardLua("occupied")}
     if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] then return -1 end
-    if (redis.call('HGET', KEYS[2], ARGV[2]) or '') ~= ARGV[3] then return -2 end
-    if ARGV[4] ~= '' and (redis.call('HGET', KEYS[2], ARGV[4]) or '') ~= ARGV[5] then return -3 end
-    if occupied(ARGV[2], KEYS[3]) then return -4 end
+    if (redis.call('HGET', KEYS[2], ARGV[2]) or '') ~= ARGV[3] then return {-2, 'target_registration'} end
+    if ARGV[4] ~= '' and (redis.call('HGET', KEYS[2], ARGV[4]) or '') ~= ARGV[5] then return {-3, 'source_registration'} end
+    local target = occupied(ARGV[2], KEYS[3])
+    if target then return {-4, target} end
     if ARGV[4] ~= '' and ARGV[4] ~= ARGV[2] then
-      if occupied(ARGV[4], KEYS[4]) or redis.call('ZCARD','gptq:claims-index:'..ARGV[4]) > 0 or redis.call('LLEN','gptq:q:'..ARGV[4]) > 0 or redis.call('EXISTS','gptq:outbound-activity:'..ARGV[4]) == 1 then return -5 end
+      local source = occupied(ARGV[4], KEYS[4])
+      if source then return {-5, source} end
+      if redis.call('ZCARD','gptq:claims-index:'..ARGV[4]) > 0 then return {-5, 'claims_index'} end
+      if redis.call('LLEN','gptq:q:'..ARGV[4]) > 0 then return {-5, 'queued_messages'} end
+      if redis.call('EXISTS','gptq:outbound-activity:'..ARGV[4]) == 1 then return {-5, 'outbound_activity'} end
     end
     redis.call('SET',KEYS[1],ARGV[6])
     redis.call('XADD',KEYS[5],'MAXLEN','~',1000,'*','event','operator_continuity','target',ARGV[2],'source',ARGV[4],'runtime_id',ARGV[7])
     return 1
   `, 5, p.mappingKey, SESSION_KEYS.registry, wrapperKey(p.target), wrapperKey(p.source ?? p.target), SESSION_KEYS.continuityAudit,
   p.expectedMapping ?? "", p.target, targetRaw, p.source ?? "", sourceRaw ?? "", desired, p.binding.runtime_id);
-  if (result !== 1) throw new Error(`Continuity apply refused (${result}): mapping changed, live owner, claims or source activity`);
+  // Throws a plain Error for an unexpected reply: infrastructure, never a refusal.
+  const refusal = parseGuardReply(result, OPERATOR_CONTINUITY_REFUSALS);
+  if (refusal) throw new AdoptionRefusedError("Continuity apply refused", refusal);
   return "applied";
 };

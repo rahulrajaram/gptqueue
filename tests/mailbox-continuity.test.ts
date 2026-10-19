@@ -4,7 +4,8 @@ import { Redis } from "ioredis";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { applyContinuity, prepareContinuity, runtimeMailboxKey } from "../src/core/mailbox-continuity.js";
 import { OCCUPANCY_SIGNALS } from "../src/core/occupancy-guard.js";
-import { restoreRuntimeMailbox } from "../src/registered-shell/runtime-mailbox.js";
+import { restoreRuntimeMailbox, RuntimeMailboxAdoptionRefused } from "../src/registered-shell/runtime-mailbox.js";
+import { AdoptionRefusedError } from "../src/core/adoption-refusal.js";
 import type { RuntimeBinding } from "../src/registered-shell/runtime.js";
 import { flushTestKeys, assertNotLiveDb } from "./helpers/redis-test-utils.js";
 import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
@@ -227,21 +228,48 @@ describe("mailbox continuity operator API", () => {
     inject: SIGNAL_INJECTORS[signal.name]!,
   }));
 
-  it.each(OCCUPANCY_INJECTORS)("operator path refuses a target with %s", async ({ inject }) => {
+  const rejection = (work: Promise<unknown>): Promise<unknown> =>
+    work.then(() => { throw new Error("expected a rejection"); }, (error: unknown) => error);
+
+  // P1: both paths name the same first blocking signal from the shared table.
+  it.each(OCCUPANCY_INJECTORS)("operator path refuses a target with %s", async ({ name, inject }) => {
     const { redis, canonical, b } = await setup();
     const plan = await prepareContinuity(redis, b, canonical);
     await inject(redis, canonical);
-    await expect(applyContinuity(redis, plan)).rejects.toThrow();
+    const error = await rejection(applyContinuity(redis, plan));
+    expect(error).toBeInstanceOf(AdoptionRefusedError);
+    expect((error as AdoptionRefusedError).refusal).toMatchObject({ code: -4, reason: "target_occupied", signal: name });
+    expect(JSON.parse((await redis.get(plan.mappingKey))!).agent).toBe(plan.source);
   });
 
-  it.each(OCCUPANCY_INJECTORS)("runtime path refuses a target with %s", async ({ inject }) => {
+  it.each(OCCUPANCY_INJECTORS)("runtime path refuses a target with %s", async ({ name, inject }) => {
     const { redis, canonical, provisional, b } = await setup();
     await redis.set(runtimeMailboxKey(b), JSON.stringify({ agent: canonical, working_directory: b.working_directory }));
     const client = new RedisClient(null, redisUrl); clients.push(client);
     await client.register("both", provisional);
     await inject(redis, canonical);
-    await expect(restoreRuntimeMailbox(client, b)).rejects.toThrow();
+    const error = await rejection(restoreRuntimeMailbox(client, b));
+    expect(error).toBeInstanceOf(RuntimeMailboxAdoptionRefused);
+    expect(error).toMatchObject({ code: -5, reason: "target_occupied", signal: name, target: canonical });
     expect(client.agentName).toBe(provisional);
+  });
+
+  // P1: the operator path still refuses a busy source on the same conditions, now naming the first one.
+  const SOURCE_STATES: Array<[string, (redis: Redis, source: string) => Promise<unknown>]> = [
+    ["heartbeat", (redis, source) => redis.set(SESSION_KEYS.heartbeat(source), "alive", "EX", 30)],
+    ["claims_index", (redis, source) => redis.zadd(CLAIM_KEYS.index(source), Date.now() - 60_000, "expired-claim")],
+    ["queued_messages", (redis, source) => redis.rpush(SESSION_KEYS.queue(source), JSON.stringify({ id: "x" }))],
+    ["outbound_activity", (redis, source) => redis.set(SESSION_KEYS.outboundActivity(source), "1", "EX", 60)],
+  ];
+  it.each(SOURCE_STATES)("operator path refuses a busy source, naming %s", async (signal, inject) => {
+    const { redis, canonical, b } = await setup();
+    const plan = await prepareContinuity(redis, b, canonical);
+    await inject(redis, plan.source!);
+    const error = await rejection(applyContinuity(redis, plan));
+    expect(error).toBeInstanceOf(AdoptionRefusedError);
+    expect((error as AdoptionRefusedError).refusal).toMatchObject({ code: -5, reason: "source_busy", signal });
+    expect((error as Error).message).toMatch(/^Continuity apply refused \(-5\): source_busy/);
+    expect(JSON.parse((await redis.get(plan.mappingKey))!).agent).toBe(plan.source);
   });
 
   // F6: idempotent replay must revalidate the target fingerprint. A target

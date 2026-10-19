@@ -2,7 +2,8 @@ import { Redis } from "ioredis";
 import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS, DLQ_PROVISIONAL, SESSION_DEFAULTS } from "../core/keys.js";
-import { occupancyGuardLua } from "../core/occupancy-guard.js";
+import { occupancyGuardLua, recheckHintLua } from "../core/occupancy-guard.js";
+import { AdoptionRefusedError, parseGuardReply, RUNTIME_ADOPTION_REFUSALS } from "../core/adoption-refusal.js";
 import { sweepProvisional } from "../core/provisional-sweeper.js";
 import { MailboxStore } from "../core/mailbox-store.js";
 import { SessionStore } from "../core/session-store.js";
@@ -194,8 +195,11 @@ export class RedisClient {
     // D6: the success path XADDs a runtime_continuity audit event to the
     // same bounded stream the operator path uses, so the identity transfer
     // that runs WITHOUT a human in the loop is audited like one that doesn't.
+    // A refusal returns {code, first blocking signal, recheck hint ms}; the
+    // conditions are unchanged, only reported (core/adoption-refusal.ts).
     const result = await this.redis.eval(`
       ${occupancyGuardLua("occupied_target")}
+      ${recheckHintLua("recheck")}
       if redis.call('GET', KEYS[1]) ~= ARGV[4] then return -1 end
       local sourceRaw = redis.call('HGET', KEYS[2], ARGV[1])
       local targetRaw = redis.call('HGET', KEYS[2], ARGV[2])
@@ -204,8 +208,12 @@ export class RedisClient {
       local targetReg = cjson.decode(targetRaw)
       if redis.call('HGET', KEYS[3], 'agent_name') ~= ARGV[1] or redis.call('EXISTS', KEYS[4]) ~= 1 then return -3 end
       if redis.call('SCARD', KEYS[5]) ~= 1 or redis.call('SISMEMBER', KEYS[5], ARGV[3]) ~= 1 then return -4 end
-      if occupied_target(ARGV[2], KEYS[7]) then return -5 end
-      if redis.call('ZCARD', KEYS[9]) > 0 or redis.call('EXISTS', KEYS[10]) == 1 or redis.call('EXISTS', KEYS[11]) == 1 then return -6 end
+      local occupied = occupied_target(ARGV[2], KEYS[7])
+      if occupied == 'claims_index' then return {-5, occupied, recheck_claim(KEYS[18])} end
+      if occupied then return {-5, occupied, false} end
+      if redis.call('ZCARD', KEYS[9]) > 0 then return {-6, 'claims_index', recheck_claim(KEYS[9])} end
+      if redis.call('EXISTS', KEYS[10]) == 1 then return {-6, 'outbound_activity', recheck_ttl(KEYS[10])} end
+      if redis.call('EXISTS', KEYS[11]) == 1 then return {-6, 'wrapper_claim', false} end
       targetReg.pid = sourceReg.pid
       targetReg.metadata = targetReg.metadata or {}
       if sourceReg.metadata then
@@ -229,13 +237,15 @@ export class RedisClient {
       redis.call('SREM', '${SESSION_KEYS.provisional}', ARGV[1])
       redis.call('XADD', KEYS[13], 'MAXLEN', '~', 1000, '*', 'event', 'runtime_continuity', 'target', ARGV[2], 'source', ARGV[1], 'runtime_id', ARGV[5], 'session_id', ARGV[3])
       return 1
-    `, 17, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
+    `, 18, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
       SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), wrapper(target),
       SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), SESSION_KEYS.outboundActivity(source), wrapper(source),
       SESSION_KEYS.heartbeat(source), SESSION_KEYS.continuityAudit, SESSION_KEYS.registryPending, SESSION_KEYS.registryRestore,
-      SESSION_KEYS.queue(target), SESSION_KEYS.inboxEvents(target),
+      SESSION_KEYS.queue(target), SESSION_KEYS.inboxEvents(target), CLAIM_KEYS.index(target),
       source, target, this._sessionId, expectedMapping, runtimeId ?? "");
-    if (result !== 1) throw new Error(`Continuity adoption refused (${result})`);
+    // Throws a plain Error for an unexpected reply: infrastructure, never a refusal.
+    const refusal = parseGuardReply(result, RUNTIME_ADOPTION_REFUSALS);
+    if (refusal) throw new AdoptionRefusedError("Continuity adoption refused", refusal);
     this._agentName = target;
     this.startHeartbeat();
     this.notifyIdentity();

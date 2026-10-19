@@ -3,6 +3,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { CodexSocketClient } from "./codex-socket.js";
 import type { CodexRpcClient } from "./codex-runtime.js";
 import type { RuntimeTools } from "./runtime-tools.js";
+import { RuntimeMailboxAdoptionRefused } from "./runtime-mailbox.js";
+import type { LifecycleLog } from "./lifecycle-log.js";
+import type { ContinuityState } from "./runtime-controller.js";
 
 /** Discover only a uniquely identified, native-loaded connection owned by this sidecar. */
 export const findOwnCodexThread = async (
@@ -35,7 +38,7 @@ export type CodexBindingState = Readonly<{
   binding_attempts: number;
   next_attempt_at: string | null;
   /** Why the last attempt did not bind (a stable code, never daemon text). */
-  last_binding_outcome: "no_unique_owned_thread" | "daemon_unavailable" | "bind_failed" | "bound" | null;
+  last_binding_outcome: "no_unique_owned_thread" | "daemon_unavailable" | "bind_failed" | "adoption_refused" | "bound" | null;
 }>;
 
 export type CodexBootstrapOptions = Readonly<{
@@ -80,6 +83,12 @@ export const bootstrapCodexBinding = async (
   // runtime recorded by a bind that may still fail (restore/dispatcher start).
   const alreadyBound = () => runtime.status().activation_ready === true;
   const midBind = () => { const r = runtime.status().runtime; return !!r && typeof r === "object"; };
+  // The controller's refused adoption (target, reason, first signal): a change is a state change.
+  const refusal = () => {
+    const c = runtime.status().continuity as Record<string, unknown> | null | undefined;
+    return c && typeof c === "object" ? JSON.stringify([c.target, c.reason, c.signal]) : "";
+  };
+  let lastRefusal = "";
   let wake: AbortController = new AbortController();
   const unsubscribe = rpc.onNotification?.((n) => {
     if (n.method.startsWith("turn/") || n.method.startsWith("thread/")) wake.abort();
@@ -93,9 +102,11 @@ export const bootstrapCodexBinding = async (
         if (signal.aborted) break;
         if (!id) outcome = "no_unique_owned_thread";
         else {
-          const result = await runtime.bind({ client: "codex", runtime_id: id, epoch: id, working_directory: cwd }).catch(() => undefined);
-          outcome = result?.activation_ready === true && (result.runtime as Record<string, unknown> | undefined)?.runtime_id === id
-            ? "bound" : "bind_failed";
+          const result = await runtime.bind({ client: "codex", runtime_id: id, epoch: id, working_directory: cwd })
+            .catch((error: unknown) => error instanceof RuntimeMailboxAdoptionRefused ? "adoption_refused" as const : undefined);
+          outcome = result === "adoption_refused" ? result
+            : result?.activation_ready === true && (result.runtime as Record<string, unknown> | undefined)?.runtime_id === id
+              ? "bound" : "bind_failed";
         }
       } catch {
         if (signal.aborted) break;
@@ -110,8 +121,11 @@ export const bootstrapCodexBinding = async (
       const wait = Math.max(1, Math.round(backoff * (0.5 + random() / 2)));
       const next = Object.freeze({ readiness: midBind() ? "binding_incomplete" as const : "unbound_retrying" as const, binding_attempts: attempt + 1,
         next_attempt_at: new Date(now() + wait).toISOString(), last_binding_outcome: outcome });
-      // State changes only: a new outcome, or the switch from fast attempts to backoff.
-      if (outcome !== state.last_binding_outcome || next.readiness !== state.readiness || attempt + 1 === fastAttempts) publish(next); else state = next;
+      // State changes only: a new outcome, a new refusal (target, reason or signal), or the switch from fast attempts to backoff.
+      const refusedNow = outcome === "adoption_refused" ? refusal() : "";
+      const refusalChanged = refusedNow !== lastRefusal;
+      lastRefusal = refusedNow;
+      if (outcome !== state.last_binding_outcome || refusalChanged || next.readiness !== state.readiness || attempt + 1 === fastAttempts) publish(next); else state = next;
       wake = new AbortController();
       await delay(wait, undefined, { signal: AbortSignal.any([signal, wake.signal]) }).catch(() => undefined);
     }
@@ -120,11 +134,30 @@ export const bootstrapCodexBinding = async (
   } finally { unsubscribe?.(); await rpc.close(); }
 };
 
-/** get_runtime_status while unbound: the controller's status plus the supervisor's truthful retry state. */
+/**
+ * get_runtime_status while unbound: the controller's status plus the
+ * supervisor's truthful retry state. The controller's own fields win: its
+ * `continuity` is never overwritten, and its `awaiting_adoption` readiness
+ * takes precedence over the supervisor's (R8).
+ */
 export const withBindingState = (
   status: Record<string, unknown>, state: CodexBindingState | undefined,
 ): Record<string, unknown> => state && state.readiness !== "stopped" && state.readiness !== "bound" && status.activation_ready !== true
   // A runtime recorded without a live dispatcher is an incomplete bind, not readiness.
-  ? { ...status, readiness: status.runtime ? "binding_incomplete" : "unbound_retrying", binding_attempts: state.binding_attempts,
-    next_attempt_at: state.next_attempt_at, last_binding_outcome: state.last_binding_outcome }
+  ? { ...status, readiness: status.readiness === "awaiting_adoption" ? "awaiting_adoption" : status.runtime ? "binding_incomplete" : "unbound_retrying",
+    binding_attempts: state.binding_attempts, next_attempt_at: state.next_attempt_at, last_binding_outcome: state.last_binding_outcome }
   : status;
+
+/**
+ * The lifecycle record for a published binding state. A refused adoption
+ * carries the controller's classified reason, first blocking signal and
+ * target. The bootstrap publishes state changes only, never once per attempt.
+ */
+export const bindingLifecycleEntry = (state: CodexBindingState, status: Record<string, unknown>): LifecycleLog => {
+  const continuity = state.last_binding_outcome === "adoption_refused" ? status.continuity as ContinuityState | null | undefined : undefined;
+  return {
+    event: state.readiness === "bound" ? "native_binding_ready" : state.readiness === "stopped" ? "native_binding_stopped" : "native_binding_retrying",
+    phase: "binding", code: state.last_binding_outcome ?? undefined,
+    ...(continuity ? { reason: continuity.reason, signal: continuity.signal ?? undefined, target: continuity.target } : {}),
+  };
+};

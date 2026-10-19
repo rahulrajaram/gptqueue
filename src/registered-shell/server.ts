@@ -7,7 +7,7 @@ import { createBoundMcpServer } from "../experimental-wrapper/bridge.js";
 import { createLifecycleLog, safeLifecycleCode } from "./lifecycle-log.js";
 import { createRuntimeController } from "./runtime-controller.js";
 import { createCodexRuntime } from "./codex-runtime.js";
-import { bootstrapCodexBinding, withBindingState, type CodexBindingState } from "./codex-bootstrap.js";
+import { bindingLifecycleEntry, bootstrapCodexBinding, withBindingState, type CodexBindingState } from "./codex-bootstrap.js";
 import { activationOutcomeSchema, type ActivationOutcome } from "./runtime.js";
 import { SESSION_KEYS } from "../core/keys.js";
 
@@ -214,9 +214,7 @@ export const startRegisteredShell = async (
       lifecycle.emit({ event: "native_binding_started", phase: "binding", session_id: sessionId });
       const onState = (state: CodexBindingState) => {
         bindingState = state;
-        lifecycle.emit({ event: state.readiness === "bound" ? "native_binding_ready"
-          : state.readiness === "stopped" ? "native_binding_stopped" : "native_binding_retrying",
-        phase: "binding", session_id: sessionId, code: state.last_binding_outcome ?? undefined });
+        lifecycle.emit({ ...bindingLifecycleEntry(state, runtime.status()), session_id: sessionId });
       };
       const provisional = redis.requireRegistered();
       // The current name: a bind may adopt a different mailbox (COR-F4).

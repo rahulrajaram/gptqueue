@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
+import type { AdoptionRefusalReason } from "../core/adoption-refusal.js";
 
 export type LifecycleEvent =
   | "startup_started" | "registration_complete" | "transport_connected"
@@ -16,7 +17,11 @@ export interface LifecycleLog {
   readonly phase?: string;
   readonly duration_ms?: number;
   readonly code?: string;
-  readonly reason?: "caller_abort" | "transport_closed" | "explicit_close" | "startup_failed" | "runtime_closed";
+  /** A shutdown's cause, or (code adoption_refused) the classified refusal reason. */
+  readonly reason?: "caller_abort" | "transport_closed" | "explicit_close" | "startup_failed" | "runtime_closed" | AdoptionRefusalReason;
+  /** Code adoption_refused only: the first blocking signal, and the mailbox whose adoption was refused. */
+  readonly signal?: string;
+  readonly target?: string;
 }
 
 /** Honor the configured state location and otherwise use the user's state directory. */
@@ -72,7 +77,8 @@ export const createLifecycleLog = (agentName: string, client: string, start = pr
       client, pid: process.pid, agent_name: agentName, ...(entry.session_id ? { session_id: entry.session_id } : {}),
       elapsed_ms: Math.round(elapsed() * 100) / 100, ...(entry.phase ? { phase: entry.phase } : {}),
       ...(entry.duration_ms === undefined ? {} : { duration_ms: Math.round(entry.duration_ms * 100) / 100 }),
-      ...(entry.code ? { code: entry.code } : {}), ...(entry.reason ? { reason: entry.reason } : {}) });
+      ...(entry.code ? { code: entry.code } : {}), ...(entry.reason ? { reason: entry.reason } : {}),
+      ...(entry.signal ? { signal: entry.signal } : {}), ...(entry.target ? { target: entry.target } : {}) });
     const line = JSON.stringify(record);
     try { console.error(line); } catch { /* stderr is best effort */ }
     if (closing || warning) return;

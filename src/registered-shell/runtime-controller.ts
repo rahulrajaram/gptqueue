@@ -2,7 +2,46 @@ import type { RedisClient } from "../mcp-server/redis-client.js";
 import { startInboxDispatcher, type InboxDispatcher } from "./inbox-dispatcher.js";
 import { subscribeStale, validateRuntimeBinding, type RuntimeAdapter, type RuntimeBinding } from "./runtime.js";
 import type { RuntimeTools } from "./runtime-tools.js";
-import { restoreRuntimeMailbox, RuntimeMailboxAdoptionRefused } from "./runtime-mailbox.js";
+import { restoreRuntimeMailbox, RuntimeMailboxAdoptionError, RuntimeMailboxAdoptionRefused } from "./runtime-mailbox.js";
+import { operatorActionRequired, type AdoptionRefusalReason, type AdoptionRefusalSignal } from "../core/adoption-refusal.js";
+
+/**
+ * A pending mailbox adoption the guard refused (status `continuity`; null when
+ * none is pending). `signal` is the FIRST blocking check; others may also
+ * block. `recheck_after` is a HINT, never a promise: other claims may remain,
+ * renewals move expiry and further sends extend outbound activity.
+ */
+export type ContinuityState = Readonly<{
+  /** The name this connection holds now (its provisional name). */
+  current_mailbox: string | null;
+  /** The mapped mailbox whose adoption was refused. */
+  target: string;
+  reason: AdoptionRefusalReason;
+  signal: AdoptionRefusalSignal | null;
+  code: number;
+  first_refused_at: string;
+  last_attempt_at: string;
+  recheck_after: string | null;
+  /** What `recheck_after` was derived from (null when no hint is known). */
+  recheck_basis: "earliest_unexpired_claim_expiry" | "outbound_activity_ttl" | null;
+  operator_action_required: boolean;
+}>;
+
+/** Pure: the continuity record after a refusal. first_refused_at survives repeated refusals of the same target. */
+export const refusedContinuity = (
+  previous: ContinuityState | null, refusal: RuntimeMailboxAdoptionRefused, currentMailbox: string | null, now: number,
+): ContinuityState => {
+  const at = new Date(now).toISOString();
+  const hint = refusal.recheckAfterMs;
+  return Object.freeze({
+    current_mailbox: currentMailbox, target: refusal.target, reason: refusal.reason, signal: refusal.signal, code: refusal.code,
+    first_refused_at: previous?.target === refusal.target ? previous.first_refused_at : at,
+    last_attempt_at: at,
+    recheck_after: hint === null ? null : new Date(hint).toISOString(),
+    recheck_basis: hint === null ? null : refusal.signal === "outbound_activity" ? "outbound_activity_ttl" : "earliest_unexpired_claim_expiry",
+    operator_action_required: operatorActionRequired(refusal.reason),
+  });
+};
 
 export const createRuntimeController = (
   client: RedisClient,
@@ -15,15 +54,24 @@ export const createRuntimeController = (
   let host: RuntimeAdapter | undefined;
   let dispatcher: InboxDispatcher | undefined;
   let closed = false;
-  // DL-2: the bound mailbox a refused adoption targeted. While this client
+  // DL-2: the bound mailbox a failed adoption targeted. While this client
   // still holds its provisional name, closing retires that name into it.
   let refusedTarget: string | undefined;
+  // The pending adoption the guard last refused; cleared by a successful restore.
+  let continuity: ContinuityState | null = null;
   let operation: Promise<unknown> = Promise.resolve();
-  const status = (): Record<string, unknown> => ({
-    status: "ok", agent: client.agentName, activation_ready: !!dispatcher && !closed,
-    runtime: binding ?? null,
-    ...(host?.describe && dispatcher && !closed ? { runtime_host: host.describe() } : {}),
-  });
+  const status = (): Record<string, unknown> => {
+    const running = !!dispatcher && !closed;
+    return {
+      status: "ok", agent: client.agentName, activation_ready: running,
+      // Reported separately: continuity can be pending while no dispatcher runs on any name.
+      dispatcher: running ? "on" : "off",
+      ...(continuity && !running ? { readiness: "awaiting_adoption" } : {}),
+      continuity,
+      runtime: binding ?? null,
+      ...(host?.describe && running ? { runtime_host: host.describe() } : {}),
+    };
+  };
   return {
     status,
     bind: (value) => {
@@ -39,13 +87,18 @@ export const createRuntimeController = (
         const adapter = await createAdapter(validation.binding);
         if (closed) { await adapter.close(); return { status: "error", code: "runtime_controller_closed" }; }
         await dispatcher?.close();
+        // A closed dispatcher no longer runs: status must not report it while this bind is refused.
+        dispatcher = undefined;
         binding = validation.binding;
         try {
           try {
             await restoreRuntimeMailbox(client, binding);
             refusedTarget = undefined;
+            continuity = null;
           } catch (error) {
-            if (error instanceof RuntimeMailboxAdoptionRefused) refusedTarget = error.target;
+            if (error instanceof RuntimeMailboxAdoptionError) refusedTarget = error.target;
+            // Only a classified refusal is recorded; an infrastructure failure is not one.
+            if (error instanceof RuntimeMailboxAdoptionRefused) continuity = refusedContinuity(continuity, error, client.agentName, Date.now());
             throw error;
           }
           dispatcher = await startInboxDispatcher(client.adapterConnection, client.requireRegistered(), adapter);
