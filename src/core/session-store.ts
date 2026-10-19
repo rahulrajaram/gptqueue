@@ -207,15 +207,23 @@ return 1
 /**
  * PUBLISH_REGISTRATION_SCRIPT plus the registration audit event, in the same
  * script so the event exists iff the registration committed (no event for a
- * failed or rolled-back attempt). KEYS[4] audit stream; ARGV 3 MAXLEN, then
- * the event's field/value pairs.
+ * failed or rolled-back attempt). Scripts do not roll back, so every
+ * predictable failure (a wrong-type key) is checked before the first write
+ * (F2): after the checks nothing can fail. KEYS[4] audit stream; ARGV 3
+ * MAXLEN, then the event's field/value pairs.
  */
 const PUBLISH_REGISTRATION_AUDITED_SCRIPT = `
+for i = 1, 3 do
+  local t = redis.call('TYPE', KEYS[i]).ok
+  if t ~= 'hash' and t ~= 'none' then return redis.error_reply('WRONGTYPE registration key ' .. KEYS[i] .. ' is ' .. t) end
+end
+local st = redis.call('TYPE', KEYS[4]).ok
+if st ~= 'stream' and st ~= 'none' then return redis.error_reply('WRONGTYPE registration audit key ' .. KEYS[4] .. ' is ' .. st) end
+local fields = {}
+for i = 4, #ARGV do fields[#fields + 1] = ARGV[i] end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('HDEL', KEYS[3], ARGV[1])
-local fields = {}
-for i = 4, #ARGV do fields[#fields + 1] = ARGV[i] end
 redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[3], '*', unpack(fields))
 return 1
 `;

@@ -3,7 +3,7 @@ import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS, DLQ_PROVISIONAL, SESSION_DEFAULTS } from "../core/keys.js";
 import { sessionTag } from "../core/session-tag.js";
-import { auditClaudeSession, auditRuntime } from "../core/registration-audit.js";
+import { auditClaudeSession, auditRuntime, REGISTRATION_AUDIT_MAXLEN } from "../core/registration-audit.js";
 import { occupancyGuardLua, recheckHintLua } from "../core/occupancy-guard.js";
 import { AdoptionRefusedError, parseGuardReply, RUNTIME_ADOPTION_REFUSALS } from "../core/adoption-refusal.js";
 import { sweepProvisional } from "../core/provisional-sweeper.js";
@@ -207,6 +207,7 @@ export class RedisClient {
     // that runs WITHOUT a human in the loop is audited like one that doesn't.
     // A refusal returns {code, first blocking signal, recheck hint ms}; the
     // conditions are unchanged, only reported (core/adoption-refusal.ts).
+    const defaultRuntime = auditRuntime(undefined, process.env);
     const result = await this.redis.eval(`
       ${occupancyGuardLua("occupied_target")}
       ${recheckHintLua("recheck")}
@@ -224,6 +225,35 @@ export class RedisClient {
       if redis.call('ZCARD', KEYS[9]) > 0 then return {-6, 'claims_index', recheck_claim(KEYS[9])} end
       if redis.call('EXISTS', KEYS[10]) == 1 then return {-6, 'outbound_activity', recheck_ttl(KEYS[10])} end
       if redis.call('EXISTS', KEYS[11]) == 1 then return {-6, 'wrapper_claim', false} end
+      -- F2/F3: scripts do not roll back, so every predictable failure (a
+      -- wrong-type key) is checked here, before the first write.
+      local function want(key, a, b)
+        local t = redis.call('TYPE', key).ok
+        if t ~= a and t ~= b then return redis.error_reply('WRONGTYPE adoption key ' .. key .. ' is ' .. t) end
+        return nil
+      end
+      for _, k in ipairs({KEYS[3], KEYS[14], KEYS[15]}) do local e = want(k, 'hash', 'none'); if e then return e end end
+      for _, k in ipairs({KEYS[6], '${SESSION_KEYS.provisional}'}) do local e = want(k, 'set', 'none'); if e then return e end end
+      for _, k in ipairs({KEYS[8], KEYS[16]}) do local e = want(k, 'list', 'none'); if e then return e end end
+      for _, k in ipairs({KEYS[13], KEYS[17], KEYS[19]}) do local e = want(k, 'stream', 'none'); if e then return e end end
+      do
+        local fromField = '"to":' .. cjson.encode(ARGV[1])
+        for _, raw in ipairs(redis.call('LRANGE', KEYS[8], 0, -1)) do
+          local at = string.find(raw, fromField, 1, true)
+          if at then raw = string.sub(raw, 1, at - 1) .. '"to":' .. cjson.encode(ARGV[2]) .. string.sub(raw, at + #fromField) end
+          local ok, msg = pcall(cjson.decode, raw)
+          if ok and type(msg) == 'table' and msg.type == 'task' and type(msg.from) == 'string' and type(msg.id) == 'string' then
+            local e = want('${SESSION_KEYS.outstanding("", "").slice(0, -1)}' .. msg.from .. ':' .. msg.id, 'string', 'none'); if e then return e end
+          end
+        end
+      end
+      -- Registration audit (F3): the session now holds the target name.
+      local client = type(sourceReg.metadata) == 'table' and sourceReg.metadata.client or nil
+      local runtime = ARGV[6]
+      if client == 'codex' or client == 'pi' or client == 'claude' then runtime = client
+      elseif type(client) == 'string' and client ~= '' then runtime = 'unknown' end
+      local cwd = ARGV[8]
+      if type(sourceReg.metadata) == 'table' and type(sourceReg.metadata.working_directory) == 'string' then cwd = sourceReg.metadata.working_directory end
       targetReg.pid = sourceReg.pid
       targetReg.metadata = targetReg.metadata or {}
       if sourceReg.metadata then
@@ -246,13 +276,17 @@ export class RedisClient {
       if moved > 0 then redis.call('XADD', KEYS[17], '*', 'type', 'forwarded') end
       redis.call('SREM', '${SESSION_KEYS.provisional}', ARGV[1])
       redis.call('XADD', KEYS[13], 'MAXLEN', '~', 1000, '*', 'event', 'runtime_continuity', 'target', ARGV[2], 'source', ARGV[1], 'runtime_id', ARGV[5], 'session_id', ARGV[3])
+      redis.call('XADD', KEYS[19], 'MAXLEN', '~', ARGV[11], '*', 'event', 'registered', 'name', ARGV[2], 'session_tag', ARGV[10],
+        'runtime', runtime, 'pid', ARGV[7], 'cwd', cwd, 'claude_session', ARGV[9], 'via', 'adoption')
       return 1
-    `, 18, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
+    `, 19, mappingKey, SESSION_KEYS.registry, SESSION_KEYS.session(this._sessionId), SESSION_KEYS.lease(this._sessionId),
       SESSION_KEYS.agentSessions(source), SESSION_KEYS.agentSessions(target), wrapper(target),
       SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), SESSION_KEYS.outboundActivity(source), wrapper(source),
       SESSION_KEYS.heartbeat(source), SESSION_KEYS.continuityAudit, SESSION_KEYS.registryPending, SESSION_KEYS.registryRestore,
-      SESSION_KEYS.queue(target), SESSION_KEYS.inboxEvents(target), CLAIM_KEYS.index(target),
-      source, target, this._sessionId, expectedMapping, runtimeId ?? "");
+      SESSION_KEYS.queue(target), SESSION_KEYS.inboxEvents(target), CLAIM_KEYS.index(target), SESSION_KEYS.registrationAudit,
+      source, target, this._sessionId, expectedMapping, runtimeId ?? "",
+      defaultRuntime, String(process.pid), process.cwd(), auditClaudeSession(defaultRuntime, process.env), sessionTag(this._sessionId),
+      String(REGISTRATION_AUDIT_MAXLEN));
     // Throws a plain Error for an unexpected reply: infrastructure, never a refusal.
     const refusal = parseGuardReply(result, RUNTIME_ADOPTION_REFUSALS);
     if (refusal) throw new AdoptionRefusedError("Continuity adoption refused", refusal);
@@ -454,10 +488,24 @@ export class RedisClient {
     // A completed value: publishing it also drops the name's rollback
     // bookkeeping, so no failed attempt's undo can overwrite it (R2).
     const runtime = auditRuntime(metadata?.client, process.env);
-    await this.sessionStore.publishRegistration(name, JSON.stringify(registration), {
-      name, session_tag: sessionTag(session.session_id), runtime, pid: process.pid,
-      cwd: metadata?.working_directory ?? process.cwd(), claude_session: auditClaudeSession(runtime, process.env),
-    });
+    try {
+      await this.sessionStore.publishRegistration(name, JSON.stringify(registration), {
+        name, session_tag: sessionTag(session.session_id), runtime, pid: process.pid, via: "register",
+        cwd: metadata?.working_directory ?? process.cwd(), claude_session: auditClaudeSession(runtime, process.env),
+      });
+    } catch (error) {
+      // F2: the audited publish validates before it writes, so a failure here
+      // changed nothing; undo this attempt's session and provisional registry
+      // value so the visible state is as before. (A rename has already moved
+      // the mailbox; it keeps its new session and only reports the failure.)
+      if (!renaming) {
+        await this.sessionStore.closeSession(session.session_id).catch(() => undefined);
+        await this.sessionStore.undoRegistryWrite(session.registry_write).catch(() => false);
+        this._agentName = oldName;
+        this._sessionId = oldSessionId;
+      }
+      throw error;
+    }
     await this.mailbox.ensureMailbox(name);
 
     // Start both session lease refresh and legacy heartbeat

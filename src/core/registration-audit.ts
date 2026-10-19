@@ -31,6 +31,8 @@ export type RegistrationAuditEvent = Readonly<{
   cwd: string;
   /** The Claude session UUID when the registering Claude MCP path knows it, else "". */
   claude_session: string;
+  /** register: a new session's registration; adoption: a live session adopted this name (runtime continuity). */
+  via: "register" | "adoption";
 }>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -61,7 +63,7 @@ export const auditClaudeSession = (runtime: AuditRuntime, env: NodeJS.ProcessEnv
 /** Flat XADD field list for one event (event=registered first). */
 export const auditFieldList = (event: RegistrationAuditEvent): string[] => [
   "event", "registered", "name", event.name, "session_tag", event.session_tag, "runtime", event.runtime,
-  "pid", String(event.pid), "cwd", event.cwd, "claude_session", event.claude_session,
+  "pid", String(event.pid), "cwd", event.cwd, "claude_session", event.claude_session, "via", event.via,
 ];
 
 // ---------------------------------------------------------------- query
@@ -86,7 +88,7 @@ export type RegistrationsReport = Readonly<{
    * null when unknown. coverage is "complete" iff this is at or before since.
    */
   complete_from: string | null;
-  events: ReadonlyArray<Readonly<{ at: string; name: string; session_tag: string; runtime: string; pid: number | null; cwd: string; claude_session: string }>>;
+  events: ReadonlyArray<Readonly<{ at: string; name: string; session_tag: string; runtime: string; pid: number | null; cwd: string; claude_session: string; via: string }>>;
   truncated: boolean;
 }>;
 
@@ -147,16 +149,31 @@ const toObject = (fields: readonly string[]): Record<string, string> => {
   return out;
 };
 
-/** Read-only: EXISTS, XINFO STREAM and XRANGE only. */
-export const queryRegistrations = async (redis: Redis, query: RegistrationsQuery, key: string = SESSION_KEYS.registrationAudit): Promise<RegistrationsReport> => {
-  const info = await readInfo(redis, key);
-  const { coverage, complete_from } = coverageOf(info, query.sinceMs);
+/** Test-only seam: runs after each XRANGE page, before the next read. */
+export type QueryHooks = Readonly<{ onPage?: (pageIndex: number) => Promise<void> }>;
+
+/**
+ * Read-only: EXISTS, XINFO STREAM and XRANGE only.
+ *
+ * Coverage comes from an XINFO taken AFTER the last XRANGE page (F4), never
+ * from metadata read before the scan. That is sound without a snapshot:
+ * trimming only ever removes a prefix of the stream, so any matching entry
+ * trimmed before or during the scan has an id below the post-scan first
+ * entry, and entries-added > length marks that a trim happened; complete_from
+ * is then after it. An XDEL during the scan moves max-deleted-entry-id to at
+ * least the deleted id, which also moves complete_from past it. Either way a
+ * matching event the scan missed lies at or after since and before
+ * complete_from, so coverage cannot be "complete". A stream deleted during
+ * the scan reads as missing afterwards: coverage "unknown".
+ */
+export const queryRegistrations = async (redis: Redis, query: RegistrationsQuery, key: string = SESSION_KEYS.registrationAudit, hooks: QueryHooks = {}): Promise<RegistrationsReport> => {
   const events: Array<RegistrationsReport["events"][number]> = [];
   let truncated = false;
-  if (info.exists) {
+  if ((await redis.exists(key)) === 1) {
     let start = `${query.sinceMs}-0`;
     const end = `${query.untilMs}-18446744073709551615`;
     let scanned = 0;
+    let pageIndex = 0;
     scan: while (scanned < SCAN_CAP) {
       const page = (await redis.xrange(key, start, end, "COUNT", SCAN_PAGE)) as Array<[string, string[]]>;
       for (const [id, fields] of page) {
@@ -169,13 +186,16 @@ export const queryRegistrations = async (redis: Redis, query: RegistrationsQuery
         if (events.length === REGISTRATIONS_MAX_EVENTS) { truncated = true; break scan; }
         const pid = Number(f.pid);
         events.push({ at: new Date(idMs(id)).toISOString(), name: f.name ?? "", session_tag: f.session_tag ?? "", runtime: f.runtime ?? "unknown",
-          pid: Number.isInteger(pid) && f.pid !== "" ? pid : null, cwd: f.cwd ?? "", claude_session: f.claude_session ?? "" });
+          pid: Number.isInteger(pid) && f.pid !== "" ? pid : null, cwd: f.cwd ?? "", claude_session: f.claude_session ?? "", via: f.via ?? "register" });
       }
+      if (hooks.onPage) await hooks.onPage(pageIndex);
+      pageIndex += 1;
       if (page.length < SCAN_PAGE) break;
       start = `(${page[page.length - 1]![0]}`;
     }
     if (scanned >= SCAN_CAP) truncated = true;
   }
+  const { coverage, complete_from } = coverageOf(await readInfo(redis, key), query.sinceMs);
   return { schema_version: 1, since: new Date(query.sinceMs).toISOString(), until: new Date(query.untilMs).toISOString(), coverage, complete_from, events, truncated };
 };
 
@@ -190,6 +210,8 @@ export const REGISTRATIONS_HELP = [
   "            incomplete = events before complete_from were trimmed, or the audit started after --since;",
   "            unknown   = no audit stream on this Redis, or a Redis without XINFO max-deleted-entry-id.",
   "  --redis-url defaults to $REDIS_URL, then redis://127.0.0.1:6379/0.",
+  "  Mixed versions: writers on releases without the audit emit nothing. An empty complete report proves",
+  "  non-registration only if every writer that could register in the window ran an audit-emitting release.",
   "  Exit codes: 0 success, 2 invalid arguments, 4 Redis unavailable.",
 ].join("\n");
 

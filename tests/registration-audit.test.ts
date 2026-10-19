@@ -10,6 +10,9 @@ import { join, resolve } from "node:path";
 import { Redis } from "ioredis";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
+import { SessionStore } from "../src/core/session-store.js";
+import { runtimeMailboxKey } from "../src/core/mailbox-continuity.js";
+import { AdoptionRefusedError } from "../src/core/adoption-refusal.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { sessionTag } from "../src/core/session-tag.js";
 import { auditClaudeSession, auditRuntime, coverageOf, parseRegistrationsArgs, queryRegistrations } from "../src/core/registration-audit.js";
@@ -99,7 +102,7 @@ describe("registration audit against Redis", { timeout: 300_000 }, () => {
     const events = await eventsFor(name);
     expect(events).toHaveLength(1);
     expect(events[0]!.f).toEqual({ event: "registered", name, session_tag: sessionTag(reg.session_id), runtime: "generic",
-      pid: String(process.pid), cwd: process.cwd(), claude_session: "" });
+      pid: String(process.pid), cwd: process.cwd(), claude_session: "", via: "register" });
     expect(JSON.stringify(events)).not.toContain(reg.session_id);
     const rival = new RedisClient(null, REDIS_URL);
     clients.push(rival);
@@ -158,7 +161,7 @@ describe("registration audit against Redis", { timeout: 300_000 }, () => {
     const all = await queryRegistrations(redis, window, key);
     expect(all).toMatchObject({ schema_version: 1, coverage: "complete", truncated: true });
     expect(all.events).toHaveLength(500);
-    expect(all.events[0]).toEqual({ at: new Date(1_000_000).toISOString(), name: "even", session_tag: sessionTag("s-0"), runtime: "generic", pid: 7, cwd: "/a", claude_session: "" });
+    expect(all.events[0]).toEqual({ at: new Date(1_000_000).toISOString(), name: "even", session_tag: sessionTag("s-0"), runtime: "generic", pid: 7, cwd: "/a", claude_session: "", via: "register" });
     expect((await queryRegistrations(redis, { ...window, name: "odd" }, key)).events).toHaveLength(260);
     expect((await queryRegistrations(redis, { ...window, cwd: "/a", name: "odd" }, key)).events).toHaveLength(5);
     const bySession = await queryRegistrations(redis, { ...window, claudeSession: session.toUpperCase() }, key);
@@ -209,4 +212,132 @@ describe("registration audit against Redis", { timeout: 300_000 }, () => {
     expect(help.status).toBe(0);
     expect(help.stdout).toMatch(/coverage: complete/);
   });
+
+  // ---------------------------------------------------------------- gate fixes (F2-F4)
+
+  const snapshot = async (): Promise<string[]> => Promise.all(
+    [SESSION_KEYS.registry, SESSION_KEYS.registryPending, SESSION_KEYS.registryRestore].map(async (k) => JSON.stringify(Object.entries(await redis.hgetall(k)).sort())));
+
+  it("F2: a wrong-type audit key fails the audited publish before any write", async () => {
+    const name = `audit-f2-${randomUUID().slice(0, 8)}`;
+    await redis.hset(SESSION_KEYS.registryPending, name, "pending-value");
+    await redis.hset(SESSION_KEYS.registryRestore, name, "restore-value");
+    const saved = await redis.dumpBuffer(AUDIT);
+    await redis.del(AUDIT);
+    await redis.set(AUDIT, "not-a-stream");
+    try {
+      const before = await snapshot();
+      const store = new SessionStore(redis);
+      await expect(store.publishRegistration(name, "{}", { name, session_tag: sessionTag("x"), runtime: "generic", pid: 1, cwd: "/", claude_session: "", via: "register" }))
+        .rejects.toThrow(/WRONGTYPE/);
+      expect(await snapshot()).toEqual(before);
+      expect(await redis.hexists(SESSION_KEYS.registry, name)).toBe(0);
+    } finally {
+      await redis.del(AUDIT);
+      if (saved) await redis.restore(AUDIT, 0, saved);
+      await redis.hdel(SESSION_KEYS.registryPending, name);
+      await redis.hdel(SESSION_KEYS.registryRestore, name);
+    }
+  });
+
+  it("F2: register over a wrong-type audit key fails and leaves registry and bookkeeping as before", async () => {
+    const name = `audit-f2r-${randomUUID().slice(0, 8)}`;
+    const saved = await redis.dumpBuffer(AUDIT);
+    await redis.del(AUDIT);
+    await redis.set(AUDIT, "not-a-stream");
+    try {
+      const before = await snapshot();
+      const client = new RedisClient(null, REDIS_URL);
+      clients.push(client);
+      await expect(client.register("both", name)).rejects.toThrow(/WRONGTYPE/);
+      expect(await snapshot()).toEqual(before);
+      expect(await redis.scard(SESSION_KEYS.agentSessions(name))).toBe(0);
+      expect(client.agentName).toBeNull();
+    } finally {
+      await redis.del(AUDIT);
+      if (saved) await redis.restore(AUDIT, 0, saved);
+    }
+  });
+
+  const adoptionSetup = async () => {
+    const target = `audit-target-${randomUUID().slice(0, 8)}`;
+    const source = `audit-source-${randomUUID().slice(0, 8)}`;
+    const binding = { client: "codex" as const, runtime_id: randomUUID(), epoch: "one", working_directory: "/workspace/project" };
+    const key = runtimeMailboxKey(binding);
+    const mapping = JSON.stringify({ agent: target, working_directory: binding.working_directory });
+    scratchKeys.push(key);
+    await redis.hset(SESSION_KEYS.registry, target, JSON.stringify({ name: target }));
+    await redis.set(key, mapping);
+    const client = new RedisClient(null, REDIS_URL);
+    clients.push(client);
+    await client.register("both", source, undefined, { label: "l", uuid: null, client: "codex", working_directory: "/workspace/project" });
+    return { client, source, target, binding, key, mapping };
+  };
+
+  it("F3: a runtime continuity adoption appends a tagged via=adoption event for the target; a refusal appends none", async () => {
+    const since = Date.now() - 1_000;
+    const ok = await adoptionSetup();
+    const sid = ok.client.sessionId!;
+    await ok.client.adoptIdentity(ok.source, ok.target, ok.key, ok.mapping, ok.binding.runtime_id);
+    const report = await queryRegistrations(redis, { sinceMs: since, untilMs: Date.now() + 1_000, name: ok.target });
+    expect(report.events).toEqual([expect.objectContaining({ name: ok.target, session_tag: sessionTag(sid), runtime: "codex", cwd: "/workspace/project", via: "adoption" })]);
+    expect(JSON.stringify(report)).not.toContain(sid);
+    const bySource = await queryRegistrations(redis, { sinceMs: since, untilMs: Date.now() + 1_000, name: ok.source });
+    expect(bySource.events.map((e) => e.via)).toEqual(["register"]);
+
+    const refused = await adoptionSetup();
+    await redis.set(SESSION_KEYS.heartbeat(refused.target), "alive", "EX", 30);
+    scratchKeys.push(SESSION_KEYS.heartbeat(refused.target));
+    const before = await snapshot();
+    const error = await refused.client.adoptIdentity(refused.source, refused.target, refused.key, refused.mapping, refused.binding.runtime_id).then(() => null, (e: unknown) => e);
+    expect(error).toBeInstanceOf(AdoptionRefusedError);
+    expect((error as AdoptionRefusedError).refusal.code).toBe(-5);
+    expect(await snapshot()).toEqual(before);
+    expect((await queryRegistrations(redis, { sinceMs: since, untilMs: Date.now() + 1_000, name: refused.target })).events).toEqual([]);
+  });
+
+  it("F3: a wrong-type audit key refuses the adoption before any write", async () => {
+    const s = await adoptionSetup();
+    const saved = await redis.dumpBuffer(AUDIT);
+    await redis.del(AUDIT);
+    await redis.set(AUDIT, "not-a-stream");
+    try {
+      const before = await snapshot();
+      const mappingBefore = await redis.get(s.key);
+      await expect(s.client.adoptIdentity(s.source, s.target, s.key, s.mapping, s.binding.runtime_id)).rejects.toThrow(/WRONGTYPE/);
+      expect(await snapshot()).toEqual(before);
+      expect(await redis.get(s.key)).toBe(mappingBefore);
+      expect(await redis.xlen(SESSION_KEYS.continuityAudit).catch(() => -1)).toBeGreaterThanOrEqual(0);
+      expect(await redis.hget(SESSION_KEYS.session(s.client.sessionId!), "agent_name")).toBe(s.source);
+    } finally {
+      await redis.del(AUDIT);
+      if (saved) await redis.restore(AUDIT, 0, saved);
+    }
+  });
+
+  it("F4: coverage is revalidated after the scan: an XDEL or trim between pages downgrades it", async () => {
+    const fill = async () => {
+      const key = `gptq:test:registration-audit:${randomUUID()}`;
+      scratchKeys.push(key);
+      for (let i = 0; i < 1_500; i += 1) {
+        await redis.xadd(key, `${2_000_000 + i}-0`, "event", "registered", "name", i === 1_200 ? "victim" : "other", "session_tag", sessionTag(`s-${i}`),
+          "runtime", "generic", "pid", "7", "cwd", "/c", "claude_session", "", "via", "register");
+      }
+      return key;
+    };
+    const window = { sinceMs: 2_000_000, untilMs: 2_001_499, name: "victim" };
+    const clean = await fill();
+    expect(await queryRegistrations(redis, window, clean)).toMatchObject({ coverage: "complete", events: [expect.objectContaining({ name: "victim" })] });
+
+    const deleted = await fill();
+    const afterXdel = await queryRegistrations(redis, window, deleted, { onPage: async (i) => { if (i === 0) await redis.xdel(deleted, "2001200-0"); } });
+    expect(afterXdel.events).toEqual([]);
+    expect(afterXdel).toMatchObject({ coverage: "incomplete", complete_from: new Date(2_001_201).toISOString() });
+
+    const trimmed = await fill();
+    const afterTrim = await queryRegistrations(redis, { ...window, name: "absent" }, trimmed, { onPage: async (i) => { if (i === 0) await redis.xtrim(trimmed, "MAXLEN", 100); } });
+    expect(afterTrim.coverage).toBe("incomplete");
+    expect(Date.parse(afterTrim.complete_from!)).toBeGreaterThan(window.sinceMs);
+  });
 });
+

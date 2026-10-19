@@ -426,8 +426,13 @@ Every committed registration of a new session (any runtime: the Claude MCP serve
 shells, the plain MCP server, HTTP) appends one entry to the stream `gptq:registration-audit`
 (`MAXLEN ~ 10000`). The entry is written by the same Lua script that publishes the registry entry
 (`PUBLISH_REGISTRATION_AUDITED_SCRIPT` in `src/core/session-store.ts`), so it exists if and only
-if the registration committed. A failed or rolled-back attempt never reaches that script and
-writes nothing (there is no `rolled_back` event). Unregistering, reaping or rolling back later
+if the registration committed. The script type-checks every key it touches before its first write,
+so a failure (for example a wrong-type audit key) changes nothing, and the client then undoes the
+attempt's session and provisional registry value. A failed or rolled-back attempt writes no event
+(there is no `rolled_back` event). A runtime continuity adoption (a live provisional session
+adopting its mapped mailbox name) is audited in the adoption script itself, as `event=registered`
+with `via=adoption` for the target name; ordinary registrations carry `via=register`. The operator
+continuity and remap commands only change a mapping and are not audited here. Unregistering, reaping or rolling back later
 never removes the entry, so it proves a transient registration that a registry snapshot no longer
 shows. A registered shell's later metadata republish is not a new registration and is not audited.
 
@@ -435,7 +440,7 @@ Fields: `event=registered`, `name`, `session_tag` (the `sid-sha256:` tag, never 
 id), `runtime` (`claude` | `codex` | `pi` | `generic` | `unknown`; a declared client outside that
 list, such as `opencode`, is `unknown`), `pid`, `cwd` (the shell's working directory when it
 declared one, else the registering process's cwd), and `claude_session` (the Claude session UUID
-from `CLAUDE_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` when the Claude MCP path has it, else empty).
+from `CLAUDE_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` when the Claude MCP path has it, else empty), and `via` (`register` | `adoption`).
 
 Query it read-only (EXISTS, XINFO STREAM and XRANGE only):
 
@@ -446,7 +451,7 @@ bin/gptqueue-doctor registrations --since 2026-10-19T00:00:00Z --until 2026-10-1
 
 `--redis-url` defaults to `$REDIS_URL`, then `redis://127.0.0.1:6379/0`. The output is one JSON
 object: `{schema_version: 1, since, until, coverage, complete_from, events: [{at, name,
-session_tag, runtime, pid, cwd, claude_session}], truncated}`, with at most 500 events
+session_tag, runtime, pid, cwd, claude_session, via}], truncated}`, with at most 500 events
 (`truncated: true` beyond). Filters are exact matches (`--claude-session` ignores case).
 
 `coverage` says whether an empty result proves absence:
@@ -459,6 +464,13 @@ session_tag, runtime, pid, cwd, claude_session}], truncated}`, with at most 500 
   writing to this Redis after `--since`. When the audit was deployed after `--since`,
   `complete_from` is the first audited registration, so the caller sees the deploy time there.
   An empty stream gives `unknown`, since nothing proves when it started.
+  Coverage is computed from stream metadata read after the scan, so a trim or XDEL during the
+  query downgrades it instead of hiding a missed event.
+
+**Mixed versions.** Writers on releases without the audit emit nothing, and the stream cannot tell
+which writers ran which release. An empty `complete` report proves non-registration only when
+every process that could register in the queried interval ran an audit-emitting release
+throughout it.
 - `unknown`: no audit stream on this Redis, or a Redis older than 7.0 without the XINFO fields.
 
 Exit codes: 0 success, 2 invalid arguments, 4 Redis unavailable (or the query failed).

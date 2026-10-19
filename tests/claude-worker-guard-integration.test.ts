@@ -5,7 +5,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -221,4 +221,62 @@ describe("AskUserQuestion guard (pre-tool-use)", { timeout: 300_000 }, () => {
     expect(out.systemMessage).toMatch(/FAILED \(redis_unavailable/);
     expect(existsSync(askFile(sid))).toBe(false);
   });
+
+  // F1: the guard fails open whenever it cannot record the denial, so it never denies twice for one event.
+  const denies = (r: { stdout: string }) => r.stdout.includes('"permissionDecision":"deny"');
+  const inactive = (r: { stdout: string }) => (r.stdout ? String((JSON.parse(r.stdout) as Record<string, unknown>).systemMessage ?? "") : "");
+
+  it("F1: no usable session_id never denies", async () => {
+    const me = await agent("claude-ask-nosid");
+    record(me.name, me.session_id);
+    await send(me.client, me.name);
+    for (const sid of [undefined, "", "unknown", "../x"]) {
+      for (let i = 0; i < 2; i += 1) {
+        const r = await hook("pre-tool-use", { ...(sid === undefined ? {} : { session_id: sid }), tool_name: "AskUserQuestion", tool_input: {} });
+        expect(r.code).toBe(0);
+        expect(denies(r)).toBe(false);
+        expect(inactive(r)).toMatch(/guard inactive \(no usable session_id\)/);
+      }
+    }
+  });
+
+  it("F1: an unsafe runtime dir never denies", async () => {
+    const me = await agent("claude-ask-unsafe");
+    record(me.name, me.session_id);
+    await send(me.client, me.name);
+    const sid = randomUUID();
+    await chmod(runtime, 0o755);
+    try {
+      for (let i = 0; i < 2; i += 1) {
+        const r = await ask(sid);
+        expect(r.code).toBe(0);
+        expect(denies(r)).toBe(false);
+      }
+    } finally { await chmod(runtime, 0o700); }
+  });
+
+  it("F1: a denial that cannot be recorded is not emitted; an existing record is forced to 0600", async () => {
+    const me = await agent("claude-ask-wfail");
+    record(me.name, me.session_id);
+    await send(me.client, me.name);
+    const blocked = randomUUID();
+    await mkdir(askFile(blocked)); // not a regular file: the record cannot be written
+    for (let i = 0; i < 2; i += 1) {
+      const r = await ask(blocked);
+      expect(denies(r)).toBe(false);
+      expect(inactive(r)).toMatch(/could not record the denial/);
+    }
+    const readOnly = randomUUID();
+    await writeFile(askFile(readOnly), JSON.stringify({ event_id: "0-1" }), { mode: 0o400 });
+    if (process.getuid?.() !== 0) {
+      for (let i = 0; i < 2; i += 1) expect(denies(await ask(readOnly))).toBe(false);
+    }
+    const loose = randomUUID();
+    await writeFile(askFile(loose), JSON.stringify({ event_id: "0-1" }), { mode: 0o644 });
+    await chmod(askFile(loose), 0o644);
+    expect(denies(await ask(loose))).toBe(true);
+    expect((await stat(askFile(loose))).mode & 0o777).toBe(0o600);
+    expect(denies(await ask(loose))).toBe(false);
+  });
 });
+

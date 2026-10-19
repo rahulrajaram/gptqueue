@@ -123,8 +123,12 @@ GPTQUEUE_WORKER === "1"
 
 In worker mode:
 
-- the MCP server (`gptqueue-claude-mcp`, and the plain server) does not auto-register: no
-  mailbox, no session record, no lease. Its tools still work after an explicit `register_agent`;
+- the MCP server (`gptqueue-claude-mcp`, and the plain server) does not auto-register from its
+  environment: no mailbox, no session record, no lease. Its tools still work after an explicit
+  `register_agent`. Exception: a name passed as a command-line argument to the plain server
+  (`dist/mcp-server/index.js <name>`) is an explicit choice and registers even in worker mode,
+  including under `GPTQUEUE_WORKER=1`. The Claude wrapper `bin/gptqueue-claude-mcp` clears argv, so
+  this never applies to it;
 - SessionStart prints only one context line ("headless worker session ... Set GPTQUEUE_WORKER=0
   to opt in."): no probe, no seat binding;
 - Stop allows with no output and writes no state file; UserPromptSubmit records nothing;
@@ -139,7 +143,8 @@ unless it should own a mailbox.
 
 To prove a worker never registered, even transiently, query the registration audit for its time
 window and directory: `gptqueue-doctor registrations --since ... --until ... --cwd <worktree> --json`
-must return no events with `coverage: "complete"` (see "Registration audit" in
+must return no events with `coverage: "complete"`, and every writer that could register in that
+window must run an audit-emitting release (older releases write no events) (see "Registration audit" in
 AUTOMATIC_SHELL_REGISTRATION.md).
 
 ## Optional: AskUserQuestion guard
@@ -150,7 +155,11 @@ leads are mailing it stalls them all. The guard is a PreToolUse hook that denies
 has actionable mail (the same counts the Stop gate uses). The denial reason names the agent and
 the counts and tells the model to claim and handle the mail first, then ask. Asking again without
 new mail goes through; new mail since the denial denies again. The denial is recorded in the
-runtime dir as `ask-<session>.json` (mode 0600).
+runtime dir as `ask-<session>.json` (mode 0600, forced on an existing file) **before** the deny is
+emitted. When it cannot be recorded (no usable `session_id`, an unsafe or unavailable runtime dir,
+an existing state path that is not this user's regular file, or a failed write) the guard fails
+open: no deny, only a `systemMessage` saying the guard is inactive. So it never denies the same
+event twice.
 
 It never blocks on gptqueue trouble: worker mode, an unconfirmed identity, or a failed probe let
 the question through (a failed probe adds a `systemMessage`). It never emits

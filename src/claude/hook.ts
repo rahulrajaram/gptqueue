@@ -26,7 +26,7 @@
  *   running for this session (pidfile), block once to have the model start it.
  *   GPTQ_CLAUDE_WATCH=off disables that reminder.
  */
-import { readFileSync, rmSync } from "node:fs";
+import { chmodSync, lstatSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { ensureRuntimeDir, watcherPidPath, watcherRunning } from "./session-record.js";
 import { confirmLegacyLiveness, isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity, type ProbeResult } from "./inbox-probe.js";
@@ -274,10 +274,38 @@ const workerOutput = (event: CliEvent): string | null => {
   }
 };
 
+const ASK_GUARD_INACTIVE = (why: string): string =>
+  JSON.stringify({ systemMessage: `gptqueue AskUserQuestion guard inactive (${why}); not gating this question.` });
+
+/**
+ * Persist a denial record before the denial is emitted (F1): a deny that
+ * cannot be recorded would repeat for the same mail. Refuses an existing
+ * path that is not a regular file owned by this user; forces mode 0600.
+ */
+const persistDenial = (path: string, record: Exclude<PriorAsk, null>): boolean => {
+  try {
+    const existing = (() => { try { return lstatSync(path); } catch { return null; } })();
+    if (existing !== null && (!existing.isFile() || (process.getuid !== undefined && existing.uid !== process.getuid()))) return false;
+    writeFileSync(path, JSON.stringify(record), { mode: 0o600 });
+    chmodSync(path, 0o600);
+    return readPriorAsk(path)?.event_id === record.event_id;
+  } catch { return false; }
+};
+
+/** A session id usable as a state-file key: non-empty and unchanged by sanitizing (no collisions). */
+const usableSession = (raw: unknown): string | null =>
+  typeof raw === "string" && raw !== "" && raw !== "unknown" && sessionFileTag(raw) === raw ? raw : null;
+
 const runAskGuard = async (stdin: string, env: NodeJS.ProcessEnv): Promise<{ stdout: string | null; exitCode: number }> => {
   const json = parseHookJson(stdin);
   if (json.tool_name !== "AskUserQuestion") return { stdout: null, exitCode: 0 };
-  const claudeSession = typeof json.session_id === "string" && json.session_id ? json.session_id : "unknown";
+  // F1: fail open unless a denial can be recorded per session.
+  const claudeSession = usableSession(json.session_id);
+  if (claudeSession === null) return { stdout: ASK_GUARD_INACTIVE("no usable session_id"), exitCode: 0 };
+  let dir: string | null = null;
+  try { dir = ensureRuntimeDir(env); } catch { /* unsafe dir */ }
+  if (dir === null) return { stdout: ASK_GUARD_INACTIVE("runtime dir unavailable or unsafe"), exitCode: 0 };
+  const statePath = join(dir, `ask-${claudeSession}.json`);
   const resolved = resolveIdentity(typeof json.cwd === "string" ? json.cwd : undefined, env);
   // A guessed name may be another session's inbox: never gate on it, and skip Redis entirely.
   if (!isConfirmed(resolved)) return { stdout: null, exitCode: 0 };
@@ -286,15 +314,17 @@ const runAskGuard = async (stdin: string, env: NodeJS.ProcessEnv): Promise<{ std
     const checked = await confirmLegacyLiveness(redis, resolved, env);
     return { identity: checked, probe: await probeInbox(redis, checked.agent, checked.gptqueue_session_id) };
   })().finally(() => redis.disconnect());
-  let dir: string | null = null;
-  try { dir = ensureRuntimeDir(env); } catch { /* unsafe dir: no record, so the guard may repeat */ }
-  const statePath = dir && claudeSession !== "unknown" ? join(dir, `ask-${sessionFileTag(claudeSession)}.json`) : null;
-  const decision = decideAsk({ identity, probe, prior: statePath ? readPriorAsk(statePath) : null });
-  if (statePath) {
-    if (decision.kind === "deny") writeFileSync(statePath, JSON.stringify(decision.record), { mode: 0o600 });
-    else if (decision.clearRecord) rmSync(statePath, { force: true });
+  const decision = decideAsk({ identity, probe, prior: readPriorAsk(statePath) });
+  switch (decision.kind) {
+    case "deny":
+      return persistDenial(statePath, decision.record)
+        ? { stdout: renderAsk(decision), exitCode: 0 }
+        : { stdout: ASK_GUARD_INACTIVE("could not record the denial"), exitCode: 0 };
+    case "pass":
+      if (decision.clearRecord) { try { rmSync(statePath, { force: true }); } catch { /* stale record only re-allows */ } }
+      return { stdout: renderAsk(decision), exitCode: 0 };
+    default: { const unreachable: never = decision; throw new Error(String(unreachable)); }
   }
-  return { stdout: renderAsk(decision), exitCode: 0 };
 };
 
 export const runClaudeHook = async (argv: readonly string[], stdin: string, binDir: string, env: NodeJS.ProcessEnv = process.env): Promise<{ stdout: string | null; exitCode: number }> => {
