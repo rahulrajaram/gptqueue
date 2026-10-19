@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { sanitizeEvidence } from './public-evidence.js';
 import { describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
@@ -78,7 +79,7 @@ const toml = (value: unknown) => JSON.stringify(value);
 export const runCodex = async (cwd: string, prompt: string, config: Json): Promise<Run> => {
   const overrides = Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${toml(value)}`]);
   const child = spawn(codexBin, ["exec", "--json", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check", "--approve-for-me", "--model", "gpt-5.6-luna", "-C", cwd, ...overrides, prompt], {
-    cwd, env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"],
+    cwd, env: privateRedisEnv({ ...process.env }), stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "", stderr = "";
   child.stdout?.on("data", (chunk: Buffer) => { stdout = (stdout + chunk.toString()).slice(-1_500_000); });

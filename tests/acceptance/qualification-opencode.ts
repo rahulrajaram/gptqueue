@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { privateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -477,7 +478,7 @@ const privateProfile = (redisUrl: string): OpenCodeProfile => {
   });
   return Object.freeze({
     paths: Object.freeze([config, home, data, cache, state]),
-    env: {
+    env: privateRedisEnv({
       ...process.env,
       HOME: home,
       XDG_CONFIG_HOME: config,
@@ -488,11 +489,10 @@ const privateProfile = (redisUrl: string): OpenCodeProfile => {
       OPENCODE_CONFIG_DIR: undefined,
       OPENCODE_DISABLE_PROJECT_CONFIG: "1",
       OPENCODE_CONFIG_CONTENT: configContent,
-      REDIS_URL: redisUrl,
       OPENCODE_PURE: undefined,
       OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
       OPENCODE_MODELS_PATH: modelsPath,
-    },
+    }, redisUrl),
     profileHash: hash(effectiveConfig),
   });
 };

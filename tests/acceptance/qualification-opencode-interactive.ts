@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { access, constants, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -76,7 +77,7 @@ const profile = (redisUrl: string): Readonly<{
   const state = newConfigHome();
   const effective = JSON.stringify({ config: repairConfig(), redisUrl, home, configHome, data, cache, state, tui: true });
   return Object.freeze({
-    env: {
+    env: privateRedisEnv({
       ...process.env,
       HOME: home,
       XDG_CONFIG_HOME: configHome,
@@ -89,8 +90,7 @@ const profile = (redisUrl: string): Readonly<{
       OPENCODE_CONFIG_CONTENT: JSON.stringify(repairConfig()),
       OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
       OPENCODE_MODELS_PATH: modelsPath,
-      REDIS_URL: redisUrl,
-    },
+    }, redisUrl),
     paths: Object.freeze([configHome, home, data, cache, state]),
     profileHash: hash(effective),
   });

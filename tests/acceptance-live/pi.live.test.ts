@@ -5,6 +5,7 @@
  * registered sidecar (bin/gptqueue-session --client pi) against the private Redis.
  * Sessions are written under the receipt directory; no user extensions, skills or context files.
  */
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -45,7 +46,7 @@ const startPi = (dir: string, label: string, redisUrl: string, work: string): Pi
   const child = spawn("pi", ["--mode", "rpc", "--model", MODEL, "--session-dir", sessions, "-ne", "-e", extension,
     "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools",
     "--append-system-prompt", "Use only the gptqueue tools for gptqueue work."],
-  { cwd: work, env: { ...process.env, ...isolatedGptqueueEnv(dir), REDIS_URL: redisUrl }, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+  { cwd: work, env: privateRedisEnv({ ...process.env, ...isolatedGptqueueEnv(dir) }, redisUrl), detached: true, stdio: ["pipe", "pipe", "pipe"] });
   const events: PiEvent[] = [];
   let buffer = "", raw = "";
   child.stdout!.on("data", (chunk: Buffer) => {

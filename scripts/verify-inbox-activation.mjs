@@ -8,7 +8,7 @@ import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
-import { startOwnedRedis } from './lib/owned-redis.mjs';
+import { privateRedisEnv, startOwnedRedis } from './lib/owned-redis.mjs';
 import { CodexSocketClient } from '../dist/registered-shell/codex-socket.js';
 import { bindCodexHook } from '../dist/registered-shell/codex-hook.js';
 import { CodexThreadReader } from '../dist/registered-shell/codex-history.js';
@@ -20,6 +20,8 @@ const directory = join(root, '.gptqueue/automatic-shell/event-delivery', `native
 await mkdir(directory, { recursive: true });
 const rpc = new CodexSocketClient(undefined, 15_000);
 const privateRedis = await startOwnedRedis();
+// Every Redis endpoint alias in this process (and so in every child) names the private instance.
+Object.assign(process.env, privateRedisEnv(process.env, privateRedis.url));
 const redis = new Redis(privateRedis.url);
 const owned = [];
 const started = Date.now();

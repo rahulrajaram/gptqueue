@@ -31,6 +31,7 @@ import { builtinModules } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
+import { privateRedisEnv } from "./owned-redis.mjs";
 
 export const STAGED_ENTRIES = Object.freeze(["dist", "bin", "package.json", "package-lock.json"]);
 /** bin/ entry points a release must ship (operator tools are invoked from <prefix>/current/bin). */
@@ -358,7 +359,8 @@ export async function verifyRelease(dir, { redisUrl, initBoundMs = 3_000, hookBo
     const imports = checkEntryImports(root);
     const run = async (label, options) => {
       const trace = join(scratch, `${label}.trace`);
-      const env = { PATH: process.env.PATH, HOME: scratch, REDIS_URL: redisUrl, GPTQ_RESOLVE_TRACE: trace };
+      // Every Redis endpoint alias names the private verification instance (privateRedisEnv).
+      const env = privateRedisEnv({ PATH: process.env.PATH, HOME: scratch, GPTQ_RESOLVE_TRACE: trace }, redisUrl);
       const result = await timedChild({ ...options, command: node, args: ["--import", pathToFileURL(hook).href, ...options.args], cwd: scratch, env });
       const { loaded, escapes } = traceEscapes(root, trace);
       // An empty trace means the tracer failed, not that nothing escaped.

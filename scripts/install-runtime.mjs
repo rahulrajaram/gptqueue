@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { startOwnedRedis } from "./lib/owned-redis.mjs";
+import { privateRedisEnv, startOwnedRedis } from "./lib/owned-redis.mjs";
 import { ReleaseError, install, killVerificationChildren, prune, rollback, status } from "./lib/runtime-release.mjs";
 import { buildPlan, renderPlan } from "./lib/runtime-plan.mjs";
 
@@ -38,6 +38,8 @@ async function main(command) {
     case "install": {
       // Private socket-only Redis (no TCP); verification children get its URL.
       const redis = await startOwnedRedis();
+      // Every Redis endpoint alias in this process (and so in every child) names the private instance.
+      Object.assign(process.env, privateRedisEnv(process.env, redis.url));
       // A signal aimed at this pid alone must not orphan Redis or the
       // verification children (the default action skips finally and "exit").
       // A signal that arrives during the synchronous npm install is handled

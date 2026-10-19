@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "./helpers/test-redis.js";
 import { testRedisUrl } from "./helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -644,7 +645,7 @@ describe.skipIf(!BUILT)("gptqueue-watchdog bin (needs npm run build)", () => {
       const configPath = join(dirQuiet, "w.json");
       await writeFile(configPath, JSON.stringify({ schema_version: 1, root: "r", leads: [`wd-cli-${randomUUID().slice(0, 8)}`], operator: null,
         thresholds_min: { waiting: 10, escalate_after: 10, idle: 15 }, max_actions_per_run: 5 }));
-      const env = { ...process.env, XDG_STATE_HOME: dirQuiet, XDG_CONFIG_HOME: dirQuiet, REDIS_URL };
+      const env = privateRedisEnv({ ...process.env, XDG_STATE_HOME: dirQuiet, XDG_CONFIG_HOME: dirQuiet }, REDIS_URL);
       const exec = (...args: string[]) => spawnSync(process.execPath, [join(process.cwd(), "bin", "gptqueue-watchdog"), ...args], { encoding: "utf8", timeout: 10_000, env });
       const quiet = exec("--once", "--config", configPath);
       expect(quiet.status).toBe(0);

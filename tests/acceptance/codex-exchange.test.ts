@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -32,7 +33,7 @@ it.skipIf(process.env.GPTQUEUE_CODEX_EXCHANGE !== '1')('a native Codex child con
     const overrides = Object.entries(config).flatMap(([name, value]) => ['-c', `${name}=${JSON.stringify(value)}`]);
     child = spawn(CODEX_BIN, ['exec', '--ignore-user-config', '--json', '--ephemeral', '--skip-git-repo-check',
       '--approve-for-me', '--model', 'gpt-5.6-luna', '-C', dir, ...overrides, prompt],
-    { cwd: dir, env: { ...process.env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    { cwd: dir, env: privateRedisEnv({ ...process.env }), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout?.on('data', chunk => { stdout = (stdout + String(chunk)).slice(-2_000_000); });
     child.stderr?.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-40_000); });
     const status = await new Promise<Json>(resolve => {

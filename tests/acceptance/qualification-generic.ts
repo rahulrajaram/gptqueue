@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { parsePrivateRedisUrl, privateRedisUrl, type PrivateRedisTarget } from "../../scripts/lib/owned-redis.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
@@ -118,7 +119,7 @@ const startOwnedHttp = async (options: GenericFactoryOptions, redisUrl: string, 
   const nodePath = options.nodePath ?? process.execPath;
   const scriptPath = join(options.repo, "dist/transports/http.js");
   const [nodeExecutableSha256, scriptSha256] = await Promise.all([readFile(nodePath).then((value) => createHash("sha256").update(value).digest("hex")), readFile(scriptPath).then((value) => createHash("sha256").update(value).digest("hex"))]);
-  const child = spawn(nodePath, [scriptPath, "--port", String(port)], { cwd: options.repo, env: { ...process.env, REDIS_URL: redisUrl, GPTQUEUE_HOST: "127.0.0.1", GPTQUEUE_HTTP_TOKEN: "", GPTQUEUE_HTTP_SOCKET: "" }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(nodePath, [scriptPath, "--port", String(port)], { cwd: options.repo, env: privateRedisEnv({ ...process.env, GPTQUEUE_HOST: "127.0.0.1", GPTQUEUE_HTTP_TOKEN: "", GPTQUEUE_HTTP_SOCKET: "" }, redisUrl), stdio: ["ignore", "pipe", "pipe"] });
   if (!child.pid) throw new Error("owned HTTP server did not spawn");
   const evidence = (): GenericTransportEvidence => Object.freeze({
     transport: "http", port, child_pid: child.pid!, node_path: nodePath, node_executable_sha256: nodeExecutableSha256,
@@ -199,7 +200,7 @@ export const createGenericAdapters = (options: GenericFactoryOptions): Readonly<
       let registration: GenericCallRecord;
       if (id === "generic-stdio") {
         owner = new Client({ name: agent, version: "1" });
-        await connectClient(owner, new StdioClientTransport({ command: options.nodePath ?? process.execPath, args: [join(options.repo, "dist/mcp-server/index.js")], env: { ...process.env, REDIS_URL: redisUrl } as Record<string, string> }), signal);
+        await connectClient(owner, new StdioClientTransport({ command: options.nodePath ?? process.execPath, args: [join(options.repo, "dist/mcp-server/index.js")], env: privateRedisEnv(process.env, redisUrl) as Record<string, string> }), signal);
       } else {
         const owned = await ensureHttp(redisUrl, signal);
         owner = new Client({ name: agent, version: "1" });

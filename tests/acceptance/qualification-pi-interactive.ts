@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
@@ -155,7 +156,7 @@ export const startPiInteractiveParticipant = async (options: InteractiveOptions,
   try {
     checkAbort(signal);
     const args = [join(root, "cli.js"), "--offline", "--provider", options.provider, "--model", options.model, "--no-extensions", "--extension", extension, "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--session-dir", sessions, "--append-system-prompt", "Use only the private GPTQueue tools for qualification work."];
-    child = pty.spawn(process.execPath, args, { cwd, env: { ...process.env, PI_OFFLINE: "1", GPTQUEUE_PI_PROVIDER: options.provider, GPTQUEUE_PI_MODEL: options.model, TERM: "xterm-256color" }, cols: 140, rows: 45, name: "xterm-256color" });
+    child = pty.spawn(process.execPath, args, { cwd, env: privateRedisEnv({ ...process.env, PI_OFFLINE: "1", GPTQUEUE_PI_PROVIDER: options.provider, GPTQUEUE_PI_MODEL: options.model, TERM: "xterm-256color" }), cols: 140, rows: 45, name: "xterm-256color" });
     child.onData(chunk => {
       terminalOutput = `${terminalOutput}${String(chunk)}`.slice(-20_000);
       if (String(chunk).includes("\u001b[6n")) child?.write("\u001b[1;1R");

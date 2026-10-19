@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -201,7 +202,7 @@ describe.skipIf(!enabled)("OpenCode native variants acceptance", () => {
     const reference = new Client({ name: "gptqueue-opencode-variants-reference", version: "1.0.0" });
     let referenceCall: ReferenceCall | undefined;
     try {
-      await reference.connect(new StdioClientTransport({ command: process.execPath, args: [join(repo, "dist/mcp-server/index.js")], env: { ...process.env, REDIS_URL: redisUrl } as Record<string, string> }));
+      await reference.connect(new StdioClientTransport({ command: process.execPath, args: [join(repo, "dist/mcp-server/index.js")], env: privateRedisEnv(process.env, redisUrl) as Record<string, string> }));
       referenceCall = async (name, args = {}) => {
         const result = await reference.callTool({ name, arguments: args });
         if (result.isError) throw new Error(`Reference ${name} failed`);

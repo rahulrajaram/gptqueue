@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -6,7 +7,7 @@ import { tmpdir } from "node:os";
 import { Redis } from "ioredis";
 import { describe, expect, it } from "vitest";
 import { SESSION_KEYS } from "../../src/core/keys.js";
-import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
+import { startOwnedRedis, type OwnedRedis, ownedRedisReceipt, geminiMcpSettings } from "./owned-redis.js";
 import { sanitizeEvidence } from "./public-evidence.js";
 import { nodePrefixPath } from "./local-tools.js";
 
@@ -39,7 +40,7 @@ const stopProcess = async (child: ChildProcess): Promise<void> => {
 const runCli = (cwd: string, redisUrl: string, prompt: string): Promise<Readonly<{ code: number | null; timedOut: boolean; error?: string; stdout: string; stderr: string }>> => new Promise(resolveRun => {
   const child = spawn(gemini, ["--extensions", "none", "--allowed-mcp-server-names", "gptqueue", "--approval-mode", "yolo", "--output-format", "stream-json", "--prompt", prompt], {
     cwd, detached: true, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, NO_UPDATE_NOTIFIER: "1", GPTQUEUE_REDIS_URL: redisUrl },
+    env: privateRedisEnv({ ...process.env, NO_UPDATE_NOTIFIER: "1" }, redisUrl),
   });
   let stdout = "", stderr = "", timedOut = false, spawnError: string | undefined;
   child.stdout?.on("data", chunk => { stdout = (stdout + String(chunk)).slice(-2_000_000); });
@@ -79,9 +80,9 @@ describe.skipIf(!enabled)("Gemini prerequisite preflight", () => {
       receipt.gemini_cli_sha256_before = await cliHash();
       await persist("source-provenance", { source_hashes: receipt.source_hashes, gemini_cli_sha256: receipt.gemini_cli_sha256_before });
       owned = await startOwnedRedis();
-      receipt.redis = { protocol: "redis:", hostname: "127.0.0.1", port: new URL(owned.url).port, database: "15" };
+      receipt.redis = ownedRedisReceipt(owned.url);
       await persist("owned-redis-ready", receipt.redis);
-      const settings = { hooksConfig: { enabled: false }, tools: { core: [] }, security: { folderTrust: { enabled: false } }, mcpServers: { gptqueue: { command: process.execPath, args: [join(repo, "dist/mcp-server/index.js")], env: { REDIS_URL: owned.url }, trust: true } } };
+      const settings = geminiMcpSettings(join(repo, "dist/mcp-server/index.js"), owned.url);
       await mkdir(join(workspace, ".gemini"), { recursive: true });
       await writeFile(join(workspace, ".gemini/settings.json"), JSON.stringify(settings), { mode: 0o600 });
       await persist("workspace-ready", { workspace: "[redacted]", settings: { hooksConfig: settings.hooksConfig, tools: settings.tools, allowedServer: "gptqueue" } });

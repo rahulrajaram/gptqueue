@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { randomUUID, randomInt } from 'node:crypto';
@@ -30,7 +31,7 @@ for (const trial of [1, 2, 3]) it.skipIf(process.env.GPTQUEUE_CODEX_INITIATIVE !
       const overrides = Object.entries(config).flatMap(([name, value]) => ['-c', `${name}=${JSON.stringify(value)}`]);
       const child = spawn(CODEX_BIN, ['exec', '--ignore-user-config', '--json', '--ephemeral', '--skip-git-repo-check',
         '--approve-for-me', '--model', 'gpt-5.6-luna', '-C', cwd, ...overrides, prompt],
-      { cwd, env: { ...process.env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd, env: privateRedisEnv({ ...process.env }), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       child.stdout.on('data', data => { stdout = (stdout + String(data)).slice(-2_000_000); });
       child.stderr.on('data', data => { stderr = (stderr + String(data)).slice(-20_000); });
       receipt.process = await new Promise<Json>(resolve => {

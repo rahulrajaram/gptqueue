@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { createCodexAdapters, type CodexParticipant } from "./qualification-codex.js";
 import { createPiAdapters, type PiRpcParticipant } from "./qualification-pi.js";
-import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
+import { startOwnedRedis, type OwnedRedis, ownedRedisReceipt } from "./owned-redis.js";
 import { CohortLeasePool, type CohortMember } from "./qualification-scheduler.js";
 import { runModelPair, type TypedEvidenceWriter } from "./qualification-driver.js";
 import { extractNativeTraces } from "./qualification-evidence.js";
@@ -52,7 +52,7 @@ describe.skipIf(!enabled)("Codex appserver to Pi RPC qualification pair", () => 
     let failure: unknown;
     try {
       redis = await startOwnedRedis();
-      receipt.redis = { database: new URL(redis.url).pathname.slice(1), host: new URL(redis.url).hostname, port: new URL(redis.url).port };
+      receipt.redis = ownedRedisReceipt(redis.url);
       workspace = await mkdtemp(join(tmpdir(), "gptqueue-qualification-cross-model-"));
       await mkdir(join(workspace, "codex"), { recursive: true });
       await mkdir(join(workspace, "pi"), { recursive: true });
@@ -67,7 +67,7 @@ describe.skipIf(!enabled)("Codex appserver to Pi RPC qualification pair", () => 
       expect(availability).toEqual([{ kind: "available" }, { kind: "available" }]);
       sender = await codexAdapter.launch({ role: "sender", pairId: "codex-pi-cross-model", nonce: runId, redisUrl: redis.url }, gateSignal) as CodexParticipant;
       receiver = await piAdapter.launch({ role: "receiver", pairId: "codex-pi-cross-model", nonce: runId, redisUrl: redis.url }, gateSignal) as PiRpcParticipant;
-      await persist("launched", { sender: identity(sender), receiver: identity(receiver), shared_redis_database: new URL(redis.url).pathname.slice(1) });
+      await persist("launched", { sender: identity(sender), receiver: identity(receiver), shared_redis_database: ownedRedisReceipt(redis.url).database });
       expect(sender.identity.route).toBe("codex-appserver");
       expect(receiver.identity.route).toBe("pi-rpc-cli");
       expect(sender.identity.hostRuntimeId).not.toBe(receiver.identity.hostRuntimeId);

@@ -93,34 +93,106 @@ export function privateRedisUrl(value) {
   return /** @type {string} */ (value);
 }
 
+// ---- Child environments -------------------------------------------------
+
+/**
+ * Every environment variable through which gptqueue code, its scripts or its
+ * tests name a Redis endpoint. URL aliases: REDIS_URL (all entry points),
+ * GPTQUEUE_REDIS_URL (the OpenCode plugin prefers it over REDIS_URL),
+ * GPTQ_VERIFY_REDIS_URL (verify-wrapper-child). Components: REDIS_HOST,
+ * REDIS_PORT and GPTQ_REDIS_DB (scripts/check-queue.sh, consulted only when
+ * REDIS_URL is empty). An inherited value of ANY of them could point a child
+ * at another server, so the private URL replaces every one.
+ */
+export const REDIS_ENDPOINT_ENV = Object.freeze([
+  "REDIS_URL", "GPTQUEUE_REDIS_URL", "GPTQ_VERIFY_REDIS_URL", "REDIS_HOST", "REDIS_PORT", "GPTQ_REDIS_DB",
+]);
+
+/**
+ * The ONE builder for a child process environment: a copy of `base` with every
+ * Redis endpoint variable set to the private URL `url` (default: base.REDIS_URL).
+ * The URL must be a live private socket instance (privateRedisUrl), so this
+ * throws instead of propagating a TCP or foreign endpoint. Applied last, so no
+ * earlier key or spread in `base` can override an alias. For the components a
+ * socket path is not a host, port or number, so check-queue.sh's TCP fallback
+ * fails closed (and REDIS_URL, which it prefers, is the socket).
+ * @param {Record<string, string | undefined>} base
+ * @param {string} [url]
+ */
+export function privateRedisEnv(base, url = base.REDIS_URL) {
+  const target = privateRedisUrl(url);
+  const env = { ...base };
+  for (const name of REDIS_ENDPOINT_ENV) env[name] = target;
+  return env;
+}
+
 // ---- Process identity ---------------------------------------------------
 
-const pidAlive = (pid) => {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
-};
-/** Field 22 of /proc/<pid>/stat (start time): pid reuse changes it. */
+/** Field 22 of /proc/<pid>/stat (start time in clock ticks): pid reuse changes it. */
 const procStart = (pid) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
   } catch { return null; }
 };
-const pidNamespace = () => { try { return readlinkSync("/proc/self/ns/pid"); } catch { return "unknown"; } };
-const argvOf = (pid) => {
+const procArgv = (pid) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
     const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
     if (argv.at(-1) === "") argv.pop();
     return argv;
   } catch { return null; }
 };
-/** True only for a redis-server whose argv serves exactly `socket` (we pass --set-proc-title no). */
-export const isRedisServingSocket = (pid, socket) => {
-  const argv = argvOf(pid);
+/** The real /proc reader; tests inject a fake with the same shape. */
+export const linuxProc = Object.freeze({ start: procStart, argv: procArgv });
+const pidNamespace = () => { try { return readlinkSync("/proc/self/ns/pid"); } catch { return "unknown"; } };
+
+/** argv of a redis-server serving exactly `socket` (we pass --set-proc-title no, so argv is kept). */
+const servesSocket = (argv, socket) => {
   if (!argv || !basename(argv[0] ?? "").startsWith("redis-server")) return false;
   const at = argv.indexOf("--unixsocket");
   return at !== -1 && argv[at + 1] === socket;
 };
+export const isRedisServingSocket = (pid, socket, proc = linuxProc) => servesSocket(proc.argv(pid), socket);
+
+/**
+ * True only while `server` ({ pid, start, socket, argv? }, recorded in
+ * owner.json) is still the same process: same start time, still a
+ * redis-server serving that socket, and (when recorded) the same argv. A
+ * reused pid, an exited process or a zombie (empty cmdline) all fail. Every
+ * signal and every liveness poll re-checks this, so a pid that was recycled
+ * between polls is never signalled.
+ */
+export const sameServer = (server, proc = linuxProc) => {
+  if (!server || typeof server.start !== "string" || typeof server.socket !== "string") return false;
+  if (proc.start(server.pid) !== server.start) return false;
+  const argv = proc.argv(server.pid);
+  if (!servesSocket(argv, server.socket)) return false;
+  return !Array.isArray(server.argv) || (argv.length === server.argv.length && argv.every((arg, i) => arg === server.argv[i]));
+};
+
+const POLL_MS = 25;
+const defaultKill = (pid, signal) => { try { process.kill(pid, signal); } catch { /* already gone */ } };
+
+/**
+ * SIGTERM, then SIGKILL after `boundMs`, each sent only after `server` is
+ * re-verified; polls re-verify too. Returns the signals actually sent.
+ */
+export async function stopVerifiedServer(server, { proc = linuxProc, kill = defaultKill, sleep: wait = sleep, boundMs = 3_000 } = {}) {
+  const sent = [];
+  const polls = Math.max(1, Math.ceil(boundMs / POLL_MS));
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
+    if (!sameServer(server, proc)) return sent; // gone or replaced: never signal it
+    kill(server.pid, signal);
+    sent.push(signal);
+    for (let i = 0; i < polls; i += 1) {
+      if (!sameServer(server, proc)) return sent;
+      await wait(POLL_MS);
+    }
+  }
+  return sent;
+}
 
 const writeOwner = (dir, owner) => {
   const tmp = join(dir, `${OWNER_FILE}.tmp`);
@@ -143,23 +215,19 @@ const socketAnswers = (path, timeoutMs = 300) => new Promise((resolve) => {
   socket.once("error", () => done(false));
 });
 
-const waitGone = async (pid, ms) => {
-  const end = Date.now() + ms;
-  while (pidAlive(pid) && Date.now() < end) await sleep(25);
-  return !pidAlive(pid);
-};
-
-const signalPid = (pid, signal) => { try { process.kill(pid, signal); } catch { /* already gone */ } };
-
 /**
  * Reap private instances left behind by owners that died without close()
  * (e.g. a SIGKILLed vitest). Only directories named gptq-redis-XXXXXX, owned by
  * this user with mode 0700, are considered. A live owner's directory is never
- * touched. A process is killed only when its argv proves it is a redis-server
- * serving exactly that directory's socket.
- * @returns {Promise<Array<{ dir: string, killed: number | null }>>}
+ * touched. A server is signalled only while its recorded identity (pid, start
+ * time, argv, socket) still matches, re-checked before every signal and poll.
+ * `proc`, `kill` and `sleep` are injectable for deterministic tests.
+ * @returns {Promise<Array<{ dir: string, signals: string[] }>>}
  */
-export async function reapStaleOwnedRedis({ root = tmpdir(), now = Date.now(), foreignStaleMs = FOREIGN_STALE_MS, stopTimeoutMs = 3_000 } = {}) {
+export async function reapStaleOwnedRedis({
+  root = tmpdir(), now = Date.now(), foreignStaleMs = FOREIGN_STALE_MS, stopTimeoutMs = 3_000,
+  proc = linuxProc, kill = defaultKill, sleep: wait = sleep,
+} = {}) {
   const reaped = [];
   let entries;
   try { entries = readdirSync(root, { withFileTypes: true }); } catch { return reaped; }
@@ -172,26 +240,23 @@ export async function reapStaleOwnedRedis({ root = tmpdir(), now = Date.now(), f
     const socket = join(dir, SOCKET_NAME);
     const owner = readOwner(dir);
     const sameNamespace = owner !== null && owner.pid_ns === namespace;
-    if (sameNamespace && pidAlive(owner.owner_pid) && (owner.owner_start === null || procStart(owner.owner_pid) === owner.owner_start)) continue;
+    const ownerStart = sameNamespace ? proc.start(owner.owner_pid) : null;
+    if (sameNamespace && ownerStart !== null && (owner.owner_start === null || ownerStart === owner.owner_start)) continue;
     const serving = await socketAnswers(socket);
-    let killed = null;
+    let signals = [];
     if (sameNamespace) {
-      // The owner is provably gone. Stop its server only if it is verifiably ours.
-      if (pidAlive(owner.redis_pid) && isRedisServingSocket(owner.redis_pid, socket)) {
-        signalPid(owner.redis_pid, "SIGTERM");
-        if (!(await waitGone(owner.redis_pid, stopTimeoutMs))) {
-          signalPid(owner.redis_pid, "SIGKILL");
-          await waitGone(owner.redis_pid, stopTimeoutMs);
-        }
-        killed = owner.redis_pid;
-      } else if (serving) continue; // something unverifiable answers there: leave it alone
+      // The owner is provably gone. Stop its server only while it is verifiably that server.
+      const server = { pid: owner.redis_pid, start: owner.redis_start, argv: owner.redis_argv, socket };
+      if (sameServer(server, proc)) signals = await stopVerifiedServer(server, { proc, kill, sleep: wait, boundMs: stopTimeoutMs });
+      else if (serving) continue; // something unverifiable answers there: leave it alone
     } else if (serving || now - stat.mtimeMs < foreignStaleMs) {
       // Another pid namespace (or no owner record yet): its processes are invisible
-      // here, so only a long-silent directory is safe to remove.
+      // here, so only a directory at least foreignStaleMs old whose socket does
+      // not answer now is removed.
       continue;
     }
     rmSync(dir, { recursive: true, force: true });
-    reaped.push({ dir, killed });
+    reaped.push({ dir, signals });
   }
   return reaped;
 }
@@ -295,7 +360,8 @@ export async function startOwnedRedis({
   };
 
   try {
-    if (child.pid !== undefined) writeOwner(dir, { ...owner, redis_pid: child.pid });
+    // The start time is fixed at fork, so it can be recorded before exec completes.
+    if (child.pid !== undefined) writeOwner(dir, { ...owner, redis_pid: child.pid, redis_start: procStart(child.pid) });
     const deadline = Date.now() + readyTimeoutMs;
     let facts;
     for (;;) {
@@ -315,6 +381,8 @@ export async function startOwnedRedis({
       facts.processId !== child.pid && `INFO server process_id is ${facts.processId}, not the spawned pid ${child.pid}`,
     ].filter(Boolean);
     if (problems.length > 0) throw new Error(`private Redis verification failed; nothing exported: ${problems.join("; ")}`);
+    // Full identity for the reaper: pid, start time, the exec'd argv and the socket.
+    writeOwner(dir, { ...owner, redis_pid: child.pid, redis_start: procStart(child.pid), redis_argv: procArgv(child.pid) });
   } catch (error) {
     await close();
     throw error;

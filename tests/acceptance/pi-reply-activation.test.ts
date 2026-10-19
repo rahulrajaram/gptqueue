@@ -1,3 +1,4 @@
+import { privateRedisEnv } from '../helpers/test-redis.js';
 import { it, expect } from 'vitest';
 import { randomUUID, randomInt } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -22,7 +23,7 @@ for (const replyType of ['result', 'error'] as const) {
     };
     try {
       await reference.connect(new StdioClientTransport({ command: process.execPath,
-        args: [join(root, 'dist/mcp-server/index.js')], env: { ...process.env, REDIS_URL: redisUrl } as Record<string, string> }));
+        args: [join(root, 'dist/mcp-server/index.js')], env: privateRedisEnv(process.env, redisUrl) as Record<string, string> }));
       const service = `reply-service-${randomUUID()}`;
       await call('register_agent', { name: service, role: 'both', description: 'arithmetic service for this isolated trial' });
       peer = await startPiPeer(join(directory, 'peer'));

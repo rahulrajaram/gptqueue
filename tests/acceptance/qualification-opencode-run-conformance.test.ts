@@ -7,7 +7,7 @@ import { hashText, writeRepairReceipt } from "./opencode-repair-support.js";
 import { isModelParticipant } from "./qualification-types.js";
 import { opencodeRouteAdapter, forkSessionLineage } from "./qualification-opencode.js";
 import { modelsPath, opencodeBin } from "./opencode-support.js";
-import { startOwnedRedis } from "./owned-redis.js";
+import { ownedRedisReceipt, startOwnedRedis } from "./owned-redis.js";
 import { homePath } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_OPENCODE_RUN_ROUTES_CONFORMANCE === "1";
@@ -76,7 +76,7 @@ describe.skipIf(!enabled)("OpenCode run/fork/resume conformance", () => {
       routes,
       route_contract: "native_cli_lineage_with_owned_runtime_control",
       pair_admission: "none",
-      redis: { owned_process: true, host: "127.0.0.1", database: 15 },
+      redis: { owned_process: true, transport: "unix-socket", database: "15" },
       started_at: new Date().toISOString(),
       routes_evidence: [],
       cleanup: [],
@@ -105,6 +105,7 @@ describe.skipIf(!enabled)("OpenCode run/fork/resume conformance", () => {
     }>> = [];
     try {
       owned = await startOwnedRedis();
+      receipt.redis = ownedRedisReceipt(owned.url);
       if (!/^redis:\/\/127\.0\.0\.1(?::\d+)?\/15$/u.test(owned.url)) throw new Error("owned Redis endpoint was not local db15");
       for (const route of routes) {
         const adapter = opencodeRouteAdapter(route);

@@ -1,3 +1,4 @@
+import { ownedRedisReceipt } from "./owned-redis.js";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
@@ -42,7 +43,7 @@ describe.skipIf(!enabled)("OpenCode ACP bounded native conformance", () => {
     const receipt: Record<string, unknown> = {
       run_id: runID,
       route: "opencode-acp",
-      redis: { owned_process: true, host: "127.0.0.1", database: 15 },
+      redis: { owned_process: true, transport: "unix-socket", database: "15" },
       started_at: new Date().toISOString(),
       cleanup: [],
     };
@@ -63,6 +64,7 @@ describe.skipIf(!enabled)("OpenCode ACP bounded native conformance", () => {
     let processIds: readonly number[] = [];
     try {
       owned = await openOwnedRedis();
+      receipt.redis = ownedRedisReceipt(owned.url);
       if (!/^redis:\/\/127\.0\.0\.1(?::\d+)?\/15$/u.test(owned.url)) throw new Error("owned Redis endpoint was not local db15");
       const adapter = opencodeRouteAdapter("opencode-acp");
       expect(adapter).toBeDefined();

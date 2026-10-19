@@ -6,7 +6,7 @@ import { Redis } from "ioredis";
 import { describe, expect, it, vi } from "vitest";
 import { createCodexAdapters, type CodexParticipant } from "./qualification-codex.js";
 import { createGenericAdapters } from "./qualification-generic.js";
-import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
+import { startOwnedRedis, type OwnedRedis, ownedRedisReceipt } from "./owned-redis.js";
 import { extractNativeTraces, extractGenericTraces } from "./qualification-evidence.js";
 import { collectPeerDiscovery } from "./qualification-discovery.js";
 import { assertIdleObservation, assertSetupTurnCompleted } from "./qualification-idle-task.js";
@@ -69,7 +69,7 @@ describe("native Codex idle correlated reply qualification", () => {
     try {
       receipt.runner_pid = process.pid; receipt.started_at = new Date().toISOString(); receipt.source_hashes_before = await sourceHashes(); const sourceRevision = hash(Buffer.from(JSON.stringify(receipt.source_hashes_before)));
       receipt.row_id = `codex-appserver:automatic:idle-${replyType}`; receipt.constraints = "automatic/private-MCP-only; not initiative or installation-wide activation"; console.info(`[qualification-idle-reply] receipt=${join(artifactDir, "receipt.json")} run_id=${runId} runner_pid=${process.pid}`); await persist("started", { pid: process.pid });
-      redis = await startOwnedRedis(); redisTrace = new Redis(redis.url); workspace = await mkdtemp(join(tmpdir(), "gptqueue-idle-reply-native-")); receipt.redis = { port: Number(new URL(redis.url).port), database: 15, owned_process: true };
+      redis = await startOwnedRedis(); redisTrace = new Redis(redis.url); workspace = await mkdtemp(join(tmpdir(), "gptqueue-idle-reply-native-")); receipt.redis = ownedRedisReceipt(redis.url);
       codex = createCodexAdapters({ workspaceRoot: workspace, codexBin: process.env.CODEX_BIN ?? CODEX_BIN, model: "gpt-5.6-luna" }); generic = createGenericAdapters({ repo });
       const nativeAdapter = codex.adapters.find(({ spec }) => spec.id === "codex-appserver"), genericAdapter = generic.adapters.find(({ spec }) => spec.id === "generic-stdio");
       if (!nativeAdapter || !genericAdapter) throw new Error("required adapters unavailable");

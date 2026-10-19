@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./redis-test-utils.js";
-import { testRedisUrl } from "./test-redis.js";
+import { privateRedisEnv, testRedisUrl } from "./test-redis.js";
 import { WAKE_SLEEPY_SCRIPT, WAKE_EXIT_SCRIPT } from "./wake-launch.js";
 
 // ---- Launch-allowlist scaffold for the spawned server --------------------
@@ -78,7 +78,7 @@ let buildPromise: Promise<void> | null = null;
 function ensureBuilt(): Promise<void> {
   if (!buildPromise) {
     buildPromise = (async () => {
-      execSync("npm run build", { cwd: ROOT, stdio: "inherit", env: process.env });
+      execSync("npm run build", { cwd: ROOT, stdio: "inherit", env: privateRedisEnv(process.env) });
     })();
   }
   return buildPromise;
@@ -137,14 +137,13 @@ export async function setupIntegrationServer(): Promise<IntegrationServer> {
     ["dist/transports/http.js", "--port", "0"],
     {
       cwd: ROOT,
-      env: {
+      env: privateRedisEnv({
         ...process.env,
-        REDIS_URL: INTEGRATION_REDIS_URL,
         GPTQUEUE_LAUNCH_ALLOWLIST: allowlistPath,
         // TCP mode on loopback only; never inherit a socket or host override.
         GPTQUEUE_HTTP_SOCKET: "",
         GPTQUEUE_HOST: "127.0.0.1",
-      },
+      }, INTEGRATION_REDIS_URL),
       stdio: ["ignore", "pipe", "pipe"],
     }
   );

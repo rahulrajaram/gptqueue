@@ -78,6 +78,7 @@
  * lease expiry.
  */
 
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import {
   describe,
   it,
@@ -258,11 +259,11 @@ function makePi(): PiHandle {
       ],
       {
         cwd: workDir,
-        env: {
+        env: privateRedisEnv({
           ...process.env,
           PI_OFFLINE: "1",
           PI_CODING_AGENT_DIR: agentDir,
-        },
+        }),
         timeoutMs,
       }
     ).promise;
@@ -320,7 +321,7 @@ function makeCodex(): CodexHandle {
     runCli(
       CODEX_BIN,
       ["exec", "--skip-git-repo-check", "--approve-for-me", "-C", workDir, prompt],
-      { cwd: workDir, env: { ...process.env, CODEX_HOME: home }, timeoutMs }
+      { cwd: workDir, env: privateRedisEnv({ ...process.env, CODEX_HOME: home }), timeoutMs }
     ).promise;
   return {
     home,
@@ -630,7 +631,7 @@ describe.skipIf(!RUNTIME_ENABLED)(
         ],
         {
           cwd: pi.workDir,
-          env: { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: pi.agentDir },
+          env: privateRedisEnv({ ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: pi.agentDir }),
           timeoutMs: 420_000,
         }
       );

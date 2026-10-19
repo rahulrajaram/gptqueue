@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
-import { startOwnedRedis } from './lib/owned-redis.mjs';
+import { privateRedisEnv, startOwnedRedis } from './lib/owned-redis.mjs';
 import { createRegisteredPiExtension } from '../dist/registered-shell/pi-extension.js';
 
 import { execFileSync } from 'node:child_process';
@@ -30,6 +30,8 @@ const publicContent = content => Array.isArray(content)
   ? content.filter(c => c.type === 'text' || c.type === 'toolCall') : content;
 // Private socket-only Redis for this run (scripts/lib/owned-redis.mjs), never a shared server.
 const privateRedis = await startOwnedRedis();
+// Every Redis endpoint alias in this process (and so in every child) names the private instance.
+Object.assign(process.env, privateRedisEnv(process.env, privateRedis.url));
 const redis = new Redis(privateRedis.url);
 const tool = async (session, name, args = {}) => {
   const definition = session.agent.state.tools.find(item => item.name === name);

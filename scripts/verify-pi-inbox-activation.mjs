@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createRegisteredPiExtension, createPiExtension, GPTQUEUE_TOOLS, RUNTIME_TOOL_NAMES } from '../dist/registered-shell/pi-extension.js';
-import { startOwnedRedis } from './lib/owned-redis.mjs';
+import { privateRedisEnv, startOwnedRedis } from './lib/owned-redis.mjs';
 const installed = process.env.PI_NODE_MODULES ?? join(dirname(dirname(process.execPath)), 'lib', 'node_modules');
 const moduleAt = (pkg, file) => import(pathToFileURL(join(installed, '@earendil-works', pkg, 'dist', file)).href);
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await moduleAt('pi-coding-agent', 'index.js');
@@ -16,6 +16,8 @@ const { getModel } = await moduleAt('pi-ai', 'compat.js');
 const { AssistantMessageEventStream } = await moduleAt('pi-ai', 'utils/event-stream.js');
 const realSidecar = process.argv.includes('--real-sidecar');
 const privateRedis = realSidecar ? await startOwnedRedis() : undefined;
+// Every Redis endpoint alias in this process (and so in every child) names the private instance.
+if (privateRedis) Object.assign(process.env, privateRedisEnv(process.env, privateRedis.url));
 const root = process.cwd();
 const { RedisClient } = await import('../dist/mcp-server/redis-client.js');
 const { randomUUID } = await import('node:crypto');

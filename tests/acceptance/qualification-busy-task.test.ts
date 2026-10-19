@@ -6,7 +6,7 @@ import { Redis } from "ioredis";
 import { describe, expect, it, vi } from "vitest";
 import { createCodexAdapters, type CodexParticipant } from "./qualification-codex.js";
 import { createGenericAdapters } from "./qualification-generic.js";
-import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
+import { startOwnedRedis, type OwnedRedis, ownedRedisReceipt } from "./owned-redis.js";
 import { collectPeerDiscovery } from "./qualification-discovery.js";
 import { extractNativeTraces, extractGenericTraces } from "./qualification-evidence.js";
 import { collectIdleClaimExchange } from "./qualification-idle-claim.js";
@@ -91,7 +91,7 @@ describe("Codex appserver busy-task qualification", () => {
       const source = receipt.source_hashes_before as Json, oracleSha = await fileHash(join(repo, "tests/acceptance/oracle.ts"));
       await persist("started", { runner_pid: process.pid, source_revision: bytesHash(Buffer.from(JSON.stringify(source))), oracle_sha256: oracleSha });
       redis = await startOwnedRedis(); observer = new Redis(redis.url); workspace = await mkdtemp(join(tmpdir(), "gptqueue-busy-task-"));
-      receipt.redis = { port: Number(new URL(redis.url).port), database: 15, owned_process: true };
+      receipt.redis = ownedRedisReceipt(redis.url);
       codex = createCodexAdapters({ workspaceRoot: workspace, codexBin: process.env.CODEX_BIN ?? CODEX_BIN, model: "gpt-5.6-luna" }); generic = createGenericAdapters({ repo });
       const nativeAdapter = codex.adapters.find(({ spec }) => spec.id === "codex-appserver"), peerAdapter = generic.adapters.find(({ spec }) => spec.id === "generic-stdio");
       if (!nativeAdapter || !peerAdapter) throw new Error("required adapters unavailable");

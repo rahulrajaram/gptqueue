@@ -4,6 +4,7 @@
  * missing required options, Redis close-on-error, continuity-plan file
  * creation (wx + 0600), --apply gating, and continuity-apply outcomes.
  */
+import { privateRedisEnv } from "./helpers/test-redis.js";
 import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawnSync, execSync } from "node:child_process";
@@ -502,7 +503,7 @@ describe("config subcommand (baseline lint, review fixes)", () => {
       cwd: ROOT,
       encoding: "utf8",
       timeout: 30_000,
-      env: { ...process.env, CODEX_HOME: home },
+      env: privateRedisEnv({ ...process.env, CODEX_HOME: home }),
     });
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   };

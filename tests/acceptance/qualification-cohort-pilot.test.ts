@@ -10,7 +10,7 @@ import { createPiSdkAdapter } from "./qualification-pi-sdk.js";
 import { createPiNativeChildAdapter, enterPiNativeChildProfileScope } from "./qualification-pi-child.js";
 import { createPiInteractiveAdapter } from "./qualification-pi-interactive.js";
 import { createGenericAdapters, type GenericTransportEvidence } from "./qualification-generic.js";
-import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
+import { startOwnedRedis, type OwnedRedis, ownedRedisReceipt } from "./owned-redis.js";
 import { CohortLeasePool, type CohortMember } from "./qualification-scheduler.js";
 import { runMixedPair, runModelPair, type TypedEvidenceWriter } from "./qualification-driver.js";
 import { extractGenericTraces, extractNativeTraces, type NativeConsumption, type NativeTrace } from "./qualification-evidence.js";
@@ -566,7 +566,7 @@ describe.skipIf(!enabled)("bounded qualification cohort pilot", () => {
     try {
       const gateSignal = AbortSignal.timeout(1_650_000);
       redis = await startOwnedRedis();
-      receipt.redis = { database: new URL(redis.url).pathname.slice(1), host: new URL(redis.url).hostname, port: new URL(redis.url).port };
+      receipt.redis = ownedRedisReceipt(redis.url);
       workspace = await mkdtemp(join(tmpdir(), "gptqueue-qualification-cohort-pilot-"));
       const codexRoot = join(workspace, "codex"), piRoot = join(workspace, "pi");
       await mkdir(codexRoot, { recursive: true }); await mkdir(piRoot, { recursive: true });

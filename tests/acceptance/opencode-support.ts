@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { testRedisUrl } from "../helpers/test-redis.js";
 import { sanitizeEvidence } from './public-evidence.js';
 import { spawn, type ChildProcess } from "node:child_process";
@@ -66,7 +67,7 @@ export const makeConfig = () => ({
   },
 });
 
-export const isolatedEnv = (configHome: string): NodeJS.ProcessEnv => ({
+export const isolatedEnv = (configHome: string): NodeJS.ProcessEnv => (privateRedisEnv({
   ...process.env,
   XDG_CONFIG_HOME: configHome,
   OPENCODE_CONFIG: undefined,
@@ -77,7 +78,7 @@ export const isolatedEnv = (configHome: string): NodeJS.ProcessEnv => ({
   OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
   // Use the already-present catalog; do not refresh it from the network.
   OPENCODE_MODELS_PATH: modelsPath,
-});
+}));
 
 export const newConfigHome = () => mkdtempSync(join(tmpdir(), "gptq-opencode-config-"));
 export const newWorkDir = () => mkdtempSync(join(tmpdir(), "gptq-opencode-work-"));

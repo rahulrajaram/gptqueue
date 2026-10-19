@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -7,16 +8,13 @@ import { Redis } from 'ioredis';
 import { root, runRoot, redisUrl, publicEvidence } from './pi-support.js';
 import { SESSION_KEYS } from '../../src/core/keys.js';
 import { nodePrefixPath } from "./local-tools.js";
+import { geminiMcpSettings } from "./owned-redis.js";
 
 it.skipIf(process.env.GPTQUEUE_GEMINI_ACCEPTANCE !== '1')('observes Gemini CLI registration and exact self-message mechanics', async () => {
   const run = randomUUID(), directory = join(runRoot, 'gemini', run), cwd = join(directory, 'workspace');
   const agent = `acceptance-gemini-${run}`, nonce = randomUUID();
   await mkdir(join(cwd, '.gemini'), { recursive: true });
-  await writeFile(join(cwd, '.gemini/settings.json'), JSON.stringify({
-    hooksConfig: { enabled: false }, tools: { core: [] },
-    security: { folderTrust: { enabled: false } },
-    mcpServers: { gptqueue: { command: process.execPath, args: [join(root, 'dist/mcp-server/index.js')], env: { REDIS_URL: redisUrl }, trust: true } },
-  }), { mode: 0o600 });
+  await writeFile(join(cwd, '.gemini/settings.json'), JSON.stringify(geminiMcpSettings(join(root, 'dist/mcp-server/index.js'), redisUrl)), { mode: 0o600 });
   const receipt: Record<string, any> = { route: 'gemini-cli', run, passed: false, database: 15,
     scope: 'assisted registration and self-message only; no peer or automatic handling claim' };
   const redis = new Redis(redisUrl);
@@ -24,7 +22,7 @@ it.skipIf(process.env.GPTQUEUE_GEMINI_ACCEPTANCE !== '1')('observes Gemini CLI r
     const prompt = `Use only the gptqueue MCP tools. Register yourself as ${agent}, role both. Send yourself a status message with content ${nonce}, idempotency_key ${nonce}. Receive it and verify the exact message id and content. Do not use shell, files, or contact another agent. Return the original tool results.`;
     const child = spawn(nodePrefixPath("bin/gemini"), ['--extensions', 'none', '--allowed-mcp-server-names', 'gptqueue',
       '--approval-mode', 'yolo', '--output-format', 'stream-json', '--prompt', prompt],
-    { cwd, env: { ...process.env, NO_UPDATE_NOTIFIER: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    { cwd, env: privateRedisEnv({ ...process.env, NO_UPDATE_NOTIFIER: '1' }), stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', chunk => { stdout = (stdout + String(chunk)).slice(-2_000_000); });
     child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-30_000); });

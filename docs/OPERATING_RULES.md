@@ -103,7 +103,9 @@ explicit inventory.
 ## 10. Testing etiquette
 
 The live server uses the production Redis (TCP `127.0.0.1:6379`, db0). Tests
-never connect to it, or to any TCP Redis.
+and verify scripts reach Redis only through a private, socket-only instance
+they own. The test helpers refuse every TCP Redis URL, and every Redis endpoint
+variable handed to a child names that private instance (see below).
 
 ### A private Redis per run
 
@@ -118,12 +120,21 @@ Every vitest run starts its OWN `redis-server` in `globalSetup`
   `CONFIG GET port` must be `0`, `CONFIG GET unixsocket` must be this run's
   socket, and `INFO server` `process_id` must be the spawned pid. Any
   mismatch stops the server and fails the run.
-- Workers and every child they spawn get
-  `REDIS_URL=<run dir>/redis.sock?db=15`. ioredis and the gptqueue entry
-  points accept that form directly. Any `REDIS_URL` the caller set is
+- Workers and every child they spawn get `<run dir>/redis.sock?db=15` in
+  EVERY Redis endpoint variable: `REDIS_URL`, `GPTQUEUE_REDIS_URL` (which the
+  OpenCode plugin prefers), `GPTQ_VERIFY_REDIS_URL`, and the `check-queue.sh`
+  components `REDIS_HOST`, `REDIS_PORT` and `GPTQ_REDIS_DB` (a socket path is
+  not a host or port there, so that TCP fallback fails closed). ioredis and the
+  gptqueue entry points accept the socket form directly. Inherited values are
   replaced, never used.
 - Teardown stops it (SIGTERM, then SIGKILL after a bound) and removes the
   run directory.
+
+Child environments are built only with `privateRedisEnv(base, url)`
+(`scripts/lib/owned-redis.mjs`, re-exported by `tests/helpers/test-redis.ts`).
+It sets every endpoint variable above to the private URL, after any other key,
+and throws for a TCP or foreign URL. A test or fixture that spawns a child with
+a copy of `process.env`, or with its own instance, passes the env through it.
 
 Tests read the connection only through `testRedisUrl()`
 (`tests/helpers/test-redis.ts`). It accepts nothing but that private socket
@@ -134,10 +145,13 @@ that socket and database, and deletes only `gptq:*` keys (never FLUSHDB).
 
 ### Concurrency
 
-Runs share nothing: each has its own Redis instance and socket, and the
-integration HTTP server binds an OS-assigned loopback port (`--port 0`; the
-bound port is read from its startup line). Any number of worktrees, or
-several vitest processes in one worktree, can run at the same time.
+Each run has its own Redis instance and socket, and the integration HTTP
+server binds an OS-assigned loopback port (`--port 0`; the bound port is read
+from its startup line), so worktrees can run their tests at the same time.
+Two limits remain. Concurrent runs in ONE checkout share its `dist/` build
+output, so let one build finish before starting the next. Some opt-in
+acceptance helpers reserve a free port before spawning a server, which can race
+with another process taking that port.
 
 ### Running tests
 
@@ -164,13 +178,19 @@ against one.
 ### Crash safety
 
 Each run directory records its owner (pid, process start time, pid namespace)
-and the server pid in `owner.json`. A process that exits without teardown
-still kills its server on exit. A server orphaned by a killed owner is reaped
-when the next instance starts under the same `$TMPDIR`. It is killed only if
-the owner is provably gone and `/proc/<pid>/cmdline` shows a `redis-server`
-serving exactly that directory's socket. A directory from another pid
-namespace (for example a run inside a separate PID-namespace sandbox, which
-reaps its own processes) is removed only after nothing has answered on its socket for 60 s.
+and the server's identity (pid, start time, exec'd argv, socket) in
+`owner.json`. A process that exits without teardown still kills its server on
+exit. A server orphaned by a killed owner is reaped when the next instance
+starts under the same `$TMPDIR`. The owner must be provably gone, and the
+server is signalled only while its identity still matches. The start time
+from `/proc/<pid>/stat` and the argv from `/proc/<pid>/cmdline` (a
+`redis-server` serving exactly that socket) are re-read before SIGTERM, before
+the SIGKILL escalation and in every liveness poll. Any change means the
+original process is gone and its pid may be reused, so nothing more is sent.
+An `owner.json` without the server's start time is never signalled.
+A directory from another pid namespace (for example a run inside a separate
+PID-namespace sandbox, which reaps its own processes) is removed only when it
+is at least 60 s old and nothing answers on its socket when checked.
 
 ## Agent name ownership (decision D2)
 

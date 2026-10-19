@@ -17,6 +17,16 @@ export declare function parsePrivateRedisUrl(value: string | undefined): Private
 /** Shape check plus live ownership (0700 run dir and socket owned by this user); returns the value. */
 export declare function privateRedisUrl(value: string | undefined): string;
 
+/** Every environment variable that names a Redis endpoint (URL aliases and check-queue.sh components). */
+export declare const REDIS_ENDPOINT_ENV: readonly string[];
+
+/**
+ * The one child-environment builder: `base` with every REDIS_ENDPOINT_ENV
+ * variable set to the private URL (default base.REDIS_URL, validated by
+ * privateRedisUrl; throws for anything else).
+ */
+export declare function privateRedisEnv<T extends Record<string, string | undefined>>(base: T, url?: string): T & Record<string, string>;
+
 export interface ServerFacts {
   readonly port: string;
   readonly unixsocket: string;
@@ -27,16 +37,51 @@ export type ServerProbe = (target: { socket: string; timeoutMs: number }) => Pro
 
 export declare const probeServer: ServerProbe;
 
-export declare function isRedisServingSocket(pid: number, socket: string): boolean;
+/** A /proc reader: start time (field 22 of /proc/<pid>/stat) and argv, or null when unreadable. */
+export interface ProcReader {
+  start(pid: number): string | null;
+  argv(pid: number): string[] | null;
+}
+
+/** The real /proc reader. */
+export declare const linuxProc: ProcReader;
+
+export declare function isRedisServingSocket(pid: number, socket: string, proc?: ProcReader): boolean;
+
+/** A recorded redis-server identity (owner.json): pid, start time, socket and (optionally) argv. */
+export interface ServerIdentity {
+  readonly pid: number;
+  readonly start: string;
+  readonly socket: string;
+  readonly argv?: readonly string[];
+}
+
+/** True only while `server` is still the same process (start time, redis-server argv serving its socket). */
+export declare function sameServer(server: ServerIdentity, proc?: ProcReader): boolean;
+
+export type Signaller = (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
+
+export interface StopOptions {
+  proc?: ProcReader;
+  kill?: Signaller;
+  sleep?: (ms: number) => Promise<void>;
+  boundMs?: number;
+}
+
+/** SIGTERM then SIGKILL, each sent only after re-verifying `server`; returns the signals sent. */
+export declare function stopVerifiedServer(server: ServerIdentity, options?: StopOptions): Promise<Array<"SIGTERM" | "SIGKILL">>;
 
 export interface ReapOptions {
   root?: string;
   now?: number;
   foreignStaleMs?: number;
   stopTimeoutMs?: number;
+  proc?: ProcReader;
+  kill?: Signaller;
+  sleep?: (ms: number) => Promise<void>;
 }
 
-export declare function reapStaleOwnedRedis(options?: ReapOptions): Promise<Array<{ dir: string; killed: number | null }>>;
+export declare function reapStaleOwnedRedis(options?: ReapOptions): Promise<Array<{ dir: string; signals: Array<"SIGTERM" | "SIGKILL"> }>>;
 
 export interface StartOwnedRedisOptions {
   /** Database encoded in `url` (default 15). */

@@ -2,6 +2,7 @@
 // owner. A stub GPTQ_TEST_REDIS_SERVER records its pid and then execs the real
 // redis-server (same pid, so the privacy check still passes), so the test can
 // check whether the server is still alive after the owner is gone.
+import { privateRedisEnv } from "./helpers/test-redis.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -31,7 +32,7 @@ const runOwner = async (args: string[], { env = {}, afterReady }: { env?: Record
   const pidfile = join(scratch, `pid-${started.length}-${Date.now()}`);
   const child = spawn(process.execPath, args, {
     cwd: REPO, stdio: ["ignore", "ignore", "pipe"],
-    env: { ...process.env, GPTQ_TEST_REDIS_SERVER: stub, STUB_PIDFILE: pidfile, ...env },
+    env: privateRedisEnv({ ...process.env, GPTQ_TEST_REDIS_SERVER: stub, STUB_PIDFILE: pidfile, ...env }),
   });
   let stderr = "";
   child.stderr.on("data", (c) => { stderr += c; });

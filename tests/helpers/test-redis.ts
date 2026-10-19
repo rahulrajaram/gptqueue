@@ -11,6 +11,9 @@
  */
 import { parsePrivateRedisUrl, privateRedisUrl, type PrivateRedisTarget } from "../../scripts/lib/owned-redis.mjs";
 
+/** The one child-environment builder (every Redis endpoint variable set to the private URL). */
+export { privateRedisEnv, REDIS_ENDPOINT_ENV } from "../../scripts/lib/owned-redis.mjs";
+
 /** REDIS_URL, verified to be this run's private socket instance. Throws otherwise. */
 export const testRedisUrl = (): string => privateRedisUrl(process.env.REDIS_URL);
 

@@ -1,4 +1,4 @@
-import { testRedisUrl } from "../helpers/test-redis.js";
+import { REDIS_ENDPOINT_ENV, testRedisUrl } from "../helpers/test-redis.js";
 import { describe, expect, it } from "vitest";
 import { codexCommand, codexEffectiveConfig, codexHeadlessEffectiveConfig, codexHeadlessRuntimeAgent, codexHeadlessThreadStartedId, codexRouteIds, codexTurnCompleted, createCodexAdapters, decodeHeadlessControllerTask, encodeHeadlessControllerTask, isCodexRoute, promptCodexTurn, startLiveProcess, validateCodexRedisUrl } from "./qualification-codex.js";
 import { isModelParticipant } from "./qualification-types.js";
@@ -88,22 +88,24 @@ describe("Codex qualification adapters", () => {
     }
   });
 
-  it("passes the owned Redis and app-server socket into the MCP child environment", () => {
-    const config = codexEffectiveConfig({}, "redis://127.0.0.1:43123/15", "/tmp/owned-codex/control.sock");
-    expect(config["mcp_servers.gptqueue-shared.env.REDIS_URL"]).toBe("redis://127.0.0.1:43123/15");
+  it("passes the owned private socket Redis, under every alias, and the app-server socket into the MCP child", () => {
+    const owned = testRedisUrl();
+    const config = codexEffectiveConfig({}, owned, "/tmp/owned-codex/control.sock");
+    for (const name of REDIS_ENDPOINT_ENV) expect(config[`mcp_servers.gptqueue-shared.env.${name}`]).toBe(owned);
     expect(config["mcp_servers.gptqueue-shared.env.GPTQUEUE_CODEX_APP_SERVER_SOCKET"]).toBe("/tmp/owned-codex/control.sock");
-    expect(config["mcp_servers.gptqueue-shared.args"]).toEqual(expect.arrayContaining(["--redis-url", "redis://127.0.0.1:43123/15"]));
+    expect(config["mcp_servers.gptqueue-shared.args"]).toEqual(expect.arrayContaining(["--redis-url", owned]));
+    expect(() => codexEffectiveConfig({}, "redis://127.0.0.1:6379/15")).toThrow(/private unix-socket instance/u);
   });
   it("omits unrelated disabled MCP placeholders from ignored-user-config headless config", () => {
     const config = codexHeadlessEffectiveConfig({
       "mcp_servers.unrelated-memory.enabled": false,
       "mcp_servers.unrelated-memory.required": false,
       "mcp_servers.gptqueue-shared.enabled": false,
-    }, "redis://127.0.0.1:43123/15");
+    }, testRedisUrl());
     expect(config["mcp_servers.unrelated-memory.enabled"]).toBeUndefined();
     expect(config["mcp_servers.unrelated-memory.required"]).toBeUndefined();
     expect(config["mcp_servers.gptqueue-shared.enabled"]).toBe(true);
-    expect(config["mcp_servers.gptqueue-shared.args"]).toEqual(expect.arrayContaining(["--redis-url", "redis://127.0.0.1:43123/15"]));
+    expect(config["mcp_servers.gptqueue-shared.args"]).toEqual(expect.arrayContaining(["--redis-url", testRedisUrl()]));
   });
 
   it("identifies only Codex routes and leaves launch side effects behind launch", async () => {

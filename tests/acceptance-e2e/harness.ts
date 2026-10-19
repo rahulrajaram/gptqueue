@@ -25,6 +25,7 @@
  * Every fake "model" is cooperative: given a turn, it claims, answers each
  * task with a correlated result, and acknowledges, until its inbox is empty.
  */
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { testRedisUrl } from "../helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, mkdirSync } from "node:fs";
@@ -542,8 +543,8 @@ export const startClaudeRecipient = async (options: Readonly<{ name?: string; cl
   let generation = 0;
   // This process stands in for the Claude process: the hook resolves identity
   // from the record keyed by this pid, never from the environment or /proc scan.
-  const env = (): NodeJS.ProcessEnv => ({ ...process.env, REDIS_URL, GPTQ_AGENT_NAME: "", GPTQ_CLAUDE_PID: String(process.pid),
-    GPTQ_CLAUDE_LEGACY_SCAN: "off", GPTQ_CLAUDE_RUNTIME_DIR: runtimeDir, GPTQ_CLAUDE_WATCH: "off", CLAUDE_PROJECT_DIR: "" });
+  const env = (): NodeJS.ProcessEnv => (privateRedisEnv({ ...process.env, GPTQ_AGENT_NAME: "", GPTQ_CLAUDE_PID: String(process.pid),
+    GPTQ_CLAUDE_LEGACY_SCAN: "off", GPTQ_CLAUDE_RUNTIME_DIR: runtimeDir, GPTQ_CLAUDE_WATCH: "off", CLAUDE_PROJECT_DIR: "" }, REDIS_URL));
   const self = readProcess(process.pid);
   if (!self) throw new Error("cannot read /proc for the Claude stand-in");
   if (!redis.sessionId) throw new Error("Claude stand-in has no gptqueue session");

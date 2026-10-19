@@ -1,11 +1,10 @@
-import { parsePrivateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { describe, expect, it, vi } from "vitest";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createCodexAdapters, type CodexParticipant } from "./qualification-codex.js";
-import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
+import { startOwnedRedis, type OwnedRedis, ownedRedisReceipt } from "./owned-redis.js";
 import { sanitizeEvidence } from "./public-evidence.js";
 import { CODEX_BIN } from "./local-tools.js";
 
@@ -33,8 +32,6 @@ const hasRuntimeStatusCall = (history: unknown): boolean => {
   });
 };
 const digest = async (path: string): Promise<string> => createHash("sha256").update(await readFile(path)).digest("hex");
-/** The owned Redis is a private unix socket; record its shape and database, never the path. */
-const redactUrl = (url: string): Json => ({ transport: "unix-socket", database: String(parsePrivateRedisUrl(url).db) });
 const waitForIdle = async (participant: CodexParticipant, signal: AbortSignal): Promise<void> => {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
@@ -74,7 +71,7 @@ describe.skipIf(!enabled)("Codex qualification owned app-server", () => {
       await persist("source-hashes", Object.fromEntries(await Promise.all(sourceFiles.map(async file => [file, await digest(join(repo, file))]))));
       receipt.source_hashes = Object.fromEntries(await Promise.all(sourceFiles.map(async file => [file, await digest(join(repo, file))])));
       redis = await startOwnedRedis();
-      receipt.redis = redactUrl(redis.url);
+      receipt.redis = ownedRedisReceipt(redis.url);
       root = await mkdtemp(join(tmpdir(), "gptqueue-qualification-codex-appserver-"));
       set = createCodexAdapters({ workspaceRoot: root, model: "gpt-5.6-luna" });
       const adapter = set.adapters.find(({ spec }) => spec.id === "codex-appserver");

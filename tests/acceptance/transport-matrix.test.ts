@@ -1,3 +1,4 @@
+import { privateRedisEnv } from '../helpers/test-redis.js';
 import { it, expect } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -25,7 +26,7 @@ it.skipIf(process.env.GPTQUEUE_TRANSPORT_ACCEPTANCE !== '1')('every ordered stdi
     // An OS-assigned loopback port owned by this run (read from the server's
     // startup line); never a fixed port, never an existing server.
     server = spawn(process.execPath, [join(root, 'dist/transports/http.js'), '--port', '0'],
-      { cwd: directory, env: { ...process.env, REDIS_URL: redisUrl, GPTQUEUE_HTTP_SOCKET: '', GPTQUEUE_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'ignore'] });
+      { cwd: directory, env: privateRedisEnv({ ...process.env, GPTQUEUE_HTTP_SOCKET: '', GPTQUEUE_HOST: '127.0.0.1' }, redisUrl), stdio: ['ignore', 'pipe', 'ignore'] });
     let startup = '';
     server.stdout!.on('data', (chunk: Buffer) => { startup = (startup + String(chunk)).slice(-4_000); });
     const port = await until(async () => {
@@ -40,7 +41,7 @@ it.skipIf(process.env.GPTQUEUE_TRANSPORT_ACCEPTANCE !== '1')('every ordered stdi
     const connect = async (stdio: boolean) => {
       const client = new Client({ name: `acceptance-${run}`, version: '1' }); clients.push(client);
       await client.connect(stdio ? new StdioClientTransport({ command: process.execPath,
-        args: [join(root, 'dist/mcp-server/index.js')], env: { ...process.env, REDIS_URL: redisUrl } as Record<string, string> })
+        args: [join(root, 'dist/mcp-server/index.js')], env: privateRedisEnv(process.env, redisUrl) as Record<string, string> })
         : new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
       return client;
     };

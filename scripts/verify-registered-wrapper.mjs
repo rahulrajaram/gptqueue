@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
-import { startOwnedRedis } from './lib/owned-redis.mjs';
+import { privateRedisEnv, startOwnedRedis } from './lib/owned-redis.mjs';
 import { WRAPPER_VISIBLE_TOOLS } from '../dist/experimental-wrapper/bridge.js';
 import { verificationChecks } from './wrapper-verification-checks.mjs';
 
@@ -45,6 +45,8 @@ const snapshot = async () => Object.fromEntries(await Promise.all(Object.entries
 const before = await snapshot();
 const localBefore = await files(workspace);
 const privateRedis = await startOwnedRedis({ db: 14 });
+// Every Redis endpoint alias in this process (and so in every child) names the private instance.
+Object.assign(process.env, privateRedisEnv(process.env, privateRedis.url));
 const redis = new Redis(privateRedis.url, { maxRetriesPerRequest: 3, commandTimeout: 5_000 });
 // Must never reach the wrapped child; a dead socket, so a leak fails instead of touching any server.
 const leakSentinelRedisUrl = join(privateRedis.dir, 'leak-sentinel.sock') + '?db=15';
@@ -57,8 +59,8 @@ const launch = kind => {
   const child = spawn(process.execPath, ['bin/gptqueue-experiment', kind, '--agent', names[kind],
     '--workspace', workspace, '--redis-url', privateRedis.url, '--cleanup', 'unregister', '--', prompts[kind]], {
     cwd: repo, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, GPTQ_SESSION_ID: 'verification-session-sentinel', GPTQUEUE_HTTP_TOKEN: 'verification-token-sentinel',
-      REDIS_URL: leakSentinelRedisUrl, GPTQ_VERIFY_REDIS_URL: privateRedis.url, GPTQ_VERIFY_KIND: kind, GPTQ_VERIFY_RUN: run,
+    env: { ...privateRedisEnv(process.env, privateRedis.url), GPTQ_SESSION_ID: 'verification-session-sentinel', GPTQUEUE_HTTP_TOKEN: 'verification-token-sentinel',
+      REDIS_URL: leakSentinelRedisUrl, GPTQ_VERIFY_KIND: kind, GPTQ_VERIFY_RUN: run,
       GPTQ_EXPERIMENT_CODEX_BIN: join(repo, 'scripts/verify-wrapper-child.mjs'),
       GPTQ_EXPERIMENT_PI_BIN: join(repo, 'scripts/verify-wrapper-child.mjs') },
   });

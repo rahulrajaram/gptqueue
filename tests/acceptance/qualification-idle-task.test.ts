@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { createCodexAdapters, type CodexParticipant } from "./qualification-codex.js";
 import { createGenericAdapters } from "./qualification-generic.js";
-import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
+import { startOwnedRedis, type OwnedRedis, ownedRedisReceipt } from "./owned-redis.js";
 import { collectPeerDiscovery } from "./qualification-discovery.js";
 import { extractNativeTraces, extractGenericTraces } from "./qualification-evidence.js";
 import { checkExchangeEvidence } from "./oracle.js";
@@ -99,7 +99,7 @@ describe("idle-task qualification fixture", () => {
       redis = await startOwnedRedis(); workspace = await mkdtemp(join(tmpdir(), "gptqueue-idle-task-"));
       receipt.row_id = "codex-appserver:automatic:idle-task";
       receipt.constraints = "Owned private-MCP-only adapter; automatic handling, not initiative or installation-wide activation";
-      receipt.redis = { port: Number(new URL(redis.url).port), database: 15, owned_process: true };
+      receipt.redis = ownedRedisReceipt(redis.url);
       codex = createCodexAdapters({ workspaceRoot: workspace, codexBin: process.env.CODEX_BIN ?? CODEX_BIN, model: "gpt-5.6-luna" }); generic = createGenericAdapters({ repo });
       const modelAdapter = codex.adapters.find(({ spec }) => spec.id === "codex-appserver"), peerAdapter = generic.adapters.find(({ spec }) => spec.id === "generic-stdio");
       if (!modelAdapter || !peerAdapter) throw new Error("required adapters unavailable");

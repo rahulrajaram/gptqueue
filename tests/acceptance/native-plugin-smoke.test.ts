@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { readFile, readdir, writeFile } from "node:fs/promises";
@@ -99,7 +100,7 @@ describe("native OpenCode plugin loader smoke", () => {
       phase = "server_spawn";
       child = spawn(opencodeBin, ["serve", "--port", String(port), "--hostname", "127.0.0.1"], {
         cwd: workDir,
-        env: {
+        env: privateRedisEnv({
           ...process.env,
           HOME: homeDir,
           XDG_CONFIG_HOME: configHome,
@@ -112,9 +113,7 @@ describe("native OpenCode plugin loader smoke", () => {
           OPENCODE_CONFIG_CONTENT: undefined,
           OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
           OPENCODE_MODELS_PATH: modelsPath,
-          GPTQUEUE_REDIS_URL: owned.url,
-          REDIS_URL: owned.url,
-        },
+        }, owned.url),
         stdio: ["ignore", "pipe", "pipe"],
       });
       child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk.toString()));

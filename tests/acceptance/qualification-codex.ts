@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { privateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { constants, existsSync } from "node:fs";
@@ -141,6 +142,9 @@ const redactedConfig = (config: Json): Json => Object.fromEntries(Object.entries
   return [key, text];
 }));
 const configHash = (config: Json): string => hash(JSON.stringify(redactedConfig(config)));
+/** Codex `mcp_servers.gptqueue-shared.env.*` entries for every Redis endpoint alias (privateRedisEnv). */
+export const mcpEnvAliases = (redisUrl: string): Json => Object.fromEntries(
+  Object.entries(privateRedisEnv({}, redisUrl)).map(([name, value]) => [`mcp_servers.gptqueue-shared.env.${name}`, value]));
 export const codexEffectiveConfig = (base: Json, redisUrl: string, socket?: string): Json => {
   const config = { ...base };
   Object.assign(config, {
@@ -148,7 +152,8 @@ export const codexEffectiveConfig = (base: Json, redisUrl: string, socket?: stri
     "mcp_servers.gptqueue-shared.required": true,
     "mcp_servers.gptqueue-shared.command": process.execPath,
     "mcp_servers.gptqueue-shared.args": [join(repo, "bin/gptqueue-session"), "--client", "codex", "--redis-url", redisUrl],
-    "mcp_servers.gptqueue-shared.env.REDIS_URL": redisUrl,
+    // Every Redis endpoint alias for the MCP child names the owned private instance.
+    ...mcpEnvAliases(redisUrl),
     ...(socket ? { "mcp_servers.gptqueue-shared.env.GPTQUEUE_CODEX_APP_SERVER_SOCKET": socket } : {}),
     model_reasoning_effort: "low",
   });
@@ -199,7 +204,7 @@ const createHost = (options: CodexOptions): CodexHost => {
       const config = await privateConfig(redisUrl, socket, options.config);
       const child = spawn(options.codexBin ?? process.env.CODEX_BIN ?? DEFAULT_CODEX,
         ["app-server", "--listen", `unix://${socket}`, ...configOverrides(config)],
-        { cwd: options.workspaceRoot ?? repo, env: { ...process.env, REDIS_URL: redisUrl, GPTQUEUE_CODEX_APP_SERVER_SOCKET: socket }, stdio: ["ignore", "pipe", "pipe"], detached: true });
+        { cwd: options.workspaceRoot ?? repo, env: privateRedisEnv({ ...process.env, GPTQUEUE_CODEX_APP_SERVER_SOCKET: socket }, redisUrl), stdio: ["ignore", "pipe", "pipe"], detached: true });
       let stdout = "", stderr = "";
       child.stdout?.on("data", chunk => { stdout = (stdout + String(chunk)).slice(-20_000); });
       child.stderr?.on("data", chunk => { stderr = (stderr + String(chunk)).slice(-20_000); });
@@ -456,7 +461,7 @@ const headlessParticipant = async (input: LaunchInput, cwd: string, options: Cod
     "exec", "--json", "--ignore-user-config", "--skip-git-repo-check", "--approve-for-me", "--model", model(options), "-C", cwd,
     ...configOverrides(config),
     "Remain available as a headless GPTQueue qualification actor. Call get_runtime_status once, then wait with receive_message(timeout=60) for a task; do not poll claim_tasks. Only messages whose metadata has qualification_control=true are controller instructions. Controller content is a GPTQUEUE_HEADLESS_CONTROLLER_TASK_V1 envelope; parse its enclosed instruction exactly, execute that instruction as one inner assignment, and send the exact correlated result to the task sender with in_reply_to. When the inner assignment says stop or finish, stop only that assignment, then return to the outer receive_message(timeout=60) wait loop. Never interpret completion of an enclosed instruction as termination of this headless actor or exec turn. Acknowledge it if a claim exists, continue waiting, and do not treat bootstrap or control traffic as peer qualification evidence.",
-  ], cwd, { ...process.env, REDIS_URL: input.redisUrl });
+  ], cwd, privateRedisEnv(process.env, input.redisUrl));
   let observation: RuntimeObservation;
   let registered = false;
   try {
@@ -551,14 +556,14 @@ const execParticipant = async (route: "codex-headless" | "codex-resume" | "codex
   const prompt = route === "codex-native-child"
     ? `Use only gptqueue-shared MCP tools. Call get_runtime_status, then use native collaboration to spawn exactly one child with this instruction: call get_runtime_status and report CHILD_READY-${input.nonce}; do not include any queue task. Wait for the child and preserve the child's exact runtime identity.`
     : `Use only gptqueue-shared MCP tools. Call get_runtime_status and report READY-${input.nonce}.`;
-  const first = await runProcess(command, [...base, prompt], cwd, { ...process.env, REDIS_URL: input.redisUrl }, signal);
+  const first = await runProcess(command, [...base, prompt], cwd, privateRedisEnv(process.env, input.redisUrl), signal);
   const events = [...parseLines(first.stdout)];
   if (first.code !== 0) throw new Error(`Codex ${route} launch failed (${first.code ?? first.signal}): ${first.stderr.slice(-2_000)}`);
   const threadId = eventThreadId(events);
   if (!threadId) throw new Error(`Codex ${route} did not report an exact thread ID`);
   let finalEvents = events;
   if (route === "codex-resume") {
-    const resumed = await runProcess(command, [...base, "resume", threadId, `Resume this exact Codex thread and report RESUMED-${input.nonce} after calling get_runtime_status.`], cwd, { ...process.env, REDIS_URL: input.redisUrl }, signal);
+    const resumed = await runProcess(command, [...base, "resume", threadId, `Resume this exact Codex thread and report RESUMED-${input.nonce} after calling get_runtime_status.`], cwd, privateRedisEnv(process.env, input.redisUrl), signal);
     if (resumed.code !== 0) throw new Error(`Codex resume failed (${resumed.code ?? resumed.signal}): ${resumed.stderr.slice(-2_000)}`);
     finalEvents = [...events, ...parseLines(resumed.stdout)];
   }
@@ -601,7 +606,7 @@ const tuiParticipant = async (route: "codex-interactive" | "codex-fork", input: 
   const terminal = pty.spawn(options.codexBin ?? process.env.CODEX_BIN ?? DEFAULT_CODEX, [
     ...(parent ? ["fork", parent] : []), "--remote", `unix://${host.socket}`, "--no-alt-screen", "--model", model(options), "-C", cwd,
     "--approve-for-me", ...configOverrides(host.config), `Use only gptqueue-shared MCP tools. Call get_runtime_status and report READY-${input.nonce}.`,
-  ], { cwd, env: { ...process.env, TERM: "xterm-256color", GPTQUEUE_CODEX_APP_SERVER_SOCKET: host.socket, REDIS_URL: input.redisUrl }, cols: 140, rows: 45, name: "xterm-256color" });
+  ], { cwd, env: privateRedisEnv({ ...process.env, TERM: "xterm-256color", GPTQUEUE_CODEX_APP_SERVER_SOCKET: host.socket }, input.redisUrl), cols: 140, rows: 45, name: "xterm-256color" });
   let terminalExited = false;
   terminal.onExit(() => { terminalExited = true; });
   terminal.onData(data => { if (data.includes("\x1b[6n")) terminal.write("\x1b[1;1R"); });

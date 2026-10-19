@@ -1,4 +1,4 @@
-import { testRedisUrl } from "./helpers/test-redis.js";
+import { privateRedisEnv, testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import type { AddressInfo } from "node:net";
 import { createServer, type Server } from "node:http";
@@ -46,7 +46,7 @@ let buildPromise: Promise<void> | null = null;
 function ensureBuilt(): Promise<void> {
   if (!buildPromise) {
     buildPromise = (async () => {
-      execSync("npm run build", { cwd: ROOT, stdio: "pipe", env: process.env });
+      execSync("npm run build", { cwd: ROOT, stdio: "pipe", env: privateRedisEnv(process.env) });
     })();
   }
   return buildPromise;
@@ -74,7 +74,7 @@ async function spawnHttpServer(
     ["dist/transports/http.js", "--port", "0"],
     {
       cwd: ROOT,
-      env: { ...process.env, REDIS_URL: TEST_REDIS_URL, ...env },
+      env: privateRedisEnv({ ...process.env, ...env }, TEST_REDIS_URL),
       stdio: ["ignore", "pipe", "pipe"],
     }
   );
@@ -506,12 +506,11 @@ describe("HTTP transport security (loopback bind + Bearer token)", () => {
         cwd: ROOT,
         // GPTQUEUE_HOST set to a non-loopback; token explicitly emptied so the
         // host env can never leak a value into this refusal test.
-        env: {
+        env: privateRedisEnv({
           ...process.env,
-          REDIS_URL: TEST_REDIS_URL,
           GPTQUEUE_HOST: "0.0.0.0",
           GPTQUEUE_HTTP_TOKEN: "",
-        },
+        }, TEST_REDIS_URL),
         stdio: ["ignore", "pipe", "pipe"],
       }
     );

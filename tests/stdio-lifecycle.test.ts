@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "./helpers/test-redis.js";
 import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execSync, spawn } from "node:child_process";
@@ -23,7 +24,7 @@ describe("stdio server lifecycle", () => {
   it("exits when its client closes stdin instead of staying leased forever", async () => {
     const agent = `stdio-orphan-${randomUUID()}`;
     const child = spawn(process.execPath, ["dist/mcp-server/index.js", agent], {
-      cwd: ROOT, env: { ...process.env, REDIS_URL: TEST_REDIS_URL }, stdio: ["pipe", "ignore", "pipe"],
+      cwd: ROOT, env: privateRedisEnv(process.env, TEST_REDIS_URL), stdio: ["pipe", "ignore", "pipe"],
     });
     const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
     try {

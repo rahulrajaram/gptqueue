@@ -1,3 +1,5 @@
+import { privateRedisEnv, REDIS_ENDPOINT_ENV } from "../helpers/test-redis.js";
+import { mcpEnvAliases } from "./qualification-codex.js";
 import { expect, it } from "vitest";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -63,13 +65,14 @@ it.skipIf(!enabled)("binds owned Codex threads and activates an idle arithmetic 
   const socket = join(socketDir, "control.sock");
   const cwd = join(directory, "workspace");
   const previousSocket = process.env.GPTQUEUE_CODEX_APP_SERVER_SOCKET;
-  const previousRedis = process.env.REDIS_URL;
+  // Every Redis endpoint alias, so the in-process plugin and every child target this fixture's instance.
+  const previousRedis = Object.fromEntries(REDIS_ENDPOINT_ENV.map((name) => [name, process.env[name]]));
   process.env.GPTQUEUE_CODEX_APP_SERVER_SOCKET = socket;
   await mkdir(cwd, { recursive: true });
   await mkdir(join(directory, "phases"), { recursive: true });
   const ownedRedis = await startOwnedRedis();
   const redisUrl = ownedRedis.url;
-  process.env.REDIS_URL = redisUrl;
+  Object.assign(process.env, privateRedisEnv(process.env, redisUrl));
   const redis = new Redis(redisUrl);
   const receipt: Record<string, unknown> = {
     schema_version: 1, run, database: 15, model: "gpt-5.6-luna", route: "codex-owned-app-server",
@@ -94,12 +97,12 @@ it.skipIf(!enabled)("binds owned Codex threads and activates an idle arithmetic 
     } catch (error) { receipt.installed_hook = { path: installedHookPath, read_error: String(error) }; }
     const config = await appConfig();
     Object.assign(config, {
-      "mcp_servers.gptqueue-shared.env.REDIS_URL": redisUrl,
+      ...mcpEnvAliases(redisUrl),
       "mcp_servers.gptqueue-shared.env.GPTQUEUE_CODEX_APP_SERVER_SOCKET": socket,
       "mcp_servers.gptqueue-shared.args": [join(repo, "bin/gptqueue-session"), "--client", "codex", "--redis-url", redisUrl],
     });
     server = spawn(codex, ["app-server", "--listen", `unix://${socket}`, ...Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])], {
-      cwd, env: { ...process.env, REDIS_URL: redisUrl, GPTQUEUE_CODEX_APP_SERVER_SOCKET: socket },
+      cwd, env: privateRedisEnv({ ...process.env, GPTQUEUE_CODEX_APP_SERVER_SOCKET: socket }, redisUrl),
       stdio: ["ignore", "pipe", "pipe"], detached: true,
     });
     let stderr = "";
@@ -210,7 +213,8 @@ it.skipIf(!enabled)("binds owned Codex threads and activates an idle arithmetic 
     await rm(socketDir, { recursive: true, force: true });
     if (previousSocket === undefined) delete process.env.GPTQUEUE_CODEX_APP_SERVER_SOCKET;
     else process.env.GPTQUEUE_CODEX_APP_SERVER_SOCKET = previousSocket;
-    if (previousRedis === undefined) delete process.env.REDIS_URL;
-    else process.env.REDIS_URL = previousRedis;
+    for (const [name, value] of Object.entries(previousRedis)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
   }
 }, timeout + 30_000);

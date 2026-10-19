@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { describe, expect, it, vi } from "vitest";
 import { mkdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -20,7 +21,7 @@ vi.setConfig({ testTimeout: timeout * 5, hookTimeout: 30_000 });
 
 type Run = { code: number | null; signal: string | null; stdout: string; stderr: string };
 const run = (args: string[], cwd: string): Promise<Run> => new Promise((resolve) => {
-  const child = spawn(codex, args, { cwd, env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"], detached: true });
+  const child = spawn(codex, args, { cwd, env: privateRedisEnv({ ...process.env }), stdio: ["ignore", "pipe", "pipe"], detached: true });
   let stdout = "", stderr = "";
   child.stdout.on("data", (b) => { stdout = (stdout + String(b)).slice(-1_000_000); });
   child.stderr.on("data", (b) => { stderr = (stderr + String(b)).slice(-50_000); });
@@ -48,7 +49,7 @@ async function terminalObservation(rpc: CodexSocketClient, socket: string, cwd: 
   const automaticReview = process.env.GPTQUEUE_CODEX_TUI_AUTOREVIEW === '1';
   const args = [...(fork ? ['fork', fork] : []), '--remote', `unix://${socket}`, '--no-alt-screen', '--model', 'gpt-5.6-luna', '-C', cwd,
     ...(automaticReview ? ['--approve-for-me'] : []), ...overrides, prompt];
-  const terminal = pty.spawn(codex, args, { cwd, env: { ...process.env, TERM: 'xterm-256color' }, cols: 140, rows: 45, name: 'xterm-256color' });
+  const terminal = pty.spawn(codex, args, { cwd, env: privateRedisEnv({ ...process.env, TERM: 'xterm-256color' }), cols: 140, rows: 45, name: 'xterm-256color' });
   let output = '', exited = false;
   const closed = new Promise<void>(resolve => terminal.onExit(() => { exited = true; resolve(); }));
   terminal.onData(data => {
@@ -107,7 +108,7 @@ describe.skipIf(!enabled)("Codex native variants acceptance", () => {
       const owned = await mkdtemp(join(tmpdir(), "gq-as-"));
       const socket = join(owned, "control.sock");
       const serverOverrides = Object.entries(allConfig).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]);
-      const server = spawn(codex, ["app-server", "--listen", `unix://${socket}`, ...serverOverrides], { cwd, env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"], detached: true });
+      const server = spawn(codex, ["app-server", "--listen", `unix://${socket}`, ...serverOverrides], { cwd, env: privateRedisEnv({ ...process.env }), stdio: ["ignore", "pipe", "pipe"], detached: true });
       let serverErr = ""; server.stderr.on("data", (b) => { serverErr = (serverErr + String(b)).slice(-20_000); });
       try {
         const end = Date.now() + 15_000;

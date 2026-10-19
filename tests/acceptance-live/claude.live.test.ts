@@ -11,6 +11,7 @@
  * Criteria: ID-2, AC-4, WK-1/DL-5 (+ send -> watcher exit, send -> turn start), ID-1/ID-5.
  * WK-9 is not covered here (needs the PTY wrapper).
  */
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -40,8 +41,8 @@ const hookCalls = (log: string): HookCall[] => existsSync(log) ? readFileSync(lo
 }) : [];
 
 /** A fresh top-level session: drop the parent agent's CLAUDE* markers (child-session, session id). */
-const freshEnv = (): Record<string, string> => Object.fromEntries(Object.entries(process.env)
-  .filter((entry): entry is [string, string] => entry[1] !== undefined && !entry[0].startsWith("CLAUDE")));
+const freshEnv = (): Record<string, string> => privateRedisEnv(Object.fromEntries(Object.entries(process.env)
+  .filter((entry): entry is [string, string] => entry[1] !== undefined && !entry[0].startsWith("CLAUDE"))));
 type Session = Readonly<{ term: pty.IPty; screen(): string; hookLog: string }>;
 const startClaude = (dir: string, label: string, work: string, env: Record<string, string>): Session => {
   const hookLog = join(dir, `hooks-${label}.log`);

@@ -10,6 +10,7 @@
  *
  * Opt-in (spawns codex twice against the test Redis db): GPTQUEUE_CODEX_APPROVAL=1
  */
+import { privateRedisEnv } from '../helpers/test-redis.js';
 import { it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -37,7 +38,7 @@ const runCodex = async (mode: Mode): Promise<{ events: Json[]; output: string }>
     let stdout = '';
     const child = spawn(process.env.GPTQUEUE_CODEX_BIN || 'codex',
       ['exec', '--ignore-user-config', '--json', '--ephemeral', '--skip-git-repo-check', '-C', directory, ...overrides, prompt],
-      { cwd: directory, env: { ...process.env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd: directory, env: privateRedisEnv({ ...process.env }), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', data => { stdout = (stdout + String(data)).slice(-2_000_000); });
     child.stderr.on('data', data => { stdout = (stdout + String(data)).slice(-20_000); });
     if (process.env.GPTQUEUE_CODEX_APPROVAL_DEBUG) child.stderr.on('data', () => {}); // keep pipe flowing

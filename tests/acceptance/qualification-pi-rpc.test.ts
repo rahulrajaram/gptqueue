@@ -1,11 +1,10 @@
-import { parsePrivateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { createPiAdapters, hasPiAssistantRuntimeEvidence, type PiRpcParticipant } from "./qualification-pi.js";
-import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
+import { startOwnedRedis, type OwnedRedis, ownedRedisReceipt } from "./owned-redis.js";
 import { sanitizeEvidence } from "./public-evidence.js";
 
 const enabled = process.env.GPTQUEUE_QUALIFICATION_PI_RPC === "1";
@@ -21,8 +20,6 @@ vi.setConfig({ testTimeout: 480_000, hookTimeout: 60_000 });
 type Json = Record<string, unknown>;
 type CleanupResult = Readonly<{ name: string; status: "fulfilled" | "rejected"; error?: string }>;
 const digest = async (path: string): Promise<string> => createHash("sha256").update(await readFile(path)).digest("hex");
-/** The owned Redis is a private unix socket; record its shape and database, never the path. */
-const redactUrl = (url: string): Json => ({ transport: "unix-socket", database: String(parsePrivateRedisUrl(url).db) });
 const sessionIdentity = (participant: PiRpcParticipant): Json => ({
   participant_id: participant.identity.participantId,
   route: participant.identity.route,
@@ -62,7 +59,7 @@ describe.skipIf(!enabled)("Pi RPC qualification owned pair", () => {
       receipt.source_hashes = Object.fromEntries(await Promise.all(sourceFiles.map(async file => [file, await digest(join(repo, file))])));
       await persist("source-hashes", receipt.source_hashes);
       redis = await startOwnedRedis();
-      receipt.redis = redactUrl(redis.url);
+      receipt.redis = ownedRedisReceipt(redis.url);
       workspace = await mkdtemp(join(tmpdir(), "gptq-qualification-pi-rpc-"));
       set = createPiAdapters({ workspaceRoot: workspace, provider, model });
       const adapter = set.adapters.find(({ spec }) => spec.id === "pi-rpc-cli");

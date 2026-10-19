@@ -8,7 +8,7 @@
 //
 //   node scripts/with-owned-redis.mjs -- <command> [args...]
 import { spawn } from "node:child_process";
-import { startOwnedRedis } from "./lib/owned-redis.mjs";
+import { privateRedisEnv, startOwnedRedis } from "./lib/owned-redis.mjs";
 
 const separator = process.argv.indexOf("--");
 const command = separator === -1 ? [] : process.argv.slice(separator + 1);
@@ -31,7 +31,8 @@ const cleanup = () => redis.stop();
 const child = spawn(command[0], command.slice(1), {
   stdio: "inherit",
   detached: true,
-  env: { ...process.env, REDIS_URL: redis.url },
+  // Every Redis endpoint alias (REDIS_URL, GPTQUEUE_REDIS_URL, ...) names the private instance.
+  env: privateRedisEnv(process.env, redis.url),
 });
 const signalGroup = (signal) => { try { process.kill(-child.pid, signal); } catch { /* group already gone */ } };
 const forward = (signal) => () => {

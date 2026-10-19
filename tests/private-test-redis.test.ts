@@ -12,8 +12,8 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import {
-  RUN_DIR_PREFIX, parsePrivateRedisUrl, privateRedisUrl, probeServer, reapStaleOwnedRedis, startOwnedRedis,
-  type OwnedRedis, type ServerProbe,
+  RUN_DIR_PREFIX, linuxProc, parsePrivateRedisUrl, privateRedisUrl, probeServer, reapStaleOwnedRedis, startOwnedRedis,
+  stopVerifiedServer, type OwnedRedis, type ProcReader, type ServerProbe,
 } from "../scripts/lib/owned-redis.mjs";
 import { exportPrivateRedis } from "./helpers/global-setup.js";
 import { testRedisTarget, testRedisUrl } from "./helpers/test-redis.js";
@@ -180,16 +180,18 @@ describe("stale-instance reaping", () => {
     // 3. Dead owner whose recorded pid is a live NON-redis process: never killed.
     const sleeper = spawn("sleep", ["30"], { stdio: "ignore" });
     extraPids.push(sleeper.pid!);
-    const decoyNotRedis = fakeRunDir({ owner_pid: deadPid(), owner_start: "0", pid_ns: namespace, redis_pid: sleeper.pid });
+    const decoyNotRedis = fakeRunDir({ owner_pid: deadPid(), owner_start: "0", pid_ns: namespace,
+      redis_pid: sleeper.pid, redis_start: linuxProc.start(sleeper.pid!) });
     // 4. Dead owner whose recorded pid is a redis-server serving ANOTHER socket: never killed.
-    const decoyOtherSocket = fakeRunDir({ owner_pid: deadPid(), owner_start: "0", pid_ns: namespace, redis_pid: live.pid });
+    const decoyOtherSocket = fakeRunDir({ owner_pid: deadPid(), owner_start: "0", pid_ns: namespace,
+      redis_pid: live.pid, redis_start: linuxProc.start(live.pid) });
 
     const reaped = await reapStaleOwnedRedis({ root });
 
     expect(reaped).toEqual(expect.arrayContaining([
-      { dir: orphan.dir, killed: orphan.pid },
-      { dir: decoyNotRedis, killed: null },
-      { dir: decoyOtherSocket, killed: null },
+      { dir: orphan.dir, signals: ["SIGTERM"] },
+      { dir: decoyNotRedis, signals: [] },
+      { dir: decoyOtherSocket, signals: [] },
     ]));
     expect(reaped).toHaveLength(3);
     expect(await waitFor(() => !alive(orphan.pid))).toBe(true);
@@ -205,7 +207,7 @@ describe("stale-instance reaping", () => {
     const foreign = fakeRunDir({ owner_pid: 1, owner_start: "1", pid_ns: "pid:[1]", redis_pid: 2 });
     expect(await reapStaleOwnedRedis({ root })).toEqual([]);
     expect(existsSync(foreign)).toBe(true);
-    expect(await reapStaleOwnedRedis({ root, now: Date.now() + 61_000 })).toEqual([{ dir: foreign, killed: null }]);
+    expect(await reapStaleOwnedRedis({ root, now: Date.now() + 61_000 })).toEqual([{ dir: foreign, signals: [] }]);
     expect(existsSync(foreign)).toBe(false);
   });
 
@@ -217,6 +219,100 @@ describe("stale-instance reaping", () => {
     expect(await reapStaleOwnedRedis({ root, now: Date.now() + 3_600_000 })).toEqual([]);
     expect(existsSync(loose) && existsSync(other)).toBe(true);
     rmSync(loose, { recursive: true }); rmSync(other, { recursive: true });
+  });
+
+  it("never SIGKILLs a pid that another program took over between SIGTERM and escalation (real processes)", async () => {
+    // A TERM-ignoring stand-in whose argv is a redis-server serving the run dir's socket.
+    // On SIGTERM it execs into `sleep` (same pid, different program): the original is gone
+    // and the pid now belongs to something else, which must survive the escalation.
+    const dir = mkdtempSync(join(root, RUN_DIR_PREFIX));
+    chmodSync(dir, 0o700);
+    const socket = join(dir, "redis.sock");
+    const code = "import os,signal,sys,time\nsignal.signal(signal.SIGTERM, lambda *_: os.execvp('sleep', ['sleep', '30']))\nprint('ready', flush=True)\nwhile True: time.sleep(1)";
+    const standIn = spawn("python3", ["-c", code, "--unixsocket", socket], { argv0: "redis-server", stdio: ["ignore", "pipe", "ignore"] });
+    extraPids.push(standIn.pid!);
+    await new Promise<void>((resolve) => standIn.stdout!.once("data", () => resolve()));
+    const pid = standIn.pid!;
+    writeFileSync(join(dir, "owner.json"), JSON.stringify({ owner_pid: deadPid(), owner_start: "0", pid_ns: namespace,
+      socket, redis_pid: pid, redis_start: linuxProc.start(pid), redis_argv: linuxProc.argv(pid) }));
+    const reaped = await reapStaleOwnedRedis({ root, stopTimeoutMs: 1_000 });
+    expect(reaped).toEqual([{ dir, signals: ["SIGTERM"] }]);
+    expect(await waitFor(() => (linuxProc.argv(pid) ?? [])[0] === "sleep", 2_000)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 1_300)); // past the old escalation point
+    expect(alive(pid)).toBe(true); // the replacement was never signalled
+    standIn.kill("SIGKILL");
+  }, 15_000);
+});
+
+describe("stale-instance escalation revalidates identity before every signal (injected /proc)", () => {
+  const PID = 424_242;
+  const socket = "/run/test/gptq-redis-AbCdEf/redis.sock";
+  const serverArgv = ["/usr/bin/redis-server", "--port", "0", "--unixsocket", socket];
+  const server = { pid: PID, start: "100", socket, argv: serverArgv };
+  /** A /proc whose PID is reused by `sleep` once `reusedWhen` says so; counts identity checks. */
+  const scripted = (reusedWhen: (state: { checks: number; sent: string[] }) => boolean) => {
+    const state = { checks: 0, sent: [] as string[] };
+    const reused = () => reusedWhen(state);
+    const proc: ProcReader = {
+      start: (pid) => { if (pid !== PID) return null; state.checks += 1; return reused() ? "777" : "100"; },
+      argv: (pid) => (pid !== PID ? null : reused() ? ["/usr/bin/sleep", "30"] : [...serverArgv]),
+    };
+    const kill = (pid: number, signal: "SIGTERM" | "SIGKILL") => {
+      state.sent.push(`${reused() ? "replacement" : "server"}:${pid}:${signal}`);
+    };
+    return { state, proc, kill };
+  };
+  const noWait = async () => undefined;
+
+  it("pid reused right after SIGTERM: the replacement receives nothing", async () => {
+    const { state, proc, kill } = scripted(({ sent }) => sent.length > 0);
+    expect(await stopVerifiedServer(server, { proc, kill, sleep: noWait, boundMs: 100 })).toEqual(["SIGTERM"]);
+    expect(state.sent).toEqual([`server:${PID}:SIGTERM`]);
+  });
+
+  it("pid reused exactly at the pre-SIGKILL check: no SIGKILL", async () => {
+    // boundMs 50 => 2 polls: checks 1 (pre-TERM), 2-3 (polls), 4 (pre-KILL).
+    const { state, proc, kill } = scripted(({ checks }) => checks >= 4);
+    expect(await stopVerifiedServer(server, { proc, kill, sleep: noWait, boundMs: 50 })).toEqual(["SIGTERM"]);
+    expect(state.sent).toEqual([`server:${PID}:SIGTERM`]);
+    expect(state.checks).toBe(4);
+  });
+
+  it("pid reused before the first signal: nothing is sent", async () => {
+    const { state, proc, kill } = scripted(() => true);
+    expect(await stopVerifiedServer(server, { proc, kill, sleep: noWait, boundMs: 50 })).toEqual([]);
+    expect(state.sent).toEqual([]);
+  });
+
+  it("a server that ignores SIGTERM and stays the same process is escalated to SIGKILL", async () => {
+    const { state, proc, kill } = scripted(() => false);
+    expect(await stopVerifiedServer(server, { proc, kill, sleep: noWait, boundMs: 50 })).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(state.sent).toEqual([`server:${PID}:SIGTERM`, `server:${PID}:SIGKILL`]);
+  });
+
+  it("the reaper itself uses the injected reader: reuse between SIGTERM and escalation sends no SIGKILL", async () => {
+    const dir = mkdtempSync(join(root, RUN_DIR_PREFIX));
+    chmodSync(dir, 0o700);
+    const runSocket = join(dir, "redis.sock");
+    const runArgv = ["/usr/bin/redis-server", "--unixsocket", runSocket];
+    const sent: string[] = [];
+    const reused = () => sent.length > 0;
+    const proc: ProcReader = {
+      start: (pid) => (pid === PID ? (reused() ? "777" : "100") : null), // the owner (another pid) is dead
+      argv: (pid) => (pid !== PID ? null : reused() ? ["/usr/bin/sleep", "30"] : runArgv),
+    };
+    writeFileSync(join(dir, "owner.json"), JSON.stringify({ owner_pid: PID + 1, owner_start: "5", pid_ns: readlinkSync("/proc/self/ns/pid"),
+      socket: runSocket, redis_pid: PID, redis_start: "100", redis_argv: runArgv }));
+    const reaped = await reapStaleOwnedRedis({ root, proc, kill: (pid, signal) => { sent.push(`${reused() ? "replacement" : "server"}:${pid}:${signal}`); }, sleep: noWait, stopTimeoutMs: 100 });
+    expect(reaped).toContainEqual({ dir, signals: ["SIGTERM"] });
+    expect(sent).toEqual([`server:${PID}:SIGTERM`]);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("an owner.json without the server's start time is never signalled", async () => {
+    const { state, proc, kill } = scripted(() => false);
+    expect(await stopVerifiedServer({ pid: PID, socket } as never, { proc, kill, sleep: noWait })).toEqual([]);
+    expect(state.sent).toEqual([]);
   });
 });
 

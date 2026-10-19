@@ -5,6 +5,7 @@
  * private Redis, and the sidecar binds itself through GPTQUEUE_CODEX_APP_SERVER_SOCKET.
  * User hooks are disabled and every other user MCP server is disabled per invocation.
  */
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -47,7 +48,7 @@ describe.skipIf(!LIVE)(`live Codex (${LIVE ? "enabled" : SKIP_REASON})`, () => {
     };
     const overrides = Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]);
     const server = spawn("codex", ["app-server", "--listen", `unix://${socket}`, "--disable", "hooks", ...overrides],
-      { cwd: work, env: { ...process.env, ...env, REDIS_URL: redisUrl, GPTQUEUE_CODEX_APP_SERVER_SOCKET: socket }, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      { cwd: work, env: privateRedisEnv({ ...process.env, ...env, GPTQUEUE_CODEX_APP_SERVER_SOCKET: socket }, redisUrl), detached: true, stdio: ["ignore", "pipe", "pipe"] });
     let serverLog = "";
     server.stdout?.on("data", (c) => { serverLog = (serverLog + String(c)).slice(-200_000); });
     server.stderr?.on("data", (c) => { serverLog = (serverLog + String(c)).slice(-200_000); });

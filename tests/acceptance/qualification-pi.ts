@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { privateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -277,7 +278,7 @@ const startParticipant = async (options: PiOptions, input: LaunchInput, signal: 
     cliPath: join(root, "cli.js"), cwd,
     provider: options.provider,
     model: options.model,
-    env: { ...process.env, PI_OFFLINE: "1", GPTQ_LOG_DIR: join(cwd, "lifecycle") },
+    env: privateRedisEnv({ ...process.env, PI_OFFLINE: "1", GPTQ_LOG_DIR: join(cwd, "lifecycle") }),
     args: ["--offline", "--no-extensions", "--extension", extension, "--no-skills", "--no-prompt-templates",
       "--no-themes", "--no-context-files", "--no-builtin-tools", "--session-dir", sessionDir,
       "--append-system-prompt", `Use only the private GPTQueue tools. This is the ${input.role} participant for ${input.pairId}.`],

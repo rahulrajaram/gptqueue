@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -166,9 +167,8 @@ export const startRepairOpenCodeServer = async (redisUrl: string): Promise<Repai
   const port = await freePort();
   const child = spawn(opencodeBin, ["serve", "--port", String(port), "--hostname", "127.0.0.1"], {
     cwd: repo,
-    env: {
+    env: privateRedisEnv({
       ...process.env,
-      REDIS_URL: redisUrl,
       HOME: homeDir,
       XDG_CONFIG_HOME: configHome,
       XDG_DATA_HOME: dataHome,
@@ -181,7 +181,7 @@ export const startRepairOpenCodeServer = async (redisUrl: string): Promise<Repai
       OPENCODE_PURE: undefined,
       OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
       OPENCODE_MODELS_PATH: modelsPath,
-    },
+    }, redisUrl),
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";

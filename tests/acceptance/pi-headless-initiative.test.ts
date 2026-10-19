@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { randomUUID, randomInt } from 'node:crypto';
@@ -29,7 +30,7 @@ for (const trial of [1, 2, 3]) it.skipIf(process.env.GPTQUEUE_PI_HEADLESS_INITIA
       receipt.prompt = prompt;
       const child = spawn(process.execPath, [cli, '--offline', '--no-extensions', '--extension', extension, '--no-skills', '--no-prompt-templates',
         '--no-themes', '--no-context-files', '--no-builtin-tools', '--session-dir', sessions, '--print', '--mode', 'json', prompt],
-      { cwd, env: { ...process.env, PI_OFFLINE: '1' }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd, env: privateRedisEnv({ ...process.env, PI_OFFLINE: '1' }), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       child.stdout.on('data', data => { stdout = (stdout + String(data)).slice(-2_000_000); });
       child.stderr.on('data', data => { stderr = (stderr + String(data)).slice(-20_000); });
       receipt.process = await new Promise<Json>(resolve => {

@@ -1,3 +1,4 @@
+import { privateRedisEnv } from "../helpers/test-redis.js";
 import { it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -32,7 +33,7 @@ for (const mode of ['interactive', 'headless'] as const) it.skipIf(process.env.G
     };
     try {
       await reference.connect(new StdioClientTransport({ command: process.execPath,
-        args: [join(root, 'dist/mcp-server/index.js')], env: { ...process.env, REDIS_URL: redisUrl } as Record<string, string> }));
+        args: [join(root, 'dist/mcp-server/index.js')], env: privateRedisEnv(process.env, redisUrl) as Record<string, string> }));
       const sender = `acceptance-pi-mode-reference-${run}`;
       await call('register_agent', { name: sender, role: 'both', description: 'Owned Pi mode evaluation reference' });
       const nonce = randomUUID();
@@ -42,8 +43,8 @@ for (const mode of ['interactive', 'headless'] as const) it.skipIf(process.env.G
         '--no-themes', '--no-context-files', '--no-builtin-tools', '--session-dir', sessions,
         ...(mode === 'headless' ? ['--print', '--mode', 'json'] : []), prompt];
       child = mode === 'interactive' ? spawn('script', ['--quiet', '--return', '--command', [process.execPath, ...args].map(quote).join(' '), '/dev/null'],
-        { cwd: directory, detached: true, env: { ...process.env, TERM: 'xterm-256color', PI_OFFLINE: '1' }, stdio: ['pipe', 'pipe', 'pipe'] })
-        : spawn(process.execPath, args, { cwd: directory, detached: true, env: { ...process.env, PI_OFFLINE: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+        { cwd: directory, detached: true, env: privateRedisEnv({ ...process.env, TERM: 'xterm-256color', PI_OFFLINE: '1' }), stdio: ['pipe', 'pipe', 'pipe'] })
+        : spawn(process.execPath, args, { cwd: directory, detached: true, env: privateRedisEnv({ ...process.env, PI_OFFLINE: '1' }), stdio: ['pipe', 'pipe', 'pipe'] });
       if (mode === 'headless') child.stdin?.end();
       child.stdout?.on('data', data => { output = (output + String(data)).slice(-500_000); });
       child.stderr?.on('data', data => { output = (output + String(data)).slice(-500_000); });

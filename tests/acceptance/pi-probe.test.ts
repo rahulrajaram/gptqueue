@@ -1,3 +1,4 @@
+import { privateRedisEnv } from '../helpers/test-redis.js';
 import { it, expect } from 'vitest';
 import { randomUUID, randomInt } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -16,7 +17,7 @@ it.skipIf(process.env.GPTQUEUE_PI_ACCEPTANCE !== '1')('Pi CLI RPC automatically 
   const redis = new Redis(redisUrl);
   const reference = new Client({ name: 'gptqueue-acceptance-reference', version: '1' });
   const transport = new StdioClientTransport({ command: process.execPath,
-    args: [join(root, 'dist/mcp-server/index.js')], env: { ...process.env, REDIS_URL: redisUrl } as Record<string, string> });
+    args: [join(root, 'dist/mcp-server/index.js')], env: privateRedisEnv(process.env, redisUrl) as Record<string, string> });
   let peer: Awaited<ReturnType<typeof startPiPeer>> | undefined;
   const call = async (name: string, args: Record<string, unknown> = {}) => {
     const result = await reference.callTool({ name, arguments: args });

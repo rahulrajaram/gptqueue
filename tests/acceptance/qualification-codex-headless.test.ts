@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { createCodexAdapters, type CodexParticipant } from "./qualification-codex.js";
-import { startOwnedRedis, type OwnedRedis } from "./owned-redis.js";
+import { startOwnedRedis, type OwnedRedis, ownedRedisReceipt } from "./owned-redis.js";
 import { sanitizeEvidence } from "./public-evidence.js";
 
 const enabled = process.env.GPTQUEUE_QUALIFICATION_CODEX_HEADLESS === "1";
@@ -15,7 +15,6 @@ vi.setConfig({ testTimeout: 480_000, hookTimeout: 60_000 });
 
 type Json = Record<string, unknown>;
 const digest = async (path: string): Promise<string> => createHash("sha256").update(await readFile(path)).digest("hex");
-const redactedUrl = (value: string): Json => { const url = new URL(value); return { protocol: url.protocol, hostname: url.hostname, port: url.port, database: url.pathname.slice(1) }; };
 
 describe.skipIf(!enabled)("Codex headless qualification", () => {
   it("keeps a live native thread identity through one GPTQueue control task", async () => {
@@ -38,7 +37,7 @@ describe.skipIf(!enabled)("Codex headless qualification", () => {
       receipt.source_hashes = Object.fromEntries(await Promise.all(sourceFiles.map(async file => [file, await digest(join(repo, file))])));
       await persist("source-hashes", receipt.source_hashes);
       redis = await startOwnedRedis();
-      receipt.redis = redactedUrl(redis.url);
+      receipt.redis = ownedRedisReceipt(redis.url);
       workspace = await mkdtemp(join(tmpdir(), "gptq-qualification-codex-headless-"));
       set = createCodexAdapters({ workspaceRoot: workspace, model: "gpt-5.6-luna" });
       const adapter = set.adapters.find(({ spec }) => spec.id === "codex-headless");
