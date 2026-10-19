@@ -363,9 +363,13 @@ runs. `get_runtime_status` reports `dispatcher: "off"`, `readiness:
   expiry or the outbound-activity TTL. Other claims may remain, and renewals or
   further sends move it.
 
-`continuity` is null when no adoption is pending. The lifecycle log records
-`native_binding_retrying` with code `adoption_refused`, reason, signal and target
-when the refusal changes, not on every retry.
+`continuity` is null when no adoption is pending.
+
+For Codex, the binding supervisor's retry fields stay current on every attempt:
+`binding_attempts`, `next_attempt_at` and `last_attempt_at`. The Codex lifecycle
+log records `native_binding_retrying` with code `adoption_refused`, reason, signal
+and target when the refusal changes, not on every retry. Pi has no retry loop, so
+it reports the same status fields but writes no such log line.
 
 If the mapped mailbox stays dormant while the sidecar keeps working under its current
 name, an operator can repoint that one runtime's mapping to the live name:
@@ -375,15 +379,41 @@ node scripts/gptqueue-doctor.mjs remap-runtime-mailbox --redis-url redis://127.0
 ```
 
 Without `--apply yes` this is a dry run. It previews both mailboxes' retained work:
-queue length, unexpired claims with their expiry, registration pid and liveness,
-runtime binding and heartbeat. It also reports the guards:
+- queue length;
+- unexpired claims with their expiry;
+- registration pid and liveness;
+- runtime binding and heartbeat;
+- outstanding reply correlations: requests each mailbox still awaits replies to,
+  and replies it still owes, with a sample showing each task's subject and
+  whether it was answered.
+
+No index records correlations by mailbox, so the doctor finds them with a
+read-only SCAN of the outstanding-request keys. The SCAN is capped at about
+`--max-correlation-scan` keyspace entries (default 200000). If it stops at the
+cap, the disclosure is reported as incomplete, its counts are lower bounds, and
+the remap is refused unless you pass `--accept-incomplete-disclosure yes`.
+
+The dry run also reports the guards:
 - the mapping names FROM;
 - TO is registered with a running pid, checked by the doctor process;
 - TO has a heartbeat or a live session lease;
-- FROM has no runtime binding and no heartbeat.
+- FROM has no runtime binding and no heartbeat;
+- the correlation disclosure is complete, or its incompleteness was accepted.
 
-Applying re-checks the mapping, TO's registration and liveness, and FROM's dormancy
-in one atomic step. It then repoints the mapping, clears TO's provisional mark and
-records an `operator_remap` audit event. The remap moves no work: FROM's queued
-messages and claims stay at FROM. Exit code 6 means the remap was refused and
-nothing was written.
+Applying works in one atomic step. It first checks the type of every key it
+touches, refusing without writing if any key has an unexpected type. It then
+re-checks the mapping, TO's registration and liveness, and FROM's dormancy. Only
+then does it repoint the mapping, clear TO's provisional mark and record an
+`operator_remap` audit event.
+
+The remap moves no work: FROM's queued messages, claims and correlations stay at
+FROM. A sidecar whose adoption was refused will not undo a remap when it shuts
+down, because its shutdown retirement requires the mapping to still name the
+refused target.
+
+Exit codes:
+- 0: the remap was applied, or the dry run found every guard holding;
+- 6: refused, nothing was written, and each refusal is printed;
+- 1: a bad or missing option;
+- 2: a connection or other error. After `--apply yes` the outcome is then
+  unknown, so run the dry run again before retrying.

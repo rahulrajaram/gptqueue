@@ -3,7 +3,7 @@
  * the plan's guards, and the apply script's atomic re-check of every guard it
  * can see inside Redis after the plan was read.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
@@ -18,7 +18,7 @@ beforeEach(async () => {
   const redis = new Redis(redisUrl);
   try { await flushTestKeys(redis, redisUrl); } finally { await redis.quit(); }
 });
-afterEach(async () => { for (const redis of connections.splice(0)) { await flushTestKeys(redis, redisUrl); await redis.quit(); } });
+afterEach(async () => { vi.restoreAllMocks(); for (const redis of connections.splice(0)) { await flushTestKeys(redis, redisUrl); await redis.quit(); } });
 
 const alive = () => true;
 const setup = async () => {
@@ -101,5 +101,72 @@ describe("runtime mailbox remap", () => {
     expect(await s.redis.get(s.key)).toBe(raced);
     expect(await s.redis.sismember(SESSION_KEYS.provisional, s.to)).toBe(1);
     expect(await s.redis.xlen(SESSION_KEYS.continuityAudit)).toBe(0);
+  });
+
+  it("discloses outstanding reply correlations touching either mailbox, even with no queue or claims (F2)", async () => {
+    const s = await setup();
+    await s.redis.set(SESSION_KEYS.outstanding(s.from, "t-await"), "peer", "EX", 600); // FROM awaits peer's reply
+    await s.redis.set(SESSION_KEYS.outstanding("peer", "t-owe"), s.from, "EX", 600); // FROM owes peer a reply
+    await s.redis.set(SESSION_KEYS.outstanding("peer", "t-to"), s.to, "EX", 600); // TO owes peer a reply
+    await s.redis.set(SESSION_KEYS.outstanding("peer", "t-other"), `someone-${randomUUID()}`, "EX", 600);
+    await s.redis.set(SESSION_KEYS.outstanding("peer", "t-no-ttl"), s.from); // unreadable as a correlation
+    await s.redis.set(SESSION_KEYS.taskLedger("t-owe"),
+      JSON.stringify({ from: "peer", to: s.from, subject: "review the patch", sent_at: "2026-10-19T00:00:00.000Z" }), "EX", 600);
+    await s.redis.set(SESSION_KEYS.taskAnswered("t-await"), "2026-10-19T00:01:00.000Z", "EX", 600);
+    const plan = await planRuntimeMailboxRemap(s.redis, s.request, { isPidAlive: alive });
+    expect(plan.correlations).toMatchObject({ complete: true, outstanding_keys: 5, unparsed: 1,
+      from: { awaiting_reply: 1, owes_reply: 1 }, to: { awaiting_reply: 0, owes_reply: 1 } });
+    expect(plan.correlations.from.sample).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sender: s.from, task_id: "t-await", recipient: "peer", answered: true, subject: null }),
+      expect.objectContaining({ sender: "peer", task_id: "t-owe", recipient: s.from, answered: false, subject: "review the patch" }),
+    ]));
+    expect(plan.correlations.to.sample).toEqual([expect.objectContaining({ task_id: "t-to", recipient: s.to })]);
+    expect(plan.notes[0]).toMatch(/0 queued message\(s\), 0 unexpired claim\(s\), and 1 awaited and 1 owed reply correlation\(s\) stay at/);
+    expect(plan.guards.find((g) => g.guard === "correlation_disclosure_complete")).toMatchObject({ ok: true });
+  });
+
+  it("an incomplete correlation SCAN refuses apply unless the operator accepts it (F2)", async () => {
+    const s = await setup();
+    // A keyspace the capped SCAN cannot finish in one step.
+    for (let i = 0; i < 64; i++) await s.redis.set(`gptq:test-filler:${i}`, "x");
+    const capped = await planRuntimeMailboxRemap(s.redis, s.request, { isPidAlive: alive, correlationScanLimit: 1 });
+    expect(capped.correlations).toMatchObject({ complete: false, scan_limit: 1 });
+    expect(capped.notes[0]).toMatch(/and at least 0 awaited and at least 0 owed/);
+    expect(await applyRuntimeMailboxRemap(s.redis, capped)).toMatchObject({ status: "refused",
+      refusals: [{ reason: "correlation_disclosure_complete", detail: expect.stringMatching(/--accept-incomplete-disclosure yes/) }] });
+    await unchanged(s);
+    const accepted = await planRuntimeMailboxRemap(s.redis, s.request, { isPidAlive: alive, correlationScanLimit: 1, acceptIncompleteDisclosure: true });
+    expect(accepted.correlations.complete).toBe(false);
+    expect(accepted.guards.find((g) => g.guard === "correlation_disclosure_complete")).toMatchObject({ ok: true, detail: expect.stringMatching(/accepted/) });
+    expect((await applyRuntimeMailboxRemap(s.redis, accepted)).status).toBe("applied");
+  });
+
+  const wrongTypes: Array<[string, (s: Awaited<ReturnType<typeof setup>>) => Promise<unknown>]> = [
+    ["continuity audit", (s) => s.redis.set(SESSION_KEYS.continuityAudit, "not-a-stream")],
+    ["provisional", async (s) => { await s.redis.del(SESSION_KEYS.provisional); await s.redis.set(SESSION_KEYS.provisional, "not-a-set"); }],
+    ["to session lease", async (s) => {
+      const sid = randomUUID();
+      await s.redis.sadd(SESSION_KEYS.agentSessions(s.to), sid);
+      await s.redis.hset(SESSION_KEYS.lease(sid), "not", "a-string");
+    }],
+  ];
+  it.each(wrongTypes)("refuses a wrong-type %s key found after the plan, before any write (F4)", async (role, corrupt) => {
+    const s = await setup();
+    const plan = await planRuntimeMailboxRemap(s.redis, s.request, { isPidAlive: alive });
+    expect(plan.ok).toBe(true);
+    await corrupt(s);
+    expect(await applyRuntimeMailboxRemap(s.redis, plan)).toMatchObject({ status: "refused",
+      refusals: [{ reason: "wrong_key_type", detail: expect.stringContaining(`the ${role} key has type`) }] });
+    expect(await s.redis.get(s.key)).toBe(s.mapping);
+    if (role !== "provisional") expect(await s.redis.sismember(SESSION_KEYS.provisional, s.to)).toBe(1);
+    else expect(await s.redis.get(SESSION_KEYS.provisional)).toBe("not-a-set");
+    if (role === "continuity audit") expect(await s.redis.get(SESSION_KEYS.continuityAudit)).toBe("not-a-stream");
+  });
+
+  it("reports a Redis failure during apply as an unknown outcome, never a refusal (F4)", async () => {
+    const s = await setup();
+    const plan = await planRuntimeMailboxRemap(s.redis, s.request, { isPidAlive: alive });
+    vi.spyOn(s.redis, "eval").mockRejectedValueOnce(new Error("Connection is closed."));
+    await expect(applyRuntimeMailboxRemap(s.redis, plan)).rejects.toThrow(/^Remap outcome unknown \(Connection is closed\.\)/);
   });
 });

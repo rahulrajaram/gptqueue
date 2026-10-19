@@ -374,6 +374,8 @@ describe("gptqueue-doctor CLI", () => {
       const expiry = Date.now() + 600_000;
       await redis.zadd(CLAIM_KEYS.index(from), expiry, "claim-from", Date.now() - 60_000, "claim-expired");
       await redis.rpush(SESSION_KEYS.queue(to), JSON.stringify({ id: "q3" }));
+      // An outstanding request FROM still awaits a reply to (F2).
+      await redis.set(SESSION_KEYS.outstanding(from, "t-await"), "peer", "EX", 600);
       const args = (...extra: string[]) => ["remap-runtime-mailbox", "--redis-url", TEST_REDIS_URL, "--client", "codex",
         "--runtime-id", runtimeId, "--from", from, "--to", to, ...extra];
       return { runtimeId, from, to, key, mapping, expiry, args };
@@ -397,10 +399,12 @@ describe("gptqueue-doctor CLI", () => {
         runtime_binding: false, heartbeat: false, provisional: false });
       expect(out.mailboxes.to).toMatchObject({ name: s.to, registered: true, pid: process.pid, pid_alive: true, queue_length: 1,
         unexpired_claims: [], heartbeat: true, runtime_binding: false, provisional: true, working_directory: "/workspace/project" });
+      expect(out.correlations).toMatchObject({ complete: true, from: { awaiting_reply: 1, owes_reply: 0,
+        sample: [{ sender: s.from, task_id: "t-await", recipient: "peer" }] }, to: { awaiting_reply: 0, owes_reply: 0 } });
       expect(out.guards.map((g: { guard: string; ok: boolean }) => [g.guard, g.ok])).toEqual([
         ["distinct_mailboxes", true], ["mapping_names_from", true], ["to_registered", true],
-        ["to_pid_alive", true], ["to_live_registration", true], ["from_dormant", true]]);
-      expect(out.notes.join(" ")).toMatch(/moves no work: 2 queued message\(s\) and 1 unexpired claim\(s\) stay at/);
+        ["to_pid_alive", true], ["to_live_registration", true], ["from_dormant", true], ["correlation_disclosure_complete", true]]);
+      expect(out.notes.join(" ")).toMatch(/moves no work: 2 queued message\(s\), 1 unexpired claim\(s\), and 1 awaited and 0 owed reply correlation\(s\) stay at/);
       expect(out.notes.join(" ")).toMatch(/pid liveness is checked by this process/);
       await unchanged(s);
     });
@@ -445,6 +449,20 @@ describe("gptqueue-doctor CLI", () => {
       expect(await redis.xlen(SESSION_KEYS.continuityAudit)).toBe(0);
     });
 
+    it("refuses an incomplete correlation disclosure unless --accept-incomplete-disclosure yes (F2)", async () => {
+      const s = await seed();
+      for (let i = 0; i < 64; i++) await redis.set(`gptq:test-filler:${i}`, "x");
+      const capped = run(s.args("--max-correlation-scan", "1", "--apply", "yes"));
+      expect(capped.status, capped.stderr).toBe(6);
+      expect(capped.stderr).toMatch(/^refused: correlation_disclosure_complete: correlation SCAN stopped at its cap/mu);
+      expect(JSON.parse(capped.stdout).correlations).toMatchObject({ complete: false, scan_limit: 1 });
+      await unchanged(s);
+      const accepted = run(s.args("--max-correlation-scan", "1", "--accept-incomplete-disclosure", "yes", "--apply", "yes"));
+      expect(accepted.status, accepted.stderr).toBe(0);
+      expect(JSON.parse(accepted.stdout)).toMatchObject({ outcome: { status: "applied" }, correlations: { complete: false } });
+      expect(JSON.parse((await redis.get(s.key))!).agent).toBe(s.to);
+    });
+
     it("refuses FROM equal to TO", async () => {
       const s = await seed();
       const result = run(["remap-runtime-mailbox", "--redis-url", TEST_REDIS_URL, "--client", "codex",
@@ -454,18 +472,24 @@ describe("gptqueue-doctor CLI", () => {
       await unchanged(s);
     });
 
-    it("rejects a bad client, an --apply other than yes, and unknown options before touching state", async () => {
+    it("exits 1 (usage) for bad or missing options, before touching state (F5)", async () => {
       const s = await seed();
-      const badClient = run(["remap-runtime-mailbox", "--redis-url", TEST_REDIS_URL, "--client", "opencode",
-        "--runtime-id", s.runtimeId, "--from", s.from, "--to", s.to]);
-      expect(badClient.status).toBe(2);
-      expect(badClient.stderr).toContain("--client must be codex or pi");
-      const badApply = run(s.args("--apply", "true"));
-      expect(badApply.status).toBe(2);
-      expect(badApply.stderr).toContain("--apply yes");
-      const unknown = run(s.args("--cwd", "/workspace"));
-      expect(unknown.status).toBe(2);
-      expect(unknown.stderr).toContain("Unknown option(s) for remap-runtime-mailbox: --cwd");
+      const cases: Array<[string[], string]> = [
+        [["remap-runtime-mailbox", "--redis-url", TEST_REDIS_URL, "--client", "opencode", "--runtime-id", s.runtimeId, "--from", s.from, "--to", s.to],
+          "--client must be codex or pi"],
+        [s.args("--apply", "true"), "Pass --apply yes"],
+        [s.args("--accept-incomplete-disclosure", "true"), "Pass --accept-incomplete-disclosure yes"],
+        [s.args("--max-correlation-scan", "0"), "--max-correlation-scan must be a positive integer"],
+        [s.args("--cwd", "/workspace"), "Unknown option(s) for remap-runtime-mailbox: --cwd"],
+        [["remap-runtime-mailbox", "--redis-url", TEST_REDIS_URL, "--client", "codex", "--runtime-id", s.runtimeId, "--from", s.from], "Required --to"],
+        [["remap-runtime-mailbox", "--client", "codex", "--runtime-id", s.runtimeId, "--from", s.from, "--to", s.to], "Required --redis-url"],
+        [s.args("--apply"), "Expected unique option/value pairs"],
+      ];
+      for (const [args, message] of cases) {
+        const result = run(args);
+        expect(result.status, message).toBe(1);
+        expect(result.stderr).toContain(message);
+      }
       await unchanged(s);
     });
   });

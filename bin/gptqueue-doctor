@@ -24,12 +24,23 @@ if (!allowed.includes(command)) {
   console.log('       reap-offline exit codes: 0 evaluated (skips/remaining are normal), 4 batch refused with nothing written (report.refused),');
   console.log('       5 evaluated but report.anomalies > 0 unexpected_key_type skips (other names may be reaped; unhealthy),');
   console.log('       3 client timeout (server outcome unknown), 1 usage, 2 connection/other error. Precedence 3 > 4 > 5 > 0.');
-  console.log('       node scripts/gptqueue-doctor.mjs remap-runtime-mailbox --redis-url URL --client codex|pi --runtime-id ID --from MAILBOX --to MAILBOX [--apply yes]');
+  console.log('       node scripts/gptqueue-doctor.mjs remap-runtime-mailbox --redis-url URL --client codex|pi --runtime-id ID --from MAILBOX --to MAILBOX');
+  console.log('         [--apply yes] [--accept-incomplete-disclosure yes] [--max-correlation-scan N]');
   console.log('       Repoint one runtime\'s mailbox mapping from a dormant FROM to a live TO (dry run unless --apply yes). Previews both');
-  console.log('       mailboxes\' retained work; moves none. Exit codes: 0 applied or dry run with every guard holding, 6 refused');
-  console.log('       (nothing written; each refusal on stderr), 1 usage, 2 connection/other error.');
+  console.log('       mailboxes\' retained work (queue, claims, outstanding reply correlations); moves none. Correlations come from a bounded');
+  console.log('       SCAN of about N keyspace entries (default 200000); if it stops at that cap the disclosure is incomplete and the remap');
+  console.log('       is refused unless --accept-incomplete-disclosure yes. Exit codes: 0 applied or dry run with every guard holding,');
+  console.log('       6 refused (nothing written; each refusal on stderr), 1 usage (bad or missing option), 2 connection/other error');
+  console.log('       (after --apply yes the outcome is then unknown: run the dry run again before retrying).');
   process.exit(command === '--help' ? 0 : 1);
 }
+/** A bad or missing option: exits 1, the documented usage code. */
+class UsageError extends Error {}
+// remap-runtime-mailbox follows the documented contract: its option errors exit 1.
+// Older subcommands keep exiting 2 for option errors; their tests pin that.
+const remapCommand = command === 'remap-runtime-mailbox';
+const optionError = message => remapCommand ? new UsageError(message) : new Error(message);
+const REMAP_OPTIONS = ['--redis-url', '--client', '--runtime-id', '--from', '--to', '--apply', '--accept-incomplete-disclosure', '--max-correlation-scan'];
 let redis = null;
 try {
   const options = {};
@@ -42,7 +53,7 @@ try {
   }) : args;
   if (flags.has('--dry-run') && flags.has('--apply')) throw new Error('Pass either --dry-run or --apply, not both');
   for (let i = 0; i < pairArgs.length; i += 2) {
-    if (!pairArgs[i]?.startsWith('--') || pairArgs[i + 1] === undefined || pairArgs[i] in options) throw new Error('Expected unique option/value pairs');
+    if (!pairArgs[i]?.startsWith('--') || pairArgs[i + 1] === undefined || pairArgs[i] in options) throw optionError('Expected unique option/value pairs');
     options[pairArgs[i]] = pairArgs[i + 1];
   }
   const required = name => { if (!options[name]) throw new Error(`Required ${name}`); return options[name]; };
@@ -51,6 +62,20 @@ try {
   if (configOnly) {
     const unknown = Object.keys(options).filter(key => key !== '--tier');
     if (unknown.length) throw new Error(`Unknown option(s) for config subcommand: ${unknown.join(', ')}; only --tier is accepted`);
+  }
+  // Validate every remap option before touching Redis.
+  if (remapCommand) {
+    const unknown = Object.keys(options).filter(key => !REMAP_OPTIONS.includes(key));
+    if (unknown.length) throw new UsageError(`Unknown option(s) for remap-runtime-mailbox: ${unknown.join(', ')}`);
+    for (const name of ['--redis-url', '--client', '--runtime-id', '--from', '--to']) if (!options[name]) throw new UsageError(`Required ${name}`);
+    if (options['--client'] !== 'codex' && options['--client'] !== 'pi') throw new UsageError('--client must be codex or pi');
+    if (options['--apply'] !== undefined && options['--apply'] !== 'yes') throw new UsageError('Pass --apply yes to apply; omit --apply for a dry run');
+    if (options['--accept-incomplete-disclosure'] !== undefined && options['--accept-incomplete-disclosure'] !== 'yes') {
+      throw new UsageError('Pass --accept-incomplete-disclosure yes, or omit it to require complete correlation disclosure');
+    }
+    if (options['--max-correlation-scan'] !== undefined && !/^[1-9][0-9]{0,8}$/u.test(options['--max-correlation-scan'])) {
+      throw new UsageError('--max-correlation-scan must be a positive integer');
+    }
   }
   if (!configOnly) redis = new Redis(required('--redis-url'));
   const diagnostics = configOnly ? null : new AgentDiagnostics(redis);
@@ -184,14 +209,13 @@ try {
     }
     // Operator recovery for a refused runtime mailbox adoption. Dry run unless --apply yes.
     case 'remap-runtime-mailbox': {
-      const unknown = Object.keys(options).filter(key => !['--redis-url', '--client', '--runtime-id', '--from', '--to', '--apply'].includes(key));
-      if (unknown.length) throw new Error(`Unknown option(s) for remap-runtime-mailbox: ${unknown.join(', ')}`);
-      const client = required('--client');
-      if (client !== 'codex' && client !== 'pi') throw new Error('--client must be codex or pi');
-      if (options['--apply'] !== undefined && options['--apply'] !== 'yes') throw new Error('Pass --apply yes to apply; omit --apply for a dry run');
+      // Options were validated above, before connecting.
       const apply = options['--apply'] === 'yes';
       // TO's pid liveness is checked here, in this process, before the atomic apply.
-      const plan = await planRuntimeMailboxRemap(redis, { client, runtimeId: required('--runtime-id'), from: required('--from'), to: required('--to') });
+      const plan = await planRuntimeMailboxRemap(redis,
+        { client: options['--client'], runtimeId: options['--runtime-id'], from: options['--from'], to: options['--to'] },
+        { correlationScanLimit: options['--max-correlation-scan'] === undefined ? undefined : Number(options['--max-correlation-scan']),
+          acceptIncompleteDisclosure: options['--accept-incomplete-disclosure'] === 'yes' });
       const outcome = apply ? await applyRuntimeMailboxRemap(redis, plan)
         : plan.ok ? { status: 'dry_run_ok' }
           : { status: 'refused', refusals: plan.guards.filter(g => !g.ok).map(g => ({ reason: g.guard, detail: g.detail })) };
@@ -210,5 +234,5 @@ try {
   if (result !== undefined) console.log(JSON.stringify(result, null, 2));
 } catch (error) {
   console.error(`error: ${error?.message ?? String(error)}`);
-  process.exit(2);
+  process.exit(error instanceof UsageError ? 1 : 2);
 } finally { if (redis) await redis.quit(); }
