@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { TaskClaimStore } from "../src/core/task-claim-store.js";
 import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
@@ -15,7 +16,7 @@ import { registerTools } from "../src/transports/setup-tools.js";
 import { AgentDiagnostics } from "../src/core/agent-diagnostics.js";
 import { acknowledgeMessagesSchema } from "../src/mcp-server/tools/acknowledge-messages.js";
 
-const URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const URL = testRedisUrl();
 const T0 = "2030-01-01T00:00:00.000Z";
 const AFTER_EXPIRY = "2030-01-01T00:10:00.000Z";
 const actor = "ackmsg-actor";
