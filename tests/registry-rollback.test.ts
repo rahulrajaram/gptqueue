@@ -353,8 +353,11 @@ describe("registry rollback bookkeeping (R2)", () => {
   });
 
   it("no public reader returns the rollback side hashes' data (R2)", async () => {
-    // Grep: only the registry writers may name the side hashes.
-    const allowed = new Set(["src/core/keys.ts", "src/core/session-store.ts", "src/mcp-server/redis-client.ts"]);
+    // Grep: only the registry writers may name the side hashes. The reaper
+    // also names them, but only HEXISTS them to refuse a reap while a
+    // registration is in flight (registry-reaper.ts REAP_SCRIPT); it never
+    // returns their data.
+    const allowed = new Set(["src/core/keys.ts", "src/core/session-store.ts", "src/mcp-server/redis-client.ts", "src/core/registry-reaper.ts"]);
     const root = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
     const walk = (dir: string): string[] =>
       readdirSync(dir).flatMap((entry) => {
