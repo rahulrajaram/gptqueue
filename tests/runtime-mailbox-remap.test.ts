@@ -53,7 +53,9 @@ describe("runtime mailbox remap", () => {
     expect(outcome.status).toBe("applied");
     expect(JSON.parse((await s.redis.get(s.key))!)).toEqual({ agent: s.to, working_directory: "/workspace/project" });
     expect(await s.redis.sismember(SESSION_KEYS.provisional, s.to)).toBe(0);
-    const [[id, fields]] = await s.redis.xrange(SESSION_KEYS.continuityAudit, "-", "+");
+    const entries = await s.redis.xrange(SESSION_KEYS.continuityAudit, "-", "+");
+    expect(entries).toHaveLength(1);
+    const [id, fields] = entries[0]!;
     expect(outcome).toEqual({ status: "applied", audit_id: id });
     expect(fields).toEqual(["event", "operator_remap", "target", s.to, "source", s.from, "runtime_id", s.runtimeId, "client", "codex"]);
     expect(await s.redis.lrange(SESSION_KEYS.queue(s.from), 0, -1)).toEqual(["retained"]);

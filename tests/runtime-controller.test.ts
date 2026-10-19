@@ -11,7 +11,7 @@ const WORKDIR = "/tmp/runtime-controller-test";
 
 /** Drives the bind_runtime controller state machine end to end against Redis. */
 describe("runtime controller (bind_runtime)", () => {
-  const cleanup: Array<() => Promise<void>> = [];
+  const cleanup: Array<() => Promise<unknown>> = [];
   afterEach(async () => { for (const step of cleanup.splice(0).reverse()) await step().catch(() => undefined); });
 
   const setup = async () => {

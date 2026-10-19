@@ -28,7 +28,7 @@ const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 assertNotLiveDb(redisUrl, "adoption refusal tests");
 const clients: RedisClient[] = [];
 const connections: Redis[] = [];
-const closers: Array<() => Promise<void>> = [];
+const closers: Array<() => Promise<unknown>> = [];
 
 // Start from an empty gptq:* namespace: other suites may leave audit entries behind.
 beforeEach(async () => {
@@ -240,7 +240,7 @@ describe("runtime controller continuity status", () => {
     const second = controller.status().continuity as Record<string, unknown>;
     expect(second).toMatchObject({ signal: "claims_index", recheck_after: new Date(expiry).toISOString(),
       recheck_basis: "earliest_unexpired_claim_expiry", first_refused_at: firstContinuity.first_refused_at });
-    expect(Date.parse(second.last_attempt_at as string)).toBeGreaterThanOrEqual(Date.parse(firstContinuity.first_refused_at));
+    expect(Date.parse(second.last_attempt_at as string)).toBeGreaterThanOrEqual(Date.parse(firstContinuity.first_refused_at!));
 
     await s.redis.zrem(CLAIM_KEYS.index(s.target), "claim");
     expect(await controller.bind(s.binding)).toMatchObject({ agent: s.target, activation_ready: true, dispatcher: "on", continuity: null });
