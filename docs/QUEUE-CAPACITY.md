@@ -24,8 +24,10 @@ Classification is evaluated at admission time over the whole current queue,
 so a reply that was waking when it arrived becomes quiet once its outstanding
 key expires or changes. Raw envelopes are never modified.
 
-A non-string `payload.in_reply_to` (for example a number, which only a raw
-writer could store) is quiet in the Lua classifier. `send_message` only
+A reply wakes only when its `from` and `payload.in_reply_to` are both
+non-empty strings, in the Lua classifier and in `wakesRecipient` alike, so a
+non-string `in_reply_to` (for example a number, which only a raw writer
+could store) or a null/missing/non-string `from` is quiet. `send_message` only
 produces strings: its schema declares `in_reply_to: z.string().optional()`
 (`src/mcp-server/tools/send-message.ts:36-39`).
 
@@ -39,8 +41,12 @@ produces strings: its schema declares `in_reply_to: z.string().optional()`
 | Quiet | the queue holds fewer than `max_size` entries (the rule before waking admission) | `full` |
 | Any, when the queue holds more than 1024 entries | never | `oversize` |
 
-Quiet mail therefore never refuses waking mail, and ordinary sends bound an
-inbox at about `2 x max_size` entries. Admission, the classification scan
+Quiet mail therefore never refuses waking mail. While classification is
+stable, ordinary sends bound an inbox at about `2 x max_size` entries. That
+figure is not a general bound: when an owned reply's outstanding key expires
+or changes owner, the reply turns quiet and frees a waking slot, so ownership
+changes alone can let ordinary sends grow an inbox beyond `2 x max_size`, up
+to the 1024-entry ceiling below. Admission, the classification scan
 and the enqueue are one atomic Lua script. A refused send writes nothing: no
 queue entry, metadata, inbox event, task ledger, answered marker,
 outstanding key or idempotency record. An idempotent retry of a send that was

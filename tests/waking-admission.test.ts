@@ -288,4 +288,76 @@ describe("waking admission (real Lua)", () => {
       await receiver.shutdown();
     }
   }, 120_000);
+
+  // Baseline-compatible regressions (F2): boolean send() and raw LLEN only.
+  it("(R1, baseline API) ten legacy status entries do not refuse a task", async () => {
+    const to = mailbox();
+    const store = new MailboxStore(redis, redis, BOUND);
+    await legacy(to, Array.from({ length: 10 }, () => envelope(to, "status")));
+    expect(await store.send(envelope(to, "task"), 1)).toBe(true); // admission assertion
+    expect(await redis.llen(SESSION_KEYS.queue(to))).toBe(11);
+    expect(await store.send(envelope(to, "status"), 1)).toBe(false);
+  });
+
+  it("(R2, baseline API) a reply whose ownership changed stops occupying the waking quota", async () => {
+    const to = mailbox();
+    const store = new MailboxStore(redis, redis, 3);
+    const replies = await Promise.all(Array.from({ length: 3 }, () => owned(to)));
+    await legacy(to, replies);
+    expect(await store.send(envelope(to, "task"), 1)).toBe(false);
+    await redis.set(SESSION_KEYS.outstanding(to, replies[0]!.payload.in_reply_to!), "someone-else");
+    expect(await store.send(envelope(to, "task"), 1)).toBe(true); // admission assertion
+    expect(await redis.llen(SESSION_KEYS.queue(to))).toBe(4);
+  });
+
+  it("(F1) saturated waking quota: max_size 1 and one queued owned reply refuse another waking send", async () => {
+    const to = mailbox();
+    const store = new MailboxStore(redis, redis, 1);
+    await legacy(to, [await owned(to)]);
+    expect(await store.sendWithOutcome(envelope(to, "task"), 1)).toMatchObject({ status: "full", reason: "waking_full" });
+    expect(await store.sendWithOutcome(await owned(to), 1)).toMatchObject({ status: "full", reason: "waking_full" });
+    expect(await redis.llen(SESSION_KEYS.queue(to))).toBe(1);
+  });
+
+  it("(F1) differential: Lua status counts and wakesRecipient classify malformed replies identically", async () => {
+    const to = mailbox();
+    const store = new MailboxStore(redis, redis, BOUND);
+    const ownerOf = async (requestId: string, owner: string) => {
+      track(SESSION_KEYS.outstanding(to, requestId));
+      await redis.set(SESSION_KEYS.outstanding(to, requestId), owner, "EX", 600);
+    };
+    await ownerOf("7", "peer");
+    await ownerOf("true", "peer");
+    await ownerOf("[object Object]", "peer");
+    await ownerOf("r-num-from", "5");
+    const valid = await owned(to);
+    const changed = await owned(to);
+    await redis.set(SESSION_KEYS.outstanding(to, changed.payload.in_reply_to!), "other");
+    const reply = (fields: Record<string, unknown>, payload: Record<string, unknown>) =>
+      JSON.stringify({ id: randomUUID(), from: "peer", to, type: "result", timestamp: "2030-01-01T00:00:00.000Z", ...fields, payload: { content: "r", ...payload } });
+    const cases: Record<string, string> = {
+      numeric_in_reply_to: reply({}, { in_reply_to: 7 }),
+      boolean_in_reply_to: reply({}, { in_reply_to: true }),
+      object_in_reply_to: reply({}, { in_reply_to: { id: "x" } }),
+      empty_in_reply_to: reply({}, { in_reply_to: "" }),
+      null_from_no_owner: reply({ from: null }, { in_reply_to: `absent-${randomUUID()}` }),
+      missing_from: JSON.stringify({ id: randomUUID(), to, type: "error", payload: { content: "r", in_reply_to: `absent-${randomUUID()}` } }),
+      numeric_from: reply({ from: 5 }, { in_reply_to: "r-num-from" }),
+      valid_owned: JSON.stringify(valid),
+      changed_owner: JSON.stringify(changed),
+    };
+    const wakesInTs = async (raw: string) => {
+      const message = parseQueueEntry(raw);
+      if (message === null) return false;
+      const [owner] = await replyOwners(redis, to, [message]);
+      return wakesRecipient(to, message, owner ?? null);
+    };
+    for (const [name, raw] of Object.entries(cases)) {
+      await redis.del(SESSION_KEYS.queue(to));
+      await redis.rpush(SESSION_KEYS.queue(to), raw);
+      const { waking_count: luaWaking } = (await store.status(to))[0]!;
+      expect({ name, waking: luaWaking === 1 }).toEqual({ name, waking: await wakesInTs(raw) });
+      expect({ name, waking: luaWaking === 1 }).toEqual({ name, waking: name === "valid_owned" });
+    }
+  });
 });

@@ -8,8 +8,16 @@ export type InboxTraceFields = Readonly<{ stage: InboxTraceStage; timestamp: str
 const stream = SESSION_KEYS.inboxEvents;
 const traceStream = SESSION_KEYS.inboxTrace;
 const outstanding = SESSION_KEYS.outstanding;
+const nonEmptyString = (value: unknown): value is string => typeof value === "string" && value !== "";
+/**
+ * A reply that can wake: a result or error whose sender (`from`) and
+ * correlation (`payload.in_reply_to`) are both non-empty strings. Every
+ * in-repo writer produces strings for both; a hand-written or malformed raw
+ * entry with any other shape never wakes. waking-admission-lib.lua applies
+ * the identical rule (tests/waking-admission.test.ts checks they agree).
+ */
 const awaitsOutstanding = (message: QueueMessage): message is QueueMessage & { payload: { in_reply_to: string } } =>
-  (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
+  (message.type === "result" || message.type === "error") && nonEmptyString(message.from) && nonEmptyString(message.payload.in_reply_to);
 
 /** A raw inbox-list entry as a message object, or null when it is not JSON or not a JSON object. */
 export const parseQueueEntry = (raw: string): QueueMessage | null => {

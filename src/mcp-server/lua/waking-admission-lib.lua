@@ -16,7 +16,8 @@
 --
 -- adm_entry_wakes is the Lua twin of wakesRecipient/replyOwnerKey/
 -- parseQueueEntry in src/core/inbox-events.ts (tests/waking-admission.test.ts
--- checks they agree). Refusal reasons: 'waking_full' | 'full' | 'oversize'.
+-- checks they agree): a reply wakes only when `from` and `payload.in_reply_to`
+-- are non-empty strings and the outstanding owner equals `from`. Refusal reasons: 'waking_full' | 'full' | 'oversize'.
 local ADM_CEILING = 1024
 
 -- JavaScript truthiness of a decoded JSON value (cjson.null is JSON null).
@@ -37,7 +38,7 @@ local function adm_entry_wakes(raw, mailbox, prefix)
   if entry.to ~= mailbox or type(entry.id) ~= 'string' or not adm_truthy(entry.payload) then return false end
   if entry.type == 'task' then return true end
   if entry.type ~= 'result' and entry.type ~= 'error' then return false end
-  if type(entry.payload) ~= 'table' or type(entry.from) ~= 'string' then return false end
+  if type(entry.payload) ~= 'table' or type(entry.from) ~= 'string' or entry.from == '' then return false end
   local in_reply_to = entry.payload.in_reply_to
   if type(in_reply_to) ~= 'string' or in_reply_to == '' then return false end
   return adm_owner(prefix .. mailbox .. ':' .. in_reply_to) == entry.from

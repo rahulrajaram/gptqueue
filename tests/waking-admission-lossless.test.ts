@@ -24,7 +24,13 @@ describe("waking admission: FIFO claims and lossless overshoot", () => {
   const tracked = new Set<string>();
   const track = (...keys: string[]) => { for (const key of keys) tracked.add(key); };
   beforeAll(() => { redis = new Redis(REDIS_URL); claims = new TaskClaimStore(redis); });
-  afterAll(async () => { if (tracked.size > 0) await redis.del(...tracked); redis.disconnect(); });
+  /** Claims this file took and did not recover, acknowledged before teardown deletes their indexes. */
+  const taken: { actor_id: string; claim_id: string }[] = [];
+  afterAll(async () => {
+    for (const { actor_id, claim_id } of taken) await claims.acknowledge({ actor_id, claim_id, session_id: "s-wl" });
+    if (tracked.size > 0) await redis.del(...tracked);
+    redis.disconnect();
+  });
 
   const mailbox = (prefix = "wl") => {
     const to = `${prefix}-${randomUUID().slice(0, 8)}`;
@@ -41,6 +47,7 @@ describe("waking admission: FIFO claims and lossless overshoot", () => {
   const claim = async (actor: string, max_batch: number): Promise<readonly string[]> => {
     const result = await claims.claim({ actor_id: actor, session_id: "s-wl", max_batch, ttl_seconds: 600, now: new Date().toISOString() });
     if (!result.ok) throw new Error(JSON.stringify(result.error));
+    if (result.claim) taken.push({ actor_id: actor, claim_id: result.claim.claim_id });
     return result.claim?.tasks ?? [];
   };
 
@@ -138,4 +145,32 @@ describe("waking admission: FIFO claims and lossless overshoot", () => {
       }
     });
   }
+
+  // Baseline-compatible regressions (F2): only the boolean send() and raw list
+  // reads, so on the pre-waking-admission source they fail at the admission
+  // assertion itself (send returned false).
+  it("(R10, baseline API) a task sent behind ten quiet entries is admitted and claimed 11th", async () => {
+    const store = new MailboxStore(redis, redis, 10);
+    const to = mailbox("fifo-b");
+    const quiet = Array.from({ length: 10 }, () => envelope(to, "status"));
+    for (const message of quiet) expect(await store.send(message, 1)).toBe(true);
+    const task = envelope(to, "task");
+    expect(await store.send(task, 1)).toBe(true); // admission assertion
+    expect(await redis.llen(SESSION_KEYS.queue(to))).toBe(11);
+    const first = idsOf(await claim(to, 4));
+    const rest = [...idsOf(await claim(to, 4)), ...idsOf(await claim(to, 4))];
+    expect([...first, ...rest]).toEqual([...quiet.map((m) => m.id), task.id]);
+  });
+
+  it("(R3, baseline API) after a DLQ requeue overshoot a task is still admitted", async () => {
+    const store = new MailboxStore(redis, redis, 3);
+    const to = mailbox();
+    const order = [envelope(to, "task"), ...Array.from({ length: 10 }, () => envelope(to, "status"))];
+    await redis.lpush(DLQ_KEYS.list(to), ...raw(order));
+    for (const message of order) expect(await claims.requeue({ actor_id: to, message_id: message.id })).toEqual({ ok: true, requeued: 1 });
+    expect(await redis.llen(SESSION_KEYS.queue(to))).toBe(11);
+    expect(await store.send(envelope(to, "task"), 1)).toBe(true); // admission assertion
+    expect(await store.send(envelope(to, "status"), 1)).toBe(false);
+    expect(await redis.llen(SESSION_KEYS.queue(to))).toBe(12);
+  });
 });
