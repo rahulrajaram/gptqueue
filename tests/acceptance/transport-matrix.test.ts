@@ -22,14 +22,17 @@ it.skipIf(process.env.GPTQUEUE_TRANSPORT_ACCEPTANCE !== '1')('every ordered stdi
     return r.structuredContent as Record<string, any>;
   };
   try {
-    // Port 8199 is exclusively owned by this run; never attach to an existing server.
-    const port = 8199;
-    const net = await import('node:net');
-    const probe = net.createServer();
-    await new Promise<void>((resolve, reject) => { probe.once('error', reject); probe.listen(port, '127.0.0.1', resolve); });
-    await new Promise<void>(resolve => probe.close(() => resolve()));
-    server = spawn(process.execPath, [join(root, 'dist/transports/http.js'), '--port', String(port)],
-      { cwd: directory, env: { ...process.env, REDIS_URL: redisUrl }, stdio: ['ignore', 'ignore', 'ignore'] });
+    // An OS-assigned loopback port owned by this run (read from the server's
+    // startup line); never a fixed port, never an existing server.
+    server = spawn(process.execPath, [join(root, 'dist/transports/http.js'), '--port', '0'],
+      { cwd: directory, env: { ...process.env, REDIS_URL: redisUrl, GPTQUEUE_HTTP_SOCKET: '', GPTQUEUE_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'ignore'] });
+    let startup = '';
+    server.stdout!.on('data', (chunk: Buffer) => { startup = (startup + String(chunk)).slice(-4_000); });
+    const port = await until(async () => {
+      if (server!.exitCode !== null) throw new Error('Owned HTTP fixture exited');
+      const bound = /gptqueue HTTP server listening on 127\.0\.0\.1:(\d+)/u.exec(startup)?.[1];
+      return bound === undefined ? undefined : Number(bound);
+    }, value => value !== undefined) as number;
     await until(async () => {
       if (server!.exitCode !== null) throw new Error('Owned HTTP fixture exited');
       try { return (await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) })).ok; } catch { return false; }

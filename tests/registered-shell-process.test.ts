@@ -1,11 +1,14 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { spawn } from "node:child_process";
 import { createServer, type Socket } from "node:net";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { Redis } from "ioredis";
 import { describe, expect, it } from "vitest";
 import { SESSION_KEYS } from "../src/core/keys.js";
 
-const launch = (url = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15") => {
+const launch = (url = testRedisUrl()) => {
   const child = spawn(process.execPath, [resolve("bin/gptqueue-session"), "--client", "codex", "--redis-url", url], { stdio: "pipe" });
   let stderr = "";
   const done = new Promise<{ code: number | null; signal: string | null }>((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
@@ -33,7 +36,7 @@ const launch = (url = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15") => {
 describe("registered stdio process lifetime", () => {
   it.each([{ event: "EOF", code: 0 }, { event: "SIGINT", code: 130 }, { event: "SIGTERM", code: 143 }] as const)(
     "retires its session on $event and exits $code", async ({ event, code }) => {
-      const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15");
+      const redis = new Redis(testRedisUrl());
       const job = launch(); let name: string | undefined;
       try {
         name = await job.ready;
@@ -55,18 +58,21 @@ describe("registered stdio process lifetime", () => {
     }
   );
   it("honors SIGTERM while Redis startup is blocked", async () => {
+    // A silent listener on a private unix socket (no TCP): accepts, never answers.
+    const dir = mkdtempSync(join(tmpdir(), "gptq-blocked-redis-"));
+    const path = join(dir, "blocked.sock");
     const sockets = new Set<Socket>(); let connected!: () => void;
     const accepted = new Promise<void>((resolve) => { connected = resolve; });
     const server = createServer((socket) => { sockets.add(socket); socket.resume(); connected(); });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address(); if (!address || typeof address === "string") throw new Error("No port");
-    const job = launch(`redis://127.0.0.1:${address.port}/15`);
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+    const job = launch(`${path}?db=15`);
     try {
       await accepted; job.child.kill("SIGTERM");
       expect(await job.done).toEqual({ code: 143, signal: null });
     } finally {
       job.child.kill("SIGKILL"); for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

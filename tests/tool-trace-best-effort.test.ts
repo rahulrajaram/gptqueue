@@ -3,6 +3,7 @@
  * failing trace write must never fail the tool call: the claim, ack and send
  * are already committed.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
@@ -14,7 +15,7 @@ import { registerTools } from "../src/transports/setup-tools.js";
 import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const URL = testRedisUrl();
 const payload = (result: Awaited<ReturnType<Client["callTool"]>>) =>
   JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
 

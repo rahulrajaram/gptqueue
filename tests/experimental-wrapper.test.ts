@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
@@ -30,7 +31,7 @@ import {
 import { acquireWrapperIdentityClaim } from "../src/experimental-wrapper/identity-claim.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 const REPOSITORY_ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
   ".."

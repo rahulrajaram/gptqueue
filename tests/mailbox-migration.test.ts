@@ -10,6 +10,7 @@
  *     new session exists AND the transfer has completed, rolling the new
  *     session back on transfer failure so the old name is untouched.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
@@ -18,7 +19,7 @@ import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { SessionStore } from "../src/core/session-store.js";
 import { CLAIM_KEYS, DLQ_KEYS, DLQ_PROVISIONAL, SESSION_KEYS, SESSION_DEFAULTS } from "../src/core/keys.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 /** Raw seeded message payloads with stable, assertable identities. */
 const msg = (i: number) => JSON.stringify({ id: `m${i}`, type: "task" });

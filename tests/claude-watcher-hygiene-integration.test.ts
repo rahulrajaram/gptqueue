@@ -9,6 +9,7 @@
  * that calls runPeek (as bin/gptqueue-inbox-peek does) and writes the code
  * it returns to a file.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -20,7 +21,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { publishSessionRecord, readProcess, watcherPidPath } from "../src/claude/session-record.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const REDIS_URL = testRedisUrl();
 const ROOT = resolve(__dirname, "..");
 const BIN = join(ROOT, "bin");
 let home = "";

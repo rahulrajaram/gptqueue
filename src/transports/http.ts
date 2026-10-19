@@ -289,11 +289,15 @@ if (udsSocketPath) {
     console.log(`  Health check: http://unix:${udsSocketPath}/health`);
   });
 } else {
-  app.listen(port, host, () => {
-    console.log(`gptqueue HTTP server listening on ${host}:${port}`);
+  const listener = app.listen(port, host, () => {
+    // Report the bound port: with --port 0 the OS assigns one (identical
+    // output for any explicit port).
+    const address = listener.address();
+    const bound = address !== null && typeof address === "object" ? address.port : port;
+    console.log(`gptqueue HTTP server listening on ${host}:${bound}`);
     console.log(`  token auth: ${tokenActive ? "active" : "disabled"}`);
-    console.log(`  MCP endpoint: http://${host}:${port}/mcp`);
-    console.log(`  Health check: http://${host}:${port}/health`);
+    console.log(`  MCP endpoint: http://${host}:${bound}/mcp`);
+    console.log(`  Health check: http://${host}:${bound}/health`);
   });
 }
 

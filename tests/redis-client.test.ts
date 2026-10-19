@@ -1,9 +1,10 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 /** Flush all gptq:* keys used by tests. */
 

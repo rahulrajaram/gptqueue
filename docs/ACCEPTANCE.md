@@ -121,7 +121,7 @@ changing the total.
 The default local command is:
 
 ```sh
-REDIS_URL=redis://127.0.0.1:6379/15 npx --no-install vitest run tests/acceptance
+npx --no-install vitest run tests/acceptance
 ```
 
 The default run executes the pure oracle tests. Live
@@ -152,7 +152,6 @@ To enforce acceptance after generating the report, add
 
 ```sh
 GPTQUEUE_ACCEPTANCE_REPORT=1 GPTQUEUE_ACCEPTANCE_ENFORCE=1 \
-  REDIS_URL=redis://127.0.0.1:6379/15 \
   npx --no-install vitest run tests/acceptance/evidence-report.test.ts
 ```
 

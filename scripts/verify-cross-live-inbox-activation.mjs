@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Real Pi SDK, live inference and registered sidecars; queue writes use db15 only.
+// Real Pi SDK, live inference and registered sidecars; queue writes use a private socket-only Redis (db15) owned by this run.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
+import { startOwnedRedis } from './lib/owned-redis.mjs';
 import { createRegisteredPiExtension } from '../dist/registered-shell/pi-extension.js';
 
 import { execFileSync } from 'node:child_process';
@@ -27,7 +28,9 @@ const sessions = new Map();
 const errors = [];
 const publicContent = content => Array.isArray(content)
   ? content.filter(c => c.type === 'text' || c.type === 'toolCall') : content;
-const redis = new Redis('redis://127.0.0.1:6379/15');
+// Private socket-only Redis for this run (scripts/lib/owned-redis.mjs), never a shared server.
+const privateRedis = await startOwnedRedis();
+const redis = new Redis(privateRedis.url);
 const tool = async (session, name, args = {}) => {
   const definition = session.agent.state.tools.find(item => item.name === name);
   assert.ok(definition, `Missing ${name}`);
@@ -61,7 +64,7 @@ Object.assign(config, {
   'mcp_servers.gptqueue-shared.enabled': true,
   'mcp_servers.gptqueue-shared.required': true,
   'mcp_servers.gptqueue-shared.command': process.execPath,
-  'mcp_servers.gptqueue-shared.args': [join(root, 'bin/gptqueue-session'), '--client', 'codex', '--redis-url', 'redis://127.0.0.1:6379/15'],
+  'mcp_servers.gptqueue-shared.args': [join(root, 'bin/gptqueue-session'), '--client', 'codex', '--redis-url', privateRedis.url],
   'model_reasoning_effort': 'low',
 });
 
@@ -81,7 +84,7 @@ try {
         'with in_reply_to equal to task.id and idempotency_key equal to task.id, then acknowledge the claim. ' +
         'For a result, acknowledge the claim without replying and say SENDER_RECEIVED_42 if its content is 42. ' +
         'Do not contact agents except the sender of your claimed task. Do not access files or execute commands.',
-      extensionFactories: [createRegisteredPiExtension({ redisUrl: 'redis://127.0.0.1:6379/15',
+      extensionFactories: [createRegisteredPiExtension({ redisUrl: privateRedis.url,
         nodePath: process.execPath, sidecarPath: join(root, 'bin/gptqueue-session') })] });
     await loader.reload();
     assert.deepEqual(loader.getExtensions().errors, []);
@@ -209,6 +212,7 @@ try {
   }
   process.chdir(previousCwd);
   await redis.quit();
+  await privateRedis.close();
   await rpc.close();
   const output = join(directory, 'receipt.json');
   await writeFile(output, JSON.stringify(receipt, null, 2) + '\n');

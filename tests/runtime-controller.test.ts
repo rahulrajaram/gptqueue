@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
@@ -6,7 +7,7 @@ import type { RuntimeAdapter, RuntimeBinding } from "../src/registered-shell/run
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { TaskClaimStore } from "../src/core/task-claim-store.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 const WORKDIR = "/tmp/runtime-controller-test";
 
 /** Drives the bind_runtime controller state machine end to end against Redis. */

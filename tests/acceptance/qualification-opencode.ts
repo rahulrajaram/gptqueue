@@ -1,3 +1,4 @@
+import { privateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -500,14 +501,8 @@ const cleanupPaths = (paths: readonly string[]): void => {
   for (const path of paths) rmSync(path, { recursive: true, force: true });
 };
 
-const validateRedisUrl = (redisUrl: string): void => {
-  let parsed: URL;
-  try { parsed = new URL(redisUrl); } catch { throw new Error("OpenCode qualification requires a valid Redis URL"); }
-  if (parsed.protocol !== "redis:" || parsed.hostname !== "127.0.0.1" || parsed.username || parsed.password) {
-    throw new Error("OpenCode qualification requires unauthenticated local Redis at 127.0.0.1");
-  }
-  if (parsed.pathname !== "/15") throw new Error("OpenCode qualification requires Redis database 15");
-};
+/** Only an owned private socket Redis (scripts/lib/owned-redis.mjs); every TCP URL is refused. */
+const validateRedisUrl = (redisUrl: string): void => { privateRedisUrl(redisUrl); };
 
 type RegistryBindingEvidence = Readonly<{
   agent: string;

@@ -98,10 +98,12 @@ node bin/gptqueue-experiment pi \
   -- 'Call list_agents and report whether gptqueue-experiment-pi is present.'
 ```
 
-The wrapper defaults to Redis db14 so a live experiment does not collide with
-this repository's db15 test cleanup, and it refuses db0 even when explicitly
+The wrapper defaults to Redis db14, and it refuses db0 even when explicitly
 requested. The `REDIS_URL` environment variable is not used as an implicit
-override; pass `--redis-url` when selecting another isolated database. The
+override; pass `--redis-url` when selecting another isolated database, either as
+`redis://host[:port]/<db>` or as a unix socket path
+`/path/redis.sock?db=<1-15>` (a socket path without `?db=` selects db0 and is
+refused). The
 destructive `--cleanup unregister` mode additionally requires a fresh name
 starting with `gptqueue-experiment-`; the wrapper refuses a pre-existing name.
 All modes refuse a name already claimed by another wrapper or backed by an
@@ -114,24 +116,24 @@ nonzero and closes its connections without deleting state it no longer owns.
 
 ## Repeatable verification
 
-Run the focused regression suite on db15 directly with Node/vitest:
+Run the focused regression suite directly with Node/vitest:
 
 ```sh
 npm run build
-REDIS_URL=redis://127.0.0.1:6379/15 node node_modules/vitest/vitest.mjs run \
-  tests/experimental-wrapper*.test.ts
+node node_modules/vitest/vitest.mjs run tests/experimental-wrapper*.test.ts
 ```
 
-Pass `REDIS_URL` explicitly in the same command so the vitest process always
-runs against the isolated db15 test database.
+Vitest starts its own private, socket-only Redis for the run
+(`docs/OPERATING_RULES.md` §10); there is no Redis URL to pass.
 
 The suite covers cancellation followed by delayed delivery, concurrent receive
 isolation, transport deletion, bridge shutdown, the Pi tool filter and startup
 gate, forged session IDs, explicitly seeded private environment variables, and
 connection cleanup after identity-claim loss.
 
-With permission to use the installed CLIs/model providers and disposable db14
-identities, run the Linux-local live verifier:
+With permission to use the installed CLIs/model providers, run the Linux-local
+live verifier. It starts its own private, socket-only Redis and uses db14 there,
+so it never touches a shared server:
 
 ```sh
 node scripts/verify-registered-wrapper.mjs --live

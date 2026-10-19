@@ -1,3 +1,4 @@
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { sanitizeEvidence } from './public-evidence.js';
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -10,7 +11,7 @@ import { homePath } from "./local-tools.js";
 export const repo = process.cwd();
 export const opencodeBin = process.env.OPENCODE_BIN ?? homePath(".opencode/bin/opencode");
 export const model = "zai-coding-plan/glm-5.3";
-export const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+export const redisUrl = testRedisUrl();
 export const mcpEntry = join(repo, "dist/mcp-server/index.js");
 export const timeoutMs = Math.min(300_000, Math.max(60_000, Number(process.env.GPTQUEUE_OPENCODE_TIMEOUT_MS ?? 240_000)));
 export const modelsPath = homePath(".cache/opencode/models.json");

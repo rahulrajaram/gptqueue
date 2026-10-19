@@ -1,6 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WRAPPER_VISIBLE_TOOLS } from "./bridge.js";
+import { parseRedisSocketUrl } from "../core/redis-socket-url.js";
 
 export type WrappedClient = "codex" | "pi";
 export type CleanupMode = "close" | "unregister";
@@ -39,6 +40,7 @@ export const usage = (): string =>
     "Usage:",
     "  gptqueue-experiment <codex|pi> --agent <name> --workspace <path>",
     "    [--description <text>] [--redis-url <non-db0-url>]",
+    "  --redis-url: redis://host[:port]/<db> or a unix socket /path/redis.sock?db=<1-15>",
     "    [--cleanup <close|unregister>] [--model <model>] -- <prompt>",
   ].join("\n");
 
@@ -118,6 +120,9 @@ const requireSafeAgentName = (value: string | undefined): string => {
 };
 
 const redisDatabase = (redisUrl: string): number => {
+  // Unix-socket form (/abs/path.sock[?db=N], db 0 when omitted); throws on a malformed one.
+  const socket = parseRedisSocketUrl(redisUrl);
+  if (socket) return socket.db;
   const parsed = new URL(redisUrl);
   if (parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
     throw new Error(`Redis URL must use redis:// or rediss://: ${redisUrl}`);

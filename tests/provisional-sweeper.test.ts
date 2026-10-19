@@ -2,6 +2,7 @@
  * DL-2 / AC-1: a sidecar that dies before adopting its bound mailbox (no
  * close()) must not strand work a peer sent to its provisional name.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
@@ -12,7 +13,7 @@ import { InboxEvents } from "../src/core/inbox-events.js";
 import { RECIPIENT_RETIRED, reservedSenderRegistrations, retireProvisional, sweepProvisional } from "../src/core/provisional-sweeper.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const URL = testRedisUrl();
 
 describe("provisional identity sweeper (DL-2 / AC-1)", () => {
   let redis: Redis;

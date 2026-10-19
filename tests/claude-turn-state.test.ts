@@ -3,6 +3,7 @@
  * Spawns the real built gptqueue-claude-hook; this test process plays the
  * Claude process whose session record names the agent.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -14,10 +15,10 @@ import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { publishSessionRecord, readProcess } from "../src/claude/session-record.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { TurnStateStore } from "../src/core/turn-state.js";
-import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "claude-turn-state");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "claude-turn-state");
 const BIN = resolve(__dirname, "..", "bin");
 
 let home = "";

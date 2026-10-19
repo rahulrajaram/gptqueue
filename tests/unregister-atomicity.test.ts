@@ -10,6 +10,7 @@
  * register and claim after EVERY command the retiring connection issues, and
  * requires the new owner's state to survive.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
@@ -17,7 +18,7 @@ import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { acquireWrapperIdentityClaim } from "../src/experimental-wrapper/identity-claim.js";
 import { CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 type SendCommand = (command: unknown, stream?: unknown) => Promise<unknown>;
 

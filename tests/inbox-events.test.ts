@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { Redis } from "ioredis";
 import { InboxEvents } from "../src/core/inbox-events.js";
@@ -7,7 +8,7 @@ import type { QueueMessage } from "../src/mcp-server/types.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
 describe("InboxEvents", () => {
-  const url = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+  const url = testRedisUrl();
   let redis: Redis;
   let subscriber: Redis;
   let store: MailboxStore;

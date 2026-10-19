@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID, createHash } from "node:crypto";
 import { Redis } from "ioredis";
@@ -7,11 +8,11 @@ import { OCCUPANCY_SIGNALS } from "../src/core/occupancy-guard.js";
 import { restoreRuntimeMailbox, RuntimeMailboxAdoptionRefused } from "../src/registered-shell/runtime-mailbox.js";
 import { AdoptionRefusedError } from "../src/core/adoption-refusal.js";
 import type { RuntimeBinding } from "../src/registered-shell/runtime.js";
-import { flushTestKeys, assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { flushTestKeys, assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 
-const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
-assertNotLiveDb(redisUrl, "mailbox continuity tests");
+const redisUrl = testRedisUrl();
+assertPrivateTestRedis(redisUrl, "mailbox continuity tests");
 const clients: RedisClient[] = [];
 const connections: Redis[] = [];
 const binding = (id = randomUUID()): RuntimeBinding => ({

@@ -2,13 +2,16 @@
  * Shared integration-test server harness.
  *
  * Builds the project once (module-level guard), spawns the real HTTP MCP server
- * (`dist/transports/http.js`) on port 8199 against an ISOLATED Redis database
- * (db15), and returns handles for talking to it over the wire plus a direct
- * ioredis client on the same db for raw assertions.
+ * (`dist/transports/http.js`) on an OS-assigned loopback port (`--port 0`; the
+ * bound port is read from the server's startup line, so concurrent runs never
+ * collide) against the run's PRIVATE socket-only Redis, and returns handles for
+ * talking to it over the wire plus a direct ioredis client on the same
+ * database for raw assertions.
  *
- * Isolation contract: every key we read/write lives under `gptq:*` on db15.
- * We NEVER use db0 (that is the live server's database) and we never call
- * FLUSHDB — only key deletions scoped to `gptq:*` via SCAN.
+ * Isolation contract: the Redis target is the run's private instance
+ * (tests/helpers/test-redis.ts; any TCP URL is refused), every key we
+ * read/write lives under `gptq:*`, and we never call FLUSHDB — only key
+ * deletions scoped to `gptq:*` via SCAN.
  *
  * The server child and the direct redis handle are shared across suite files
  * through a process-global singleton with a reference count so two files can
@@ -22,6 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./redis-test-utils.js";
+import { testRedisUrl } from "./test-redis.js";
 import { WAKE_SLEEPY_SCRIPT, WAKE_EXIT_SCRIPT } from "./wake-launch.js";
 
 // ---- Launch-allowlist scaffold for the spawned server --------------------
@@ -63,13 +67,10 @@ writeFileSync(
 chmodSync(allowlistPath, 0o600);
 
 // ---- Constants (kept together so the isolation story is auditable) -------
-export const INTEGRATION_PORT = 8199;
-export const INTEGRATION_REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
-if (new URL(INTEGRATION_REDIS_URL).pathname !== "/15") {
-  throw new Error("GPTQueue integration tests require isolated Redis database 15");
-}
-const BASE = `http://127.0.0.1:${INTEGRATION_PORT}/mcp`;
-const HEALTH = `http://127.0.0.1:${INTEGRATION_PORT}/health`;
+/** The run's private socket Redis (validated; refuses TCP). */
+export const INTEGRATION_REDIS_URL = testRedisUrl();
+/** The server's startup line; with --port 0 it names the OS-assigned port. */
+const LISTENING = /gptqueue HTTP server listening on 127\.0\.0\.1:(\d+)/u;
 const ROOT = new URL("../..", import.meta.url).pathname;
 
 // Module-level build guard so the whole vitest run builds exactly once.
@@ -84,11 +85,13 @@ function ensureBuilt(): Promise<void> {
 }
 
 export interface IntegrationServer {
-  /** MCP endpoint base URL for the spawned server. */
+  /** MCP endpoint base URL for the spawned server (OS-assigned port). */
   baseUrl: string;
-  /** Direct ioredis client on db15 for raw assertions / Lua evals. */
+  /** The OS-assigned loopback port the server bound. */
+  port: number;
+  /** Direct ioredis client on the private test Redis for raw assertions / Lua evals. */
   redis: Redis;
-  /** Scan+del every `gptq:*` key on db15 (never FLUSHDB, never db0). */
+  /** Scan+del every `gptq:*` key on the private test Redis (never FLUSHDB). */
   flushGptqKeys: () => Promise<void>;
   /** Tear down: drops one ref; kills the child + closes redis at ref 0. */
   cleanup: () => Promise<void>;
@@ -96,6 +99,7 @@ export interface IntegrationServer {
 
 interface Singleton {
   server: ChildProcess;
+  port: number | undefined;
   redis: Redis;
   refs: number;
   closing: boolean;
@@ -103,15 +107,13 @@ interface Singleton {
   stderr: string;
 }
 
-const GLOBAL_KEY = "__GPTQ_INTEGRATION_SERVER_V1__";
+const GLOBAL_KEY = "__GPTQ_INTEGRATION_SERVER_V2__";
 type Glob = typeof globalThis & { [GLOBAL_KEY]?: Singleton };
 
 /** Scan-based deletion of gptq:* keys on a given client + db. Never FLUSHDB. */
 export async function flushGptqKeys(redis: Redis): Promise<void> {
-  // Route through the shared guarded flush. The integration server is
-  // constrained to db15, so the db0 guard always passes here; keeping the call
-  // in one place guarantees this helper can never be pointed at the live
-  // server's database by accident (M11).
+  // Route through the shared guarded flush: it accepts only the run's private
+  // socket Redis and checks the client's actual connection (M11).
   await flushTestKeys(redis, INTEGRATION_REDIS_URL);
 }
 
@@ -132,13 +134,16 @@ export async function setupIntegrationServer(): Promise<IntegrationServer> {
   // ---- Fresh startup -----------------------------------------------------
   const server = spawn(
     process.execPath,
-    ["dist/transports/http.js", "--port", String(INTEGRATION_PORT)],
+    ["dist/transports/http.js", "--port", "0"],
     {
       cwd: ROOT,
       env: {
         ...process.env,
         REDIS_URL: INTEGRATION_REDIS_URL,
         GPTQUEUE_LAUNCH_ALLOWLIST: allowlistPath,
+        // TCP mode on loopback only; never inherit a socket or host override.
+        GPTQUEUE_HTTP_SOCKET: "",
+        GPTQUEUE_HOST: "127.0.0.1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     }
@@ -146,6 +151,7 @@ export async function setupIntegrationServer(): Promise<IntegrationServer> {
 
   const singleton: Singleton = {
     server,
+    port: undefined,
     redis: new Redis(INTEGRATION_REDIS_URL, { maxRetriesPerRequest: 3 }),
     refs: 1,
     closing: false,
@@ -154,6 +160,8 @@ export async function setupIntegrationServer(): Promise<IntegrationServer> {
   };
   server.stdout?.on("data", (d: Buffer) => {
     singleton.stdout = (singleton.stdout + d.toString()).slice(-4000);
+    const bound = LISTENING.exec(singleton.stdout)?.[1];
+    if (singleton.port === undefined && bound !== undefined) singleton.port = Number(bound);
   });
   server.stderr?.on("data", (d: Buffer) => {
     singleton.stderr = (singleton.stderr + d.toString()).slice(-4000);
@@ -178,8 +186,12 @@ export async function setupIntegrationServer(): Promise<IntegrationServer> {
     if (singleton.server.exitCode !== null) {
       break; // child died early
     }
+    if (singleton.port === undefined) {
+      await new Promise((r) => setTimeout(r, 50));
+      continue; // not listening yet
+    }
     try {
-      const res = await fetch(HEALTH, { signal: AbortSignal.timeout(1000) });
+      const res = await fetch(`http://127.0.0.1:${singleton.port}/health`, { signal: AbortSignal.timeout(1000) });
       if (res.ok) {
         const body = (await res.json()) as { status: string };
         if (body.status === "ok") {
@@ -201,7 +213,7 @@ export async function setupIntegrationServer(): Promise<IntegrationServer> {
     }
     await singleton.redis.quit().catch(() => {});
     throw new Error(
-      `integration server on :${INTEGRATION_PORT} failed to become healthy.\n` +
+      `integration server (port ${singleton.port ?? "not bound"}) failed to become healthy.\n` +
         `exit=${singleton.server.exitCode}\nSTDOUT:\n${singleton.stdout}\nSTDERR:\n${singleton.stderr}`
     );
   }
@@ -211,8 +223,10 @@ export async function setupIntegrationServer(): Promise<IntegrationServer> {
 }
 
 function makeHandle(s: Singleton): IntegrationServer {
+  if (s.port === undefined) throw new Error("integration server has no bound port");
   return {
-    baseUrl: BASE,
+    baseUrl: `http://127.0.0.1:${s.port}/mcp`,
+    port: s.port,
     redis: s.redis,
     flushGptqKeys: () => flushGptqKeys(s.redis),
     cleanup: async () => {

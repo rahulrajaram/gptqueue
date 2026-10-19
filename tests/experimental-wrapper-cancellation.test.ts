@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -7,7 +8,7 @@ import { startBoundBridge, type BoundBridge } from "../src/experimental-wrapper/
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 const payload = (result: Awaited<ReturnType<Client["callTool"]>>) =>
   JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
 

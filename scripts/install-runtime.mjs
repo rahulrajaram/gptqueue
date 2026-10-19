@@ -36,7 +36,8 @@ const print = (value) => console.log(typeof value === "string" ? value : JSON.st
 async function main(command) {
   switch (command) {
     case "install": {
-      const redis = await startOwnedRedis({ stderr: "ignore" });
+      // Private socket-only Redis (no TCP); verification children get its URL.
+      const redis = await startOwnedRedis();
       // A signal aimed at this pid alone must not orphan Redis or the
       // verification children (the default action skips finally and "exit").
       // A signal that arrives during the synchronous npm install is handled
@@ -50,7 +51,7 @@ async function main(command) {
           initBoundMs: Number(values["init-bound-ms"]), hookBoundMs: Number(values["hook-bound-ms"]),
           activateRelease: !values["no-activate"],
         });
-      } finally { redis.stop(); }
+      } finally { await redis.close(); }
     }
     case "status": return status(prefix);
     case "rollback": return rollback(prefix);

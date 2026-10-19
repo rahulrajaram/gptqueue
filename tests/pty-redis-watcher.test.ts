@@ -1,10 +1,11 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeAll, afterAll, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 import { RedisWatcher } from "../src/pty-wrapper/redis-watcher.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 describe("PTY RedisWatcher", () => {
   let redis: Redis;

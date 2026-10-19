@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { createServer, type Socket } from "node:net";
@@ -12,11 +13,11 @@ import { SESSION_KEYS, SYSTEM_SENDER } from "../src/core/keys.js";
 import { TurnStateStore } from "../src/core/turn-state.js";
 import { runWatchdog, WATCHDOG_KEYS, WATCHDOG_LAST_PASS, WATCHDOG_LAST_SUBSTANTIVE_PASS, WATCHDOG_PASS_LOCK, type WatchdogReport, type WatchdogResult } from "../src/core/watchdog-shell.js";
 import { TASK_LEDGER_TTL_SECONDS, taskLedgerKey } from "../src/core/task-ledger.js";
-import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 import type { QueueMessage } from "../src/core/types.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "watchdog-integration");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "watchdog-integration");
 
 const OUTSTANDING_TTL_MS = 604800 * 1000;
 const reportOf = (result: WatchdogResult): WatchdogReport => {
@@ -565,12 +566,13 @@ describe("watchdog --once against Redis db 15", () => {
 
   it("S7: a Redis that goes silent after connect ends the pass at its deadline with exit 1", async () => {
     const sockets: Socket[] = [];
+    // A silent Redis on a private unix socket (no TCP listener).
+    const silentSocket = join(dir, "silent-redis.sock");
     const silent = createServer((socket) => { sockets.push(socket); });
-    await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
-    const port = (silent.address() as { port: number }).port;
+    await new Promise<void>((r) => silent.listen(silentSocket, r));
     try {
       const started = Date.now();
-      const result = await runWatchdog({ configPath: await writeConfig(config(["x"], "r", null)), dryRun: false, redisUrl: `redis://127.0.0.1:${port}/15`,
+      const result = await runWatchdog({ configPath: await writeConfig(config(["x"], "r", null)), dryRun: false, redisUrl: `${silentSocket}?db=15`,
         stateHome: join(dir, "state-silent"), configHome: join(dir, "no-alerts"), passDeadlineMs: 1_500 });
       expect(result).toMatchObject({ exitCode: 1, output: { error: "pass_deadline" } });
       expect(Date.now() - started).toBeLessThan(3_000);

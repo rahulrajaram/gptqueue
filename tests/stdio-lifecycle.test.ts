@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -6,7 +7,7 @@ import { Redis } from "ioredis";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 const ROOT = resolve(import.meta.dirname, "..");
 
 describe("stdio server lifecycle", () => {

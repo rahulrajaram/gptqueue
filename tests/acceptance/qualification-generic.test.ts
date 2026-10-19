@@ -1,3 +1,4 @@
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { describe, expect, it } from "vitest";
 import { assertPrivateRedisUrl, createGenericAdapters, sanitizeGenericValue } from "./qualification-generic.js";
 import { collectPeerDiscovery } from "./qualification-discovery.js";
@@ -12,11 +13,11 @@ import { tmpdir } from "node:os";
 import type { GenericParticipant, RawEvidenceRef } from "./qualification-types.js";
 
 describe("generic qualification adapters", () => {
-  it("requires an owned loopback Redis DB15 URL", () => {
-    expect(assertPrivateRedisUrl("redis://127.0.0.1:6379/15").pathname).toBe("/15");
-    expect(() => assertPrivateRedisUrl("redis://127.0.0.1:6379/0")).toThrow(/private loopback/);
-    expect(() => assertPrivateRedisUrl("redis://example.test:6379/15")).toThrow(/private loopback/);
-    expect(() => assertPrivateRedisUrl("redis://:secret@127.0.0.1:6379/15")).toThrow(/without credentials/);
+  it("requires the owned private socket Redis and refuses every TCP URL", () => {
+    expect(assertPrivateRedisUrl(testRedisUrl()).db).toBe(15);
+    for (const tcp of ["redis://127.0.0.1:6379/15", "redis://127.0.0.1:6379/0", "redis://example.test:6379/15", "redis://:secret@127.0.0.1:6379/15"]) {
+      expect(() => assertPrivateRedisUrl(tcp)).toThrow(/private unix-socket instance/u);
+    }
   });
 
   it("redacts session and credential fields recursively", () => {

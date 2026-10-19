@@ -1,3 +1,4 @@
+import { parsePrivateRedisUrl, privateRedisUrl, type PrivateRedisTarget } from "../../scripts/lib/owned-redis.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -42,11 +43,8 @@ const timeout = async <T>(promise: Promise<T>, signal: AbortSignal, ms: number):
   }
 };
 
-export const assertPrivateRedisUrl = (redisUrl: string): URL => {
-  const parsed = new URL(redisUrl);
-  if (parsed.protocol !== "redis:" || parsed.hostname !== "127.0.0.1" || parsed.pathname !== "/15" || parsed.username || parsed.password) throw new Error("generic qualification requires private loopback Redis database 15 without credentials");
-  return parsed;
-};
+/** Only an owned private socket Redis (scripts/lib/owned-redis.mjs); every TCP URL is refused. */
+export const assertPrivateRedisUrl = (redisUrl: string): PrivateRedisTarget => parsePrivateRedisUrl(privateRedisUrl(redisUrl));
 
 const residualSecretKey = /(?:token|redis[_-]?url)/iu;
 const redactResidual = (value: unknown): unknown => {

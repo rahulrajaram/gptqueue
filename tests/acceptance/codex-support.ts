@@ -1,3 +1,4 @@
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,7 +9,7 @@ import { CodexSocketClient } from "../../src/registered-shell/codex-socket.js";
 import { CodexThreadReader } from "../../src/registered-shell/codex-history.js";
 
 export const enabled = process.env.GPTQUEUE_ACCEPTANCE_CODEX === "1";
-export const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+export const redisUrl = testRedisUrl();
 export const repo = resolve(import.meta.dirname, "../..");
 export const artifactRoot = join(repo, ".gptqueue/acceptance/20260912-evaluation/codex");
 export const runId = randomUUID();

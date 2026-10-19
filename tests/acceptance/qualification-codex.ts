@@ -1,3 +1,4 @@
+import { privateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { constants, existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -170,13 +171,8 @@ const waitForPath = async (path: string, child: ChildProcess, signal: AbortSigna
   }
 };
 
-export const validateCodexRedisUrl = (value: string): void => {
-  let parsed: URL;
-  try { parsed = new URL(value); } catch { throw new Error("Codex qualification requires a valid Redis URL"); }
-  if (parsed.protocol !== "redis:" || !["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname) || parsed.pathname !== "/15" || parsed.username || parsed.password) {
-    throw new Error("Codex qualification requires an unauthenticated loopback Redis db15 URL");
-  }
-};
+/** Only an owned private socket Redis (scripts/lib/owned-redis.mjs); every TCP URL is refused. */
+export const validateCodexRedisUrl = (value: string): void => { privateRedisUrl(value); };
 
 const createHost = (options: CodexOptions): CodexHost => {
   let session: HostSession | undefined;

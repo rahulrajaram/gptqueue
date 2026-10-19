@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { Redis } from "ioredis";
@@ -8,7 +9,7 @@ import { SESSION_KEYS } from "../src/core/keys.js";
 import { GptQueueError } from "../src/mcp-server/errors.js";
 import { sessionTag } from "../src/core/session-tag.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 
 /** A pid that existed and has exited on this host. */

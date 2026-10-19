@@ -5,6 +5,7 @@
  * (the sidecar then retires and retries under a new provisional name) nor a
  * successful one may strand a message accepted for it.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
@@ -19,7 +20,7 @@ import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { retireProvisional } from "../src/core/provisional-sweeper.js";
 import type { RuntimeBinding } from "../src/registered-shell/runtime.js";
 
-const URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const URL = testRedisUrl();
 const binding: RuntimeBinding = { client: "pi", runtime_id: "pi-session-1", epoch: "e1", working_directory: "/workspace/project" };
 const task = (to: string, id: string) => ({ id, from: "peer", to, timestamp: new Date().toISOString(), type: "task" as const, payload: { content: id } });
 const ids = async (redis: Redis, agent: string) =>

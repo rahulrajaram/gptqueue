@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { Redis } from "ioredis";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { SESSION_KEYS } from "../src/core/keys.js";
@@ -10,7 +11,7 @@ import {
 import type { OpenCodeRuntimePort } from "../src/registered-shell/opencode-runtime.js";
 import type { OpenCodeSessionBackend, OpenCodeSessionIdentity } from "../src/registered-shell/opencode-sessions.js";
 
-const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const REDIS_URL = testRedisUrl();
 const redis = new Redis(REDIS_URL);
 const live: Array<{ close(): Promise<void> }> = [];
 const unique = (label: string) => `${label}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;

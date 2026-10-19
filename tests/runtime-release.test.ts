@@ -2,6 +2,7 @@
 // Installs into temp prefixes from a fixture git checkout built from this
 // worktree's dist/, bin/ and package files. Verification runs the real
 // release against the private Redis from with-owned-redis.mjs.
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -17,7 +18,7 @@ import * as rr from "../scripts/lib/runtime-release.mjs";
 import { buildPlan, renderPlan } from "../scripts/lib/runtime-plan.mjs";
 
 const REPO = process.cwd();
-const REDIS_URL = process.env.REDIS_URL!;
+const REDIS_URL = testRedisUrl();
 const scratch = mkdtempSync(join(tmpdir(), "gptq-rt1-"));
 const source = join(scratch, "src-checkout");
 const sha256 = (p: string) => createHash("sha256").update(readFileSync(p)).digest("hex");

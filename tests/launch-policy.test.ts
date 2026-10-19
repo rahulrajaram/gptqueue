@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
@@ -17,7 +18,7 @@ import { dispatchLaunch } from "../src/mcp-server/launcher.js";
 import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
 import { WAKE_SLEEPY_SCRIPT } from "./helpers/wake-launch.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 const T0 = "2030-01-01T00:00:00.000Z";
 
 // ---------------------------------------------------------------------------

@@ -8,8 +8,7 @@ ID-5 distinct identities for two sessions in one directory, and real LT-3
 `GPTQUEUE_LIVE_ACCEPTANCE=1`, so the normal suite is unaffected. They spend real model
 calls; run one file at a time, after `npm run build`:
 
-    GPTQUEUE_LIVE_ACCEPTANCE=1 node scripts/with-owned-redis.mjs -- \
-      npx --no-install vitest run tests/acceptance-live/codex.live.test.ts
+    GPTQUEUE_LIVE_ACCEPTANCE=1 npx --no-install vitest run tests/acceptance-live/codex.live.test.ts
 
 | File | Runtime wiring | Model |
 |---|---|---|
@@ -17,8 +16,9 @@ calls; run one file at a time, after `npm run build`:
 | `pi.live.test.ts` | two `pi --mode rpc` processes in one directory, `-ne -e <generated wrapper of dist/registered-shell/pi-extension.js>`, no skills/context/builtin tools, sessions under the receipt dir; turns observed from RPC `agent_start` / `turn_start` / `turn_end` events | `zai/glm-5.3-flash` |
 | `claude.live.test.ts` | interactive `claude` under a PTY (operator decision D5: it may write only its own transcript under `~/.claude/projects` and update `~/.claude.json`); `--strict-mcp-config` with this build's `bin/gptqueue-claude-mcp`, `--settings` with this build's SessionStart/Stop hooks, `--setting-sources local`; the model starts the `gptqueue-inbox-peek --watch` watcher as the hook says | `claude-opus-5-5` |
 
-Isolation: `support.ts` refuses any Redis other than a private loopback db15 on a
-non-6379 port; gptqueue logs and state for spawned sidecars go to the receipt directory.
+Isolation: vitest starts the run's private socket-only Redis, and `support.ts`
+refuses any other Redis (every TCP URL included); gptqueue logs and state for
+spawned sidecars go to the receipt directory.
 Receipts (`receipt.json`, runtime logs) are written to
 `$GPTQUEUE_LIVE_RECEIPT_DIR/<runtime>-<timestamp>/` (default directory: `gptqueue-live-receipts`
 under the OS temporary directory); they are never committed.

@@ -1,3 +1,4 @@
+import { privateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -92,13 +93,8 @@ const delay = (ms: number, signal: AbortSignal): Promise<void> => new Promise((r
   setTimeout(() => signal.removeEventListener("abort", abort), ms + 1);
 });
 
-export const validatePiRedisUrl = (value: string): void => {
-  let parsed: URL;
-  try { parsed = new URL(value); } catch { throw new Error("Pi qualification requires a valid Redis URL"); }
-  if (parsed.protocol !== "redis:" || !["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname) || parsed.pathname !== "/15" || parsed.username || parsed.password) {
-    throw new Error("Pi qualification requires an unauthenticated loopback Redis db15 URL");
-  }
-};
+/** Only an owned private socket Redis (scripts/lib/owned-redis.mjs); every TCP URL is refused. */
+export const validatePiRedisUrl = (value: string): void => { privateRedisUrl(value); };
 
 const workspace = (options: PiOptions, input: LaunchInput): string => resolve(options.workspaceRoot ?? join(repo, ".gptqueue/qualification/pi"), hash(input.pairId).slice(0, 16), input.role, hash(input.nonce).slice(0, 16));
 const routeSpec: RouteSpec = Object.freeze({ id: piQualificationRoute, host: "pi", modelBacked: true, availability: { kind: "setup_gap" as const, detail: "Pi RPC route preflight not run" } });

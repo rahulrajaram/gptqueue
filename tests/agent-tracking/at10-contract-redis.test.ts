@@ -1,13 +1,14 @@
 /** AT10: the same seat contract suite against the Redis store GPTQueue uses. */
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { createRedisSeatStore } from "../../src/agent-tracking/index.js";
-import { assertNotLiveDb } from "../helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "../helpers/redis-test-utils.js";
 import { seatContract } from "./seat-contract.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(TEST_REDIS_URL, "at10-contract-redis");
+const TEST_REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(TEST_REDIS_URL, "at10-contract-redis");
 const RUN = `gptq:seat-test:${randomUUID()}:`;
 let redis: Redis;
 let n = 0;

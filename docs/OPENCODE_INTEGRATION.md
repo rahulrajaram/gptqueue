@@ -19,8 +19,9 @@ The local plugin entrypoint is:
 
 The default export requires an explicit Redis URL from the plugin option
 `redisUrl`, `GPTQUEUE_REDIS_URL`, or `REDIS_URL`. The integration has no db0
-fallback. For qualification, use a private database such as
-`redis://127.0.0.1:6379/15`.
+fallback. For qualification, use a private Redis, never the shared server:
+for example `node scripts/with-owned-redis.mjs -- <command>` exports a private
+socket-only instance as `REDIS_URL` (`<dir>/redis.sock?db=15`).
 
 Each session backend registers a deterministic `gptqueue-opencode-<sessionID>`
 mailbox, starts the existing inbox dispatcher, and keeps that ownership alive
@@ -72,6 +73,7 @@ cat >"$PROFILE/config/opencode/opencode.json" <<JSON
 }
 JSON
 
+# with-owned-redis exports a private socket-only REDIS_URL, which the plugin reads.
 (
   cd "$PROFILE/work"
   XDG_CONFIG_HOME="$PROFILE/config" \
@@ -79,8 +81,7 @@ JSON
   XDG_CACHE_HOME="$PROFILE/cache" \
   XDG_STATE_HOME="$PROFILE/state" \
   HOME="$PROFILE/home" \
-  GPTQUEUE_REDIS_URL=redis://127.0.0.1:6379/15 \
-  opencode
+  node "$REPO/scripts/with-owned-redis.mjs" -- opencode
 )
 ```
 
@@ -100,7 +101,7 @@ The focused source checks are:
 
 ```sh
 npx tsc --noEmit
-REDIS_URL=redis://127.0.0.1:6379/15 npx vitest run \
+npx vitest run \
   tests/opencode-runtime.test.ts \
   tests/opencode-plugin.test.ts \
   tests/opencode-sessions.test.ts \

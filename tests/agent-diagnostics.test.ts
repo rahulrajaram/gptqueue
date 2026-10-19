@@ -1,10 +1,11 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { AgentDiagnostics } from "../src/core/agent-diagnostics.js";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS } from "../src/core/keys.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const URL = testRedisUrl();
 const registry = (name: string, metadata: Record<string, unknown> = {}) => JSON.stringify({ name, role: "both", registered_at: new Date().toISOString(), metadata });
 const task = (id: string) => JSON.stringify({ id, type: "task", from: "sender", to: "worker", timestamp: new Date().toISOString(), payload: { text: "safe" } });
 

@@ -1,3 +1,4 @@
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -8,7 +9,7 @@ import { SESSION_KEYS } from '../../src/core/keys.js';
 const installed = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist");
 export const root = resolve(import.meta.dirname, '../..');
 export const runRoot = resolve(root, '.gptqueue/acceptance/20260912-evaluation');
-export const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/15';
+export const redisUrl = testRedisUrl();
 
 export async function until<T>(read: () => Promise<T>, accept: (value: T) => boolean, timeout = 60_000): Promise<T> {
   const end = Date.now() + timeout;

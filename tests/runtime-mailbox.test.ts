@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 import { describe, expect, it, afterEach } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -6,7 +7,7 @@ import { restoreRuntimeMailbox } from "../src/registered-shell/runtime-mailbox.j
 import type { RuntimeBinding } from "../src/registered-shell/runtime.js";
 import { Redis } from "ioredis";
 
-const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const redisUrl = testRedisUrl();
 const clients: RedisClient[] = []; const redisConnections: Redis[] = [];
 afterEach(async () => { for (const c of clients.splice(0)) c.forceDisconnect(); for (const r of redisConnections.splice(0)) { await flushTestKeys(r, redisUrl); await r.quit(); } });
 

@@ -2,6 +2,7 @@
  * Loop adapter S1: the Codex Stop gate. Pure decisions, the runner against
  * the private test Redis, and the built hook entry point end to end.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { spawn } from "node:child_process";
 import { createServer, type Server, type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
@@ -16,10 +17,10 @@ import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { TurnStateStore } from "../src/core/turn-state.js";
 import { probeClient, type ProbeResult } from "../src/claude/inbox-probe.js";
-import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "codex-stop-gate");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "codex-stop-gate");
 
 const counts = (unclaimed: number, latest: string | null = "1-0", expired = 0): ProbeResult =>
   ({ ok: true, counts: { unclaimed, claimed_by_session: null, claimed_by_others: 0, expired_by_others: expired, latest_event_id: latest } });
@@ -189,21 +190,24 @@ describe("Codex Stop gate against Redis", { timeout: 60_000 }, () => {
 
 describe("Codex Stop gate command timeout (F8)", () => {
   let server: Server;
-  let port: number;
+  let hungDir: string;
+  let hungSocket: string;
   const sockets: Socket[] = [];
   beforeAll(async () => {
-    // Accepts connections and never answers: a hung Redis.
+    // Accepts connections and never answers: a hung Redis, on a private unix socket (no TCP).
+    hungDir = await mkdtemp(join(tmpdir(), "gptq-hung-redis-"));
+    hungSocket = join(hungDir, "hung.sock");
     server = createServer((socket) => { sockets.push(socket); });
-    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
-    port = (server.address() as { port: number }).port;
+    await new Promise<void>((resolveListen) => server.listen(hungSocket, resolveListen));
   });
   afterAll(async () => {
     for (const s of sockets) s.destroy();
     await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(hungDir, { recursive: true, force: true });
   });
 
   it("returns {} within about 3.5 s when Redis never answers", async () => {
-    const client = probeClient(`redis://127.0.0.1:${port}/15`, { commandTimeoutMs: 3000 });
+    const client = probeClient(`${hungSocket}?db=15`, { commandTimeoutMs: 3000 });
     try {
       const started = Date.now();
       expect(await runCodexStop({ session_id: randomUUID() }, client)).toBe("{}");

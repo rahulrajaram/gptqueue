@@ -1,6 +1,7 @@
 // LC-F4: no redis-server started by the owned-Redis scripts may outlive its
-// owner. A stub REDIS_SERVER_BIN records its pid and then sleeps, so the test
-// can check whether the "server" is still alive after the owner is gone.
+// owner. A stub GPTQ_TEST_REDIS_SERVER records its pid and then execs the real
+// redis-server (same pid, so the privacy check still passes), so the test can
+// check whether the server is still alive after the owner is gone.
 import { afterAll, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +11,8 @@ import { join } from "node:path";
 const REPO = process.cwd();
 const scratch = mkdtempSync(join(tmpdir(), "gptq-owned-redis-"));
 const stub = join(scratch, "redis-server-stub");
-writeFileSync(stub, '#!/bin/sh\necho $$ > "$STUB_PIDFILE"\necho "Ready to accept connections"\nexec sleep 300\n');
+const realServer = process.env.GPTQ_TEST_REDIS_SERVER || "/usr/bin/redis-server";
+writeFileSync(stub, `#!/bin/sh\necho $$ > "$STUB_PIDFILE"\nexec ${JSON.stringify(realServer)} "$@"\n`);
 chmodSync(stub, 0o755);
 // A git that hangs briefly keeps install-runtime inside its install step.
 const slowBin = join(scratch, "bin");
@@ -29,7 +31,7 @@ const runOwner = async (args: string[], { env = {}, afterReady }: { env?: Record
   const pidfile = join(scratch, `pid-${started.length}-${Date.now()}`);
   const child = spawn(process.execPath, args, {
     cwd: REPO, stdio: ["ignore", "ignore", "pipe"],
-    env: { ...process.env, REDIS_SERVER_BIN: stub, STUB_PIDFILE: pidfile, ...env },
+    env: { ...process.env, GPTQ_TEST_REDIS_SERVER: stub, STUB_PIDFILE: pidfile, ...env },
   });
   let stderr = "";
   child.stderr.on("data", (c) => { stderr += c; });

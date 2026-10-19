@@ -10,6 +10,7 @@ import { createCodexRuntime } from "./codex-runtime.js";
 import { bindingLifecycleEntry, bootstrapCodexBinding, withBindingState, type CodexBindingState } from "./codex-bootstrap.js";
 import { activationOutcomeSchema, type ActivationOutcome } from "./runtime.js";
 import { SESSION_KEYS } from "../core/keys.js";
+import { parseRedisSocketUrl } from "../core/redis-socket-url.js";
 
 export type ShellClient = "codex" | "pi";
 export interface RegisteredShellOptions {
@@ -64,6 +65,8 @@ export const parseRegisteredShellArgs = (argv: readonly string[]): RegisteredShe
   const redisUrl = values["--redis-url"];
   if (client !== "codex" && client !== "pi") throw new Error("--client must be codex or pi");
   if (!redisUrl) throw new Error("--redis-url is required and must be explicit");
+  // Unix-socket form (/abs/path.sock[?db=N]); throws its own descriptive error.
+  if (parseRedisSocketUrl(redisUrl)) return Object.freeze({ client, redisUrl, cwd: process.cwd() });
   try {
     const parsed = new URL(redisUrl);
     if (!['redis:', 'rediss:'].includes(parsed.protocol) || !parsed.hostname ||

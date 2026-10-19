@@ -2,6 +2,7 @@
  * Operator reaper for empty offline per-startup sidecar names. Each case names
  * the mutation of src/core/registry-reaper.ts it catches.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
@@ -9,7 +10,7 @@ import { ACTOR_KEYS, CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS, SYSTEM_SENDER, WAKE_LEA
 import { REAP_AUDIT_REASON, reapOfflineIdentities, type SkipReason } from "../src/core/registry-reaper.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const URL = testRedisUrl();
 const DAY = 24 * 60 * 60 * 1000;
 const old = new Date(Date.now() - 3 * DAY).toISOString();
 

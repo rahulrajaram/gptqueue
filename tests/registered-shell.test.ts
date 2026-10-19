@@ -1,14 +1,18 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Redis } from "ioredis";
 import { createServer } from "node:net";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { startRegisteredShell, shellAgentName, parseRegisteredShellArgs } from "../src/registered-shell/server.js";
 
-const URL15 = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const URL15 = testRedisUrl();
 const active: Array<any> = [];
 const json = (result: any) => JSON.parse(result.content[0].text);
 afterEach(async () => { await Promise.all(active.splice(0).map(async ({ shell, client, peer, redis }) => { await shell.close(); await client.close(); await peer.close(); await redis.hdel(SESSION_KEYS.registry, shell.agentName); await redis.del(SESSION_KEYS.queue(shell.agentName), SESSION_KEYS.agent(shell.agentName), SESSION_KEYS.mailboxMeta(shell.agentName), SESSION_KEYS.heartbeat(shell.agentName), SESSION_KEYS.agentSessions(shell.agentName)); await redis.quit(); })); });
@@ -103,15 +107,20 @@ describe("registered shell boundaries", () => {
 
   it("bounds startup against an unresponsive Redis endpoint", async () => {
     const sockets = new Set<import("node:net").Socket>();
+    // An unresponsive endpoint on a private unix socket (no TCP listener).
+    const dir = mkdtempSync(join(tmpdir(), "gptq-blackhole-"));
+    const path = join(dir, "blackhole.sock");
     const blackhole = createServer((socket) => { sockets.add(socket); socket.resume(); socket.on("close", () => sockets.delete(socket)); });
-    await new Promise<void>((resolve) => blackhole.listen(0, "127.0.0.1", () => resolve()));
-    const address = blackhole.address();
-    if (!address || typeof address === "string") throw new Error("blackhole did not bind");
+    await new Promise<void>((resolve) => blackhole.listen(path, () => resolve()));
     const started = Date.now();
-    await expect(startRegisteredShell({ client: "codex", redisUrl: `redis://127.0.0.1:${address.port}/15`, startupTimeoutMs: 80, cleanupTimeoutMs: 100 })).rejects.toThrow(/timed out|timeout|connect|Redis/u);
+    await expect(startRegisteredShell({ client: "codex", redisUrl: `${path}?db=15`, startupTimeoutMs: 80, cleanupTimeoutMs: 100 })).rejects.toThrow(/timed out|timeout|connect|Redis/u);
     expect(Date.now() - started).toBeLessThan(1_000);
     try { await vi.waitFor(() => expect(sockets.size).toBe(0), { timeout: 1000 }); }
-    finally { for (const socket of sockets) socket.destroy(); await new Promise<void>((resolve) => blackhole.close(() => resolve())); }
+    finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => blackhole.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it.each(["reject", "timeout"])("retires the registered session after transport startup %s", async (mode) => {

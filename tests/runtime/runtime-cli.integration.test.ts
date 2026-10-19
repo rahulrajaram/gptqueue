@@ -4,7 +4,7 @@
  * These tests drive the ACTUAL AI CLIs installed on this machine — `pi`
  * (headless `pi -p`) and `codex` (headless `codex exec`) — against the real
  * gptqueue HTTP MCP server spawned by the shared integration-server helper
- * (port 8199, Redis db15). The clients do REAL inference and REAL MCP tool
+ * (OS-assigned loopback port, the run's private socket Redis). The clients do REAL inference and REAL MCP tool
  * calls: registration, cross-CLI messaging, claim/ack, termination, and
  * sub-agent flows.
  *
@@ -49,7 +49,7 @@
  * codex:
  *   - `codex mcp add` supports BOTH stdio and `--url` (streamable HTTP). So
  *     no stdio bridge is needed: the isolated CODEX_HOME config.toml points
- *     `[mcp_servers.gptqueue-shared] url = "http://127.0.0.1:8199/mcp"`.
+ *     `[mcp_servers.gptqueue-shared] url = "<the integration server baseUrl>"`.
  *   - CODEX_HOME=tmp isolates config/auth/sessions. auth.json must be copied
  *     in (an empty CODEX_HOME is not logged in -> 401).
  *   - Headless MCP tool use REQUIRES `approval_policy = "on-request"` in the
@@ -213,7 +213,7 @@ function makePiHome(): { agentDir: string; workDir: string } {
         settings: { hostConfigDiscovery: "off", directTools: false },
         mcpServers: {
           [MCP_SERVER_NAME]: {
-            url: `http://127.0.0.1:8199/mcp`,
+            url: ctx.server.baseUrl, // OS-assigned port of this run's server
             lifecycle: "lazy",
             requestTimeoutMs: 60_000,
             directTools: false,
@@ -287,7 +287,7 @@ function makePi(): PiHandle {
 
 // ---------------------------------------------------------------------------
 // codex isolation: temp CODEX_HOME (+ copied auth.json) + config.toml pointing
-// the gptqueue MCP server at the scratch 8199 URL. `codex exec` must run with
+// the gptqueue MCP server at this run's integration server URL. `codex exec` must run with
 // --approve-for-me so MCP tool calls auto-approve under approval_policy
 // on-request (see header).
 // ---------------------------------------------------------------------------
@@ -312,7 +312,7 @@ function makeCodex(): CodexHandle {
       `[projects."${workDir}"]`,
       `trust_level = "trusted"`,
       `[mcp_servers.${MCP_SERVER_NAME}]`,
-      `url = "http://127.0.0.1:8199/mcp"`,
+      `url = "${ctx.server.baseUrl}"`,
       "",
     ].join("\n")
   );

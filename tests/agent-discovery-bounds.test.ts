@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -11,7 +12,7 @@ import { SESSION_KEYS } from "../src/core/keys.js";
 import { startRegisteredShell } from "../src/registered-shell/server.js";
 
 /** Bounded, filtered discovery: list_agents and find_agents never return the whole registry by default. */
-const URL15 = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const URL15 = testRedisUrl();
 const SEEDED = 620;
 const prefix = `bounds-${randomUUID().slice(0, 8)}-`;
 const names = Array.from({ length: SEEDED }, (_, i) => `${prefix}${String(i).padStart(4, "0")}`);

@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -5,7 +6,7 @@ import { resolve } from "node:path";
 import { Redis } from "ioredis";
 import { SESSION_KEYS } from "../src/core/keys.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 const SCRIPT = resolve(import.meta.dirname, "../scripts/check-queue.sh");
 const hasRedisCli = spawnSync("sh", ["-c", "command -v redis-cli"]).status === 0;
 
@@ -18,19 +19,34 @@ describe.skipIf(!hasRedisCli)("check-queue.sh stop gate", () => {
   const run = (env: Record<string, string>, arg = "--stop") =>
     spawnSync("bash", [SCRIPT, arg], { env: { PATH: process.env.PATH ?? "", GPTQ_AGENT_NAME: agent, ...env }, encoding: "utf8" });
 
-  it("blocks stop while the inbox in REDIS_URL's database has messages", async () => {
+  it("blocks stop while the inbox in REDIS_URL's database has messages (unix-socket form)", async () => {
     await redis.rpush(SESSION_KEYS.queue(agent), "m1", "m2");
     const out = run({ REDIS_URL: TEST_REDIS_URL });
     expect(JSON.parse(out.stdout)).toMatchObject({ decision: "block" });
     expect(out.stdout).toContain("2 pending");
+    // The ?db=N of the socket form selects the database: db14 of the same instance is empty.
+    expect(JSON.parse(run({ REDIS_URL: TEST_REDIS_URL.replace(/\?db=15$/u, "?db=14") }).stdout)).toEqual({});
   });
 
-  it("allows stop for an empty inbox, and warns instead of blocking when Redis is unreachable", async () => {
+  it("allows stop for an empty inbox, and warns instead of blocking when Redis is unreachable or the URL is malformed", async () => {
     await redis.del(SESSION_KEYS.queue(agent));
     expect(JSON.parse(run({ REDIS_URL: TEST_REDIS_URL }).stdout)).toEqual({});
-    const down = run({ REDIS_URL: "redis://127.0.0.1:1/15" });
-    expect(JSON.parse(down.stdout)).toEqual({});
-    expect(down.stderr).toContain("queue check failed");
+    for (const url of [
+      "redis://127.0.0.1:1/15", // TCP form, unchanged (connection refused)
+      `${TEST_REDIS_URL.split("?")[0]}.missing?db=15`, // no such socket
+    ]) {
+      const down = run({ REDIS_URL: url });
+      expect(JSON.parse(down.stdout)).toEqual({});
+      expect(down.stderr).toContain("queue check failed");
+    }
+    await redis.rpush(SESSION_KEYS.queue(agent), "m1");
+    try {
+      for (const query of ["?db=16", "?db=", "?db=15&x=1"]) {
+        const malformed = run({ REDIS_URL: `${TEST_REDIS_URL.split("?")[0]}${query}` });
+        expect(JSON.parse(malformed.stdout)).toEqual({});
+        expect(malformed.stderr).toContain("queue check failed");
+      }
+    } finally { await redis.del(SESSION_KEYS.queue(agent)); }
   });
 
   it("rejects unknown arguments", () => {

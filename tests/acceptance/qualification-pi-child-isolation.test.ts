@@ -1,3 +1,4 @@
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { describe, expect, it } from "vitest";
 import { createPiNativeChildAdapter, enterPiNativeChildProfileScope } from "./qualification-pi-child.js";
 
@@ -53,7 +54,7 @@ describe("Pi native child owned profile scope", () => {
         installedRoot: "/does/not/load", provider: "unused", model: "unused",
         profileRoot: "/tmp/spoof", modelRuntime: {},
       });
-      await expect(adapter.launch({ role: "sender", pairId: "pair", nonce: "nonce", redisUrl: "redis://127.0.0.1:6379/15" }, new AbortController().signal))
+      await expect(adapter.launch({ role: "sender", pairId: "pair", nonce: "nonce", redisUrl: testRedisUrl() }, new AbortController().signal))
         .rejects.toThrow(/active owned profile scope/);
     } finally {
       if (prior === undefined) delete process.env.PI_CODING_AGENT_DIR;

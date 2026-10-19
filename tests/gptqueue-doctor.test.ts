@@ -4,6 +4,7 @@
  * missing required options, Redis close-on-error, continuity-plan file
  * creation (wx + 0600), --apply gating, and continuity-apply outcomes.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawnSync, execSync } from "node:child_process";
 import { mkdtemp, stat, readFile, rm, writeFile } from "node:fs/promises";
@@ -20,7 +21,7 @@ import {
 
 const ROOT = process.cwd();
 const SCRIPT = join(ROOT, "scripts/gptqueue-doctor.mjs");
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 const run = (args: string[]) => {
   const result = spawnSync(process.execPath, [SCRIPT, ...args], {

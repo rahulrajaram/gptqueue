@@ -3,6 +3,7 @@
  * and its job card reaches startup context, with zero model tool calls.
  * The end-to-end case spawns the real built gptqueue-claude-hook.
  */
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -26,11 +27,11 @@ import {
 import { SEAT_KEY_PREFIX } from "../../src/integrations/agent-tracking.js";
 import { decideHook } from "../../src/claude/hook.js";
 import { publishSessionRecord, readProcess } from "../../src/claude/session-record.js";
-import { assertNotLiveDb } from "../helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "../helpers/redis-test-utils.js";
 import { BINDING_TOOL_INSTRUCTION, seat, seatFileJson } from "./fixtures.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "at01-startup-binding");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "at01-startup-binding");
 const BIN = resolve(__dirname, "..", "..", "bin");
 const SID = "44444444-4444-4444-8444-444444444444";
 

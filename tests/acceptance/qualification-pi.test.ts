@@ -1,3 +1,4 @@
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { describe, expect, it } from "vitest";
 import { createPiAdapters, hasPiAssistantRuntimeEvidence, piQualificationRoute, validatePiRedisUrl } from "./qualification-pi.js";
 
@@ -12,9 +13,10 @@ describe("Pi qualification adapters", () => {
   });
 
   it("requires a private loopback Redis db15 endpoint", () => {
-    expect(() => validatePiRedisUrl("redis://127.0.0.1:6379/15")).not.toThrow();
-    expect(() => validatePiRedisUrl("redis://127.0.0.1:6379/0")).toThrow(/db15/iu);
-    expect(() => validatePiRedisUrl("redis://example.invalid:6379/15")).toThrow(/loopback/iu);
+    expect(() => validatePiRedisUrl(testRedisUrl())).not.toThrow();
+    for (const tcp of ["redis://127.0.0.1:6379/15", "redis://127.0.0.1:6379/0", "redis://example.invalid:6379/15"]) {
+      expect(() => validatePiRedisUrl(tcp)).toThrow(/private unix-socket instance/u);
+    }
   });
 
   it("keeps process launch behind preflight and launch", async () => {

@@ -9,7 +9,8 @@ set -euo pipefail
 REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 # Database selection: REDIS_URL (as the server uses it) wins; otherwise
-# GPTQ_REDIS_DB with REDIS_HOST/REDIS_PORT.
+# GPTQ_REDIS_DB with REDIS_HOST/REDIS_PORT. REDIS_URL may also be the unix-socket
+# form the server accepts: /absolute/path.sock, optionally followed by ?db=0-15.
 REDIS_DB="${GPTQ_REDIS_DB:-0}"
 
 # Agent name may or may not be set
@@ -18,7 +19,17 @@ AGENT_NAME="${GPTQ_AGENT_NAME:-}"
 get_queue_length() {
   local key="gptq:q:${1}"
   local count
-  if [ -n "${REDIS_URL:-}" ]; then
+  if [[ "${REDIS_URL:-}" == /* ]]; then
+    local socket="${REDIS_URL%%\?*}" db=0
+    if [ "$socket" != "$REDIS_URL" ]; then
+      if [[ "${REDIS_URL#*\?}" =~ ^db=(0|[1-9]|1[0-5])$ ]]; then db="${BASH_REMATCH[1]}"; else socket=""; fi
+    fi
+    if [ -n "$socket" ]; then
+      count=$(redis-cli -s "$socket" -n "$db" LLEN "$key" 2>/dev/null) || count=""
+    else
+      count=""
+    fi
+  elif [ -n "${REDIS_URL:-}" ]; then
     count=$(redis-cli -u "$REDIS_URL" LLEN "$key" 2>/dev/null) || count=""
   else
     count=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" LLEN "$key" 2>/dev/null) || count=""

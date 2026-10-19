@@ -2,6 +2,7 @@
  * Spawns the real bin/ entry points (built dist) against the private test
  * Redis with HOME and the runtime dir pointed at temp dirs.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -15,7 +16,7 @@ import { probeClient, probeInbox } from "../src/claude/inbox-probe.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { sessionTag } from "../src/core/session-tag.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const REDIS_URL = testRedisUrl();
 const BIN = resolve(__dirname, "..", "bin");
 let home = "";
 let runtime = "";

@@ -12,6 +12,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { WRAPPER_VISIBLE_TOOLS } from '../dist/experimental-wrapper/bridge.js';
 import { SESSION_KEYS } from '../dist/core/keys.js';
+import { privateRedisUrl } from './lib/owned-redis.mjs';
 
 const kind = process.env.GPTQ_VERIFY_KIND;
 assert(['codex', 'pi'].includes(kind));
@@ -20,7 +21,8 @@ const name = process.env.GPTQ_AGENT_NAME;
 assert(run && name?.startsWith('gptqueue-experiment-'));
 const privateNames = ['GPTQ_SESSION_ID', 'GPTQUEUE_HTTP_TOKEN', 'REDIS_URL'];
 assert(privateNames.every(key => !(key in process.env)), 'Private environment leaked');
-const redis = new Redis('redis://127.0.0.1:6379/14', { maxRetriesPerRequest: 3 });
+// The parent's private socket-only Redis (validated: any TCP URL is refused).
+const redis = new Redis(privateRedisUrl(process.env.GPTQ_VERIFY_REDIS_URL), { maxRetriesPerRequest: 3 });
 try {
   assert.equal(await redis.hexists(SESSION_KEYS.registry, name), 1);
   const sessions = await redis.smembers(SESSION_KEYS.agentSessions(name));

@@ -5,6 +5,7 @@
  * status, RPC error, timeout — must classify as NOT activation-ready with
  * explicit evidence, and only an exact identity match may report ready.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Redis } from "ioredis";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -13,7 +14,7 @@ import { registerDiagnosticTools } from "../src/registered-shell/diagnostic-tool
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 // Mock the probe transport; capture instances for call assertions and stage
 // the next response globally (a fresh client is constructed per probe).

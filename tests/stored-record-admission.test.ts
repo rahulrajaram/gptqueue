@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { createHash, randomUUID } from "node:crypto";
@@ -9,7 +10,7 @@ import { TaskClaimStore } from "../src/core/task-claim-store.js";
 import { ActorDirectory } from "../src/core/actor-directory.js";
 import { CustodyStore } from "../src/core/custody-store.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 /** Stored values that are valid JSON but not a complete record read as absent/corrupt, never throw. */
 describe("stored record admission", () => {

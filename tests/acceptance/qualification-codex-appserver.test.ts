@@ -1,3 +1,4 @@
+import { parsePrivateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { describe, expect, it, vi } from "vitest";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -32,10 +33,8 @@ const hasRuntimeStatusCall = (history: unknown): boolean => {
   });
 };
 const digest = async (path: string): Promise<string> => createHash("sha256").update(await readFile(path)).digest("hex");
-const redactUrl = (url: string): Json => {
-  const parsed = new URL(url);
-  return { protocol: parsed.protocol, hostname: parsed.hostname, database: parsed.pathname.slice(1) };
-};
+/** The owned Redis is a private unix socket; record its shape and database, never the path. */
+const redactUrl = (url: string): Json => ({ transport: "unix-socket", database: String(parsePrivateRedisUrl(url).db) });
 const waitForIdle = async (participant: CodexParticipant, signal: AbortSignal): Promise<void> => {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {

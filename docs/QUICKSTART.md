@@ -8,7 +8,9 @@ first acknowledged task.
 
 - Node.js 20+ and npm
 - Redis running locally (`redis://127.0.0.1:6379`) — db0 is the live
-  server's database; tests use db15 (enforced by `vitest.config.ts`)
+  server's database. Tests never touch it: every vitest run starts its own
+  private, socket-only `redis-server` (`/usr/bin/redis-server` must be
+  installed; see `docs/OPERATING_RULES.md` §10)
 
 ## 1. Install
 

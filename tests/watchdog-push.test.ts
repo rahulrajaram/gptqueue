@@ -3,6 +3,7 @@
  * composed from bounded-push-idempotent.lua so it cannot drift from the normal
  * send path.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,10 +14,10 @@ import { SESSION_KEYS, SYSTEM_SENDER } from "../src/core/keys.js";
 import { composeWatchdogPush } from "../src/core/watchdog-push.js";
 import { LUA_DIR } from "../src/core/stored-read.js";
 import type { QueueMessage } from "../src/core/types.js";
-import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "watchdog-push");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "watchdog-push");
 const HOUR = 3_600_000;
 
 describe("watchdog send script (rate admission + enqueue in one script)", () => {

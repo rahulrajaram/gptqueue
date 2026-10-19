@@ -1,12 +1,13 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { admitTurnState, applyTurnReport, TURN_STATE_TTL_SECONDS, TurnStateStore, type TurnReport, type TurnState } from "../src/core/turn-state.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
-import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "turn-state");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "turn-state");
 
 const T = (s: number): string => new Date(Date.parse("2030-01-01T00:00:00.000Z") + s * 1000).toISOString();
 const report = (overrides: Partial<TurnReport> = {}): TurnReport => ({ phase: "running", at: T(0), runtime: "codex", session_id: "thread-1", ...overrides });

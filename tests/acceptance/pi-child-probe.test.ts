@@ -5,6 +5,7 @@
  * it is not a standalone CLI or a mocked child. It is skipped unless the
  * parent explicitly dispatches it with GPTQUEUE_PI_CHILD_ACCEPTANCE=1.
  */
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { describe, expect, it } from "vitest";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -17,7 +18,7 @@ import { homePath, nodePrefixPath } from "./local-tools.js";
 
 const enabled = process.env.GPTQUEUE_PI_CHILD_ACCEPTANCE === "1";
 const root = resolve(import.meta.dirname, "../..");
-const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const redisUrl = testRedisUrl();
 const piInstalled = nodePrefixPath("lib/node_modules/@earendil-works/pi-coding-agent/dist");
 // Test-only override: PI_SUBAGENTS_SOURCE points at a pi-subagents extension
 // checkout's src/index.ts. Defaults to a generic user-local extension path.

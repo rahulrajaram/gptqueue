@@ -1,7 +1,8 @@
 /**
  * Registration audit stream and the read-only `gptqueue-doctor registrations`
- * query (private test Redis, db 15).
+ * query (the run's private socket-only test Redis, db 15; tests/helpers/global-setup.ts).
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
@@ -19,7 +20,7 @@ import { auditClaudeSession, auditRuntime, coverageOf, parseGap, parseRegistrati
 import { startClaudeSessionRecord } from "../src/claude/mcp-record.js";
 import { findSessionRecord, readProcess } from "../src/claude/session-record.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const REDIS_URL = testRedisUrl();
 const ROOT = resolve(__dirname, "..");
 const BIN = join(ROOT, "bin");
 const AUDIT = SESSION_KEYS.registrationAudit;

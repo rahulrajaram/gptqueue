@@ -3,6 +3,7 @@
  * mail and open claims, marking the mail the dispatcher would wake on.
  * Every test uses its own agent names and deletes only its own keys.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,7 +16,7 @@ import { InboxEvents, replyOwnerKey, wakesRecipient } from "../src/core/inbox-ev
 import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 import type { QueueMessage } from "../src/core/types.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const REDIS_URL = testRedisUrl();
 let home = "";
 let env: NodeJS.ProcessEnv = {};
 let redis: Redis;

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Real native Codex turns; all queue writes are confined to Redis db15.
+// Real native Codex turns; all queue writes are confined to this run's private
+// socket-only Redis (db15; scripts/lib/owned-redis.mjs), never a shared server.
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -7,6 +8,7 @@ import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
+import { startOwnedRedis } from './lib/owned-redis.mjs';
 import { CodexSocketClient } from '../dist/registered-shell/codex-socket.js';
 import { bindCodexHook } from '../dist/registered-shell/codex-hook.js';
 import { CodexThreadReader } from '../dist/registered-shell/codex-history.js';
@@ -17,7 +19,8 @@ const nonce = randomUUID();
 const directory = join(root, '.gptqueue/automatic-shell/event-delivery', `native-${nonce}`);
 await mkdir(directory, { recursive: true });
 const rpc = new CodexSocketClient(undefined, 15_000);
-const redis = new Redis('redis://127.0.0.1:6379/15');
+const privateRedis = await startOwnedRedis();
+const redis = new Redis(privateRedis.url);
 const owned = [];
 const started = Date.now();
 const receipt = { nonce, started_at: new Date().toISOString(), database: 15, automatic_hook: automaticHook, roles: {}, passed: false };
@@ -33,7 +36,7 @@ Object.assign(config, {
   'mcp_servers.gptqueue-shared.enabled': true,
   'mcp_servers.gptqueue-shared.required': true,
   'mcp_servers.gptqueue-shared.command': process.execPath,
-  'mcp_servers.gptqueue-shared.args': [join(root, 'bin/gptqueue-session'), '--client', 'codex', '--redis-url', 'redis://127.0.0.1:6379/15'],
+  'mcp_servers.gptqueue-shared.args': [join(root, 'bin/gptqueue-session'), '--client', 'codex', '--redis-url', privateRedis.url],
   'model_reasoning_effort': 'low',
 });
 const readers = new Map();
@@ -119,6 +122,6 @@ try {
       await call('thread/archive', { threadId });
     } catch { /* Exact owned IDs remain recorded for targeted recovery. */ }
   }
-  await redis.quit(); await rpc.close();
+  await redis.quit(); await rpc.close(); await privateRedis.close();
   console.log(JSON.stringify({ passed: receipt.passed, elapsed_ms: receipt.elapsed_ms, receipt: join(directory, 'receipt.json'), error: receipt.error }));
 }

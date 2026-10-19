@@ -4,6 +4,7 @@
  * (claims-recover.lua), DLQ requeue (claims-requeue.lua) and provisional
  * forwarding (forwardProvisionalLua). Real Lua on Redis db 15.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
@@ -12,10 +13,10 @@ import { TaskClaimStore } from "../src/core/task-claim-store.js";
 import { CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import type { QueueMessage } from "../src/core/types.js";
-import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "waking-admission-lossless");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "waking-admission-lossless");
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("waking admission: FIFO claims and lossless overshoot", () => {

@@ -1,3 +1,4 @@
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { describe, expect, it } from "vitest";
 import { codexCommand, codexEffectiveConfig, codexHeadlessEffectiveConfig, codexHeadlessRuntimeAgent, codexHeadlessThreadStartedId, codexRouteIds, codexTurnCompleted, createCodexAdapters, decodeHeadlessControllerTask, encodeHeadlessControllerTask, isCodexRoute, promptCodexTurn, startLiveProcess, validateCodexRedisUrl } from "./qualification-codex.js";
 import { isModelParticipant } from "./qualification-types.js";
@@ -81,10 +82,10 @@ describe("Codex qualification adapters", () => {
   });
 
   it("rejects non-owned Redis endpoints before any host process can start", () => {
-    expect(() => validateCodexRedisUrl("redis://127.0.0.1:6379/15")).not.toThrow();
-    expect(() => validateCodexRedisUrl("redis://127.0.0.1:6379/0")).toThrow(/db15/iu);
-    expect(() => validateCodexRedisUrl("redis://example.invalid:6379/15")).toThrow(/loopback/iu);
-    expect(() => validateCodexRedisUrl("rediss://127.0.0.1:6379/15")).toThrow(/loopback/iu);
+    expect(() => validateCodexRedisUrl(testRedisUrl())).not.toThrow();
+    for (const tcp of ["redis://127.0.0.1:6379/15", "redis://127.0.0.1:6379/0", "redis://example.invalid:6379/15", "rediss://127.0.0.1:6379/15"]) {
+      expect(() => validateCodexRedisUrl(tcp)).toThrow(/private unix-socket instance/u);
+    }
   });
 
   it("passes the owned Redis and app-server socket into the MCP child environment", () => {

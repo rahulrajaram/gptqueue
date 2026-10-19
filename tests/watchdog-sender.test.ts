@@ -4,14 +4,15 @@
  * - The send tool has no caller-supplied `from`: the sender comes from the bound session
  *   (src/mcp-server/tools/send-message.ts, `from: sender` after bindSession).
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { SYSTEM_SENDER } from "../src/core/keys.js";
 import { sendMessageSchema } from "../src/mcp-server/tools/send-message.js";
-import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "watchdog-sender");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "watchdog-sender");
 
 describe("W4: sender enforcement", () => {
   const client = new RedisClient(null, REDIS_URL);

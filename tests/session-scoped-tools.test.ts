@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { ACTOR_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
@@ -16,7 +17,7 @@ import {
   receiveMessageSchema,
 } from "../src/mcp-server/tools/receive-message.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 
 function parseTextPayload(result: {

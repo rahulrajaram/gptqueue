@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Native Pi SDK lifecycle with deterministic local inference; no credentials or Redis.
+// Native Pi SDK lifecycle with deterministic local inference; no credentials. Redis is
+// used only with --real-sidecar: a private socket-only instance (scripts/lib/owned-redis.mjs).
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,12 +8,14 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createRegisteredPiExtension, createPiExtension, GPTQUEUE_TOOLS, RUNTIME_TOOL_NAMES } from '../dist/registered-shell/pi-extension.js';
+import { startOwnedRedis } from './lib/owned-redis.mjs';
 const installed = process.env.PI_NODE_MODULES ?? join(dirname(dirname(process.execPath)), 'lib', 'node_modules');
 const moduleAt = (pkg, file) => import(pathToFileURL(join(installed, '@earendil-works', pkg, 'dist', file)).href);
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await moduleAt('pi-coding-agent', 'index.js');
 const { getModel } = await moduleAt('pi-ai', 'compat.js');
 const { AssistantMessageEventStream } = await moduleAt('pi-ai', 'utils/event-stream.js');
 const realSidecar = process.argv.includes('--real-sidecar');
+const privateRedis = realSidecar ? await startOwnedRedis() : undefined;
 const root = process.cwd();
 const { RedisClient } = await import('../dist/mcp-server/redis-client.js');
 const { randomUUID } = await import('node:crypto');
@@ -36,7 +39,7 @@ try {
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
   const loader = new DefaultResourceLoader({ cwd: temporary, agentDir: temporary, settingsManager,
     noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    extensionFactories: [realSidecar ? createRegisteredPiExtension({ redisUrl: 'redis://127.0.0.1:6379/15', nodePath: process.execPath, sidecarPath: join(root, 'bin/gptqueue-session') }) : createPiExtension(async () => client, 1000, { runtimeEnabled: true })] });
+    extensionFactories: [realSidecar ? createRegisteredPiExtension({ redisUrl: privateRedis.url, nodePath: process.execPath, sidecarPath: join(root, 'bin/gptqueue-session') }) : createPiExtension(async () => client, 1000, { runtimeEnabled: true })] });
   if (realSidecar) process.chdir(temporary);
   await loader.reload();
   assert.equal(loader.getExtensions().errors.length, 0);
@@ -71,7 +74,7 @@ try {
     const status = result.details.structuredContent;
     assert.equal(status.activation_ready, true);
     assert.equal(status.runtime.runtime_id, session.sessionManager.getSessionId());
-    sender = new RedisClient(null, 'redis://127.0.0.1:6379/15');
+    sender = new RedisClient(null, privateRedis.url);
     await sender.register('both', `native-pi-sender-${randomUUID()}`);
     const message = { id: randomUUID(), from: sender.agentName, to: status.agent, type: 'task', timestamp: new Date().toISOString(), payload: { content: 'Compute 17 + 25' } };
     await sender.sendMessage(message);
@@ -108,6 +111,7 @@ finally {
   if (session) { await session.abort(); await session.extensionRunner.emit({ type: 'session_shutdown' }); session.dispose(); }
   if (sender) { await sender.closeCurrentSession(); await sender.shutdown(); }
   process.chdir(root);
+  await privateRedis?.close();
   await rm(temporary, { recursive: true, force: true });
   const output = resolve('.gptqueue/automatic-shell/event-delivery/' + (realSidecar ? 'native-pi-sidecar-receipt.json' : 'native-pi-receipt.json'));
   await mkdir(resolve('.gptqueue/automatic-shell/event-delivery'), { recursive: true });

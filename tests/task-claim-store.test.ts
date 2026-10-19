@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { flushTestKeys as guardedFlushTestKeys } from "./helpers/redis-test-utils.js";
 import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { scaffoldLaunchAllowlist } from "./helpers/launch-allowlist.js";
@@ -38,7 +39,7 @@ const sessionOf = (result: object): string => {
   return id;
 };
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 // wake_if_offline admission now requires an operator allowlist with EXACT
 // argv templates (v2). Scaffold one permitting process.execPath pointed at

@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { createHash, randomUUID } from "node:crypto";
@@ -5,7 +6,7 @@ import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { actorStatus, actorStatusSchema } from "../src/mcp-server/tools/actor-status.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 const T0 = "2030-01-01T00:00:00.000Z";
 
 // Mirrors the shared session tag (http.ts sessionLogTag): public reads carry

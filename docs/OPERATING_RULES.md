@@ -102,21 +102,75 @@ explicit inventory.
 
 ## 10. Testing etiquette
 
-The live server uses Redis db0. Every test suite runs against db15
-(`REDIS_URL=redis://127.0.0.1:6379/15`) and the shared flush helper refuses
-db0 unconditionally. Vitest requires db15 before collecting tests. Never flush db0.
+The live server uses the production Redis (TCP `127.0.0.1:6379`, db0). Tests
+never connect to it, or to any TCP Redis.
 
-### Test runner environment boundary
+### A private Redis per run
 
-Run vitest directly with an explicit Redis URL in the same command:
+Every vitest run starts its OWN `redis-server` in `globalSetup`
+(`tests/helpers/global-setup.ts`, implemented once in
+`scripts/lib/owned-redis.mjs`):
+
+- It listens only on a unix socket, `<run dir>/redis.sock`, inside a fresh
+  0700 directory under `$TMPDIR` (`--port 0`: no TCP listener at all), and
+  persists nothing (`--save ''`, `--appendonly no`).
+- Before anything is exported, it is verified private over the socket:
+  `CONFIG GET port` must be `0`, `CONFIG GET unixsocket` must be this run's
+  socket, and `INFO server` `process_id` must be the spawned pid. Any
+  mismatch stops the server and fails the run.
+- Workers and every child they spawn get
+  `REDIS_URL=<run dir>/redis.sock?db=15`. ioredis and the gptqueue entry
+  points accept that form directly. Any `REDIS_URL` the caller set is
+  replaced, never used.
+- Teardown stops it (SIGTERM, then SIGKILL after a bound) and removes the
+  run directory.
+
+Tests read the connection only through `testRedisUrl()`
+(`tests/helpers/test-redis.ts`). It accepts nothing but that private socket
+form, in a 0700 run directory owned by this user, and refuses every TCP URL,
+including `redis://127.0.0.1:6379/15`. There is no fallback. The shared flush
+helper (`flushTestKeys`) also checks that the client itself is connected to
+that socket and database, and deletes only `gptq:*` keys (never FLUSHDB).
+
+### Concurrency
+
+Runs share nothing: each has its own Redis instance and socket, and the
+integration HTTP server binds an OS-assigned loopback port (`--port 0`; the
+bound port is read from its startup line). Any number of worktrees, or
+several vitest processes in one worktree, can run at the same time.
+
+### Running tests
 
 ```sh
-REDIS_URL=redis://127.0.0.1:6379/15 node node_modules/vitest/vitest.mjs run
+export TMPDIR=/path/to/short/disk-backed/tmp   # optional; keep it short
+node node_modules/vitest/vitest.mjs run tests/<file>.test.ts
 ```
 
-Do not rely on the shell inheriting environment variables from elsewhere;
-Vitest enforces db15 before test collection, and cleanup checks the actual
-Redis connection database. Local cleanup helpers must use the shared guard.
+There is no Redis URL to pass. The socket path must fit in 107 bytes, so keep
+`TMPDIR` short; startup fails clearly otherwise.
+
+Overrides:
+
+- `GPTQ_TEST_REDIS_SERVER`: the `redis-server` binary (default
+  `/usr/bin/redis-server`).
+- `TMPDIR`: where run directories (`gptq-redis-XXXXXX`) are created.
+
+Verify scripts (`scripts/verify-*.mjs`), the release installer
+(`scripts/install-runtime.mjs`) and acceptance fixtures (`startOwnedRedis`)
+start their own instance through the same helper.
+`node scripts/with-owned-redis.mjs -- <command>` runs a non-vitest command
+against one.
+
+### Crash safety
+
+Each run directory records its owner (pid, process start time, pid namespace)
+and the server pid in `owner.json`. A process that exits without teardown
+still kills its server on exit. A server orphaned by a killed owner is reaped
+when the next instance starts under the same `$TMPDIR`. It is killed only if
+the owner is provably gone and `/proc/<pid>/cmdline` shows a `redis-server`
+serving exactly that directory's socket. A directory from another pid
+namespace (for example a run inside a separate PID-namespace sandbox, which
+reaps its own processes) is removed only after nothing has answered on its socket for 60 s.
 
 ## Agent name ownership (decision D2)
 

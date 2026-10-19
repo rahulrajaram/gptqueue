@@ -8,7 +8,10 @@ restores its public queue identity and backlog. A different native session gets
 its own identity, even in the same directory.
 
 Codex starts `bin/gptqueue-session` through its required `gptqueue-shared` stdio
-MCP entry. Pi loads a native extension which starts the same sidecar and exposes
+MCP entry. Its `--redis-url` is either `redis://host[:port]/<db>` or a unix
+socket path with an optional database, `/path/redis.sock?db=<0-15>` (the form
+ioredis accepts; any other query, `//`, or characters outside
+`[A-Za-z0-9._~@+,=:/-]` are refused). Pi loads a native extension which starts the same sidecar and exposes
 nine bound tools: `send_message`, `receive_message`, `list_agents`,
 `get_queue_status`, `claim_tasks`, `acknowledge_tasks`, `renew_claim`,
 `bind_runtime`, and `get_runtime_status`. The connection supplies its session internally. There is no
@@ -134,7 +137,10 @@ subagents do not automatically acquire independent queue identities unless their
 runtime starts an independent configured MCP connection. Existing open shells
 continue using the integration they loaded earlier.
 
-Tests use Redis db15. Real CLI startup probes use db14 and remove only records
+Tests and verification scripts never use a shared Redis: each vitest run and
+each verify script starts its own private, socket-only instance
+(`scripts/lib/owned-redis.mjs`; `docs/OPERATING_RULES.md` §10). Real CLI
+startup probes use db14 of their own private instance and remove only records
 owned by each probe. Verification receipts live under
 `.gptqueue/automatic-shell/`; they record actual startup, session retirement,
 configuration preservation, and the review scope.
@@ -247,10 +253,10 @@ connection lifecycle log retains the provisional startup identity; runtime
 status and runtime traces are authoritative after mailbox restoration.
 
 `node scripts/verify-inbox-activation.mjs` runs an isolated two-thread native
-Codex round trip on Redis db15 using Luna with low reasoning and normal automatic
-approval review. It archives only its own test threads and records a JSON receipt
-under `.gptqueue/automatic-shell/event-delivery/`. Do not run Redis tests alongside
-this probe. The installed daemon must support its local control socket; older
+Codex round trip on its own private socket-only Redis (db15) using Luna with low
+reasoning and normal automatic approval review. It archives only its own test
+threads and records a JSON receipt under
+`.gptqueue/automatic-shell/event-delivery/`. The installed daemon must support its local control socket; older
 history APIs are handled by reading the exact daemon-provided local transcript
 and validating its native identity.
 
@@ -262,7 +268,8 @@ Registration alone therefore does not promise activation before that first
 prompt; check `activation_ready` before relying on unattended delivery.
 `node scripts/verify-pi-inbox-activation.mjs` exercises the installed native Pi
 SDK's idle/busy lifecycle with a deterministic local inference stream. Add
-`--real-sidecar` for the real MCP/Redis task-claim-reply-ack path on db15; this
+`--real-sidecar` for the real MCP/Redis task-claim-reply-ack path on a private
+socket-only Redis (db15) it starts itself; this
 checks native transport and execution without using external model credentials.
 
 ### Discovering the intended peer and diagnosing delivery

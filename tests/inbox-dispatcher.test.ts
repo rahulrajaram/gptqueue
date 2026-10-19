@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -8,7 +9,7 @@ import { startInboxDispatcher } from "../src/registered-shell/inbox-dispatcher.j
 import { createPiRuntime, type PiRuntimeHost } from "../src/registered-shell/pi-runtime.js";
 import type { RuntimeAdapter, RuntimeBinding } from "../src/registered-shell/runtime.js";
 
-const url = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const url = testRedisUrl();
 const redis = new Redis(url);
 const live: Array<{ agent: string; dispatcher: Awaited<ReturnType<typeof startInboxDispatcher>> }> = [];
 const owned = new Set<string>();

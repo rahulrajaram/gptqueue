@@ -11,7 +11,9 @@ records whether a Stop-hook block or the idle watcher made it, and Claude WK-2 a
 LT-4 require the Stop-hook block. WK-1/DL-5 and DL-8 read consumption from server
 state (inbox trace rows, claims index and claim records). Run one file at a time:
 
-    node scripts/with-owned-redis.mjs -- npx --no-install vitest run tests/acceptance-e2e/wake.test.ts
+    npx --no-install vitest run tests/acceptance-e2e/wake.test.ts
+
+(vitest starts the run's private socket-only Redis itself.)
 
 | File | Criteria |
 |---|---|

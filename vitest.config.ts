@@ -1,11 +1,9 @@
 import { defineConfig } from "vitest/config";
 
-// Fail closed before collecting tests, including when a runner strips caller env.
-const testRedisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
-if (new URL(testRedisUrl).pathname !== "/15") {
-  throw new Error("GPTQueue tests require isolated Redis database 15");
-}
-process.env.REDIS_URL = testRedisUrl;
+// Redis: every run gets its own private, socket-only redis-server from
+// tests/helpers/global-setup.ts (scripts/lib/owned-redis.mjs). It replaces any
+// inherited REDIS_URL before workers start; tests read it only through
+// tests/helpers/test-redis.ts, which refuses every TCP URL.
 
 // Hermetic worker mode: GPTQUEUE_WORKER=1 (exported by headless-worker
 // wrappers) or CLAUDE_CODE_ENTRYPOINT=sdk-cli (a `claude -p` caller) would put
@@ -19,6 +17,7 @@ delete process.env.CLAUDE_CODE_ENTRYPOINT;
 export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts"],
+    globalSetup: ["./tests/helpers/global-setup.ts"],
     testTimeout: 15_000,
     hookTimeout: 10_000,
     fileParallelism: false,

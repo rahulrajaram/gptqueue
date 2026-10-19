@@ -2,6 +2,7 @@
  * Shared helpers for the live acceptance tests (real runtime CLIs, private Redis).
  * See README.md. Nothing here touches the shared Redis or user runtime config.
  */
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { randomInt, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,16 +17,8 @@ export const RECEIPT_ROOT = process.env.GPTQUEUE_LIVE_RECEIPT_DIR ??
   join(tmpdir(), "gptqueue-live-receipts");
 export const TURN_TIMEOUT_MS = 180_000;
 
-/** Fail closed: only a private Redis (scripts/with-owned-redis.mjs) is acceptable, never the shared 6379. */
-export const ownedRedisUrl = (): string => {
-  const raw = process.env.REDIS_URL;
-  if (!raw) throw new Error("REDIS_URL unset: run through node scripts/with-owned-redis.mjs");
-  const url = new URL(raw);
-  if (url.port === "" || url.port === "6379" || url.pathname !== "/15" || !["127.0.0.1", "localhost"].includes(url.hostname)) {
-    throw new Error(`refusing non-private Redis ${url.host}${url.pathname}`);
-  }
-  return raw;
-};
+/** Fail closed: only the run's private socket Redis is acceptable; every TCP URL is refused. */
+export const ownedRedisUrl = (): string => testRedisUrl();
 
 export const now = (): number => performance.timeOrigin + performance.now();
 export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

@@ -3,16 +3,17 @@
  * bounded-push script call that delivers the message, so delivery and
  * correlation cannot diverge, and an idempotent replay rewrites neither.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { MailboxStore } from "../src/core/mailbox-store.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import type { QueueMessage } from "../src/core/types.js";
-import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "send-correlation");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "send-correlation");
 
 describe("send-path correlation records (S8)", () => {
   let redis: Redis;

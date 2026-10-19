@@ -5,6 +5,7 @@
  * test is the real Lua (waking-admission-lib.lua composed in front of the
  * bounded-push scripts) on Redis db 15.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -15,14 +16,14 @@ import { SESSION_KEYS } from "../src/core/keys.js";
 import { LUA_DIR } from "../src/core/stored-read.js";
 import { parseQueueEntry, replyOwners, wakesRecipient } from "../src/core/inbox-events.js";
 import type { QueueMessage } from "../src/core/types.js";
-import { assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { registerAgent, registerAgentSchema } from "../src/mcp-server/tools/register-agent.js";
 import { sendMessage, sendMessageSchema } from "../src/mcp-server/tools/send-message.js";
 import { getQueueStatus } from "../src/mcp-server/tools/queue-status.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-assertNotLiveDb(REDIS_URL, "waking-admission");
+const REDIS_URL = testRedisUrl();
+assertPrivateTestRedis(REDIS_URL, "waking-admission");
 const BOUND = 10;
 
 describe("waking admission (real Lua)", () => {

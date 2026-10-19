@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { createHash, randomUUID } from "node:crypto";
@@ -6,7 +7,7 @@ import { custodyClaim, custodyClaimSchema } from "../src/mcp-server/tools/custod
 import { custodyStatus, custodyStatusSchema } from "../src/mcp-server/tools/custody-status.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 // Mirrors the shared session tag (src/core/session-tag.ts).
 const tag = (sid: string): string =>

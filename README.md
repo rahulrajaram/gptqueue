@@ -318,7 +318,7 @@ Optionally add the hook script to `~/.claude/settings.json` for automatic startu
 
 | Variable | Default | Description |
 |---|---|---|
-| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
+| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL, or a unix socket path with an optional database (`/path/redis.sock?db=N`) |
 | `GPTQUEUE_HOST` | `127.0.0.1` | HTTP server bind host; non-loopback requires `GPTQUEUE_HTTP_TOKEN` |
 | `GPTQUEUE_LAUNCH_ALLOWLIST` | `~/.config/gptqueue/launch-allowlist.json` | Path of the operator wake-launch allowlist; keep it outside agent workspaces (see the security section) |
 | `GPTQUEUE_HTTP_TOKEN` | _(none)_ | Bearer token required on every `/mcp` request when set |

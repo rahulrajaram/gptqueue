@@ -2,6 +2,7 @@
  * Worker mode (f-1965) and the AskUserQuestion guard (f-1915) through the real
  * bin/ entry points (built dist) against the private test Redis (db 15).
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
@@ -15,7 +16,7 @@ import { publishSessionRecord, readProcess } from "../src/claude/session-record.
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { WORKER_SESSION_CONTEXT } from "../src/claude/worker-mode.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const REDIS_URL = testRedisUrl();
 const DOWN = "redis://127.0.0.1:1/0";
 const BIN = resolve(__dirname, "..", "bin");
 let home = "";

@@ -1,3 +1,4 @@
+import { parsePrivateRedisUrl } from "../../scripts/lib/owned-redis.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -20,10 +21,8 @@ vi.setConfig({ testTimeout: 480_000, hookTimeout: 60_000 });
 type Json = Record<string, unknown>;
 type Cleanup = Readonly<{ name: string; status: "fulfilled" | "rejected"; error?: string }>;
 const digest = async (path: string): Promise<string> => createHash("sha256").update(await readFile(join(repo, path))).digest("hex");
-const redactUrl = (url: string): Json => {
-  const parsed = new URL(url);
-  return { protocol: parsed.protocol, hostname: parsed.hostname, port: parsed.port, database: parsed.pathname.slice(1) };
-};
+/** The owned Redis is a private unix socket; record its shape and database, never the path. */
+const redactUrl = (url: string): Json => ({ transport: "unix-socket", database: String(parsePrivateRedisUrl(url).db) });
 const identity = (participant: Participant): Json => ({
   participant_id: participant.identity.participantId, route: participant.identity.route, host_runtime_id: participant.identity.hostRuntimeId,
   agent: participant.identity.agent, cwd_hash: participant.identity.cwdHash, profile_hash: participant.identity.profileHash,

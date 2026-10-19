@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { Redis } from "ioredis";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
@@ -18,7 +19,7 @@ import {
   registerAgentSchema,
 } from "../src/mcp-server/tools/register-agent.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 // wake_if_offline admission now requires an operator allowlist. Scaffold one
 // permitting the test launchers ("/usr/bin/pi") and point GPTQUEUE_LAUNCH_ALLOWLIST

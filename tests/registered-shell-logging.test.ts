@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -10,7 +11,7 @@ import { SESSION_KEYS } from "../src/core/keys.js";
 import { startRegisteredShell, type RegisteredShellHandle } from "../src/registered-shell/server.js";
 import { defaultLogDir } from "../src/registered-shell/lifecycle-log.js";
 
-const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const REDIS_URL = testRedisUrl();
 const dirs: string[] = [];
 const removeOwned = async (redis: Redis, agent: string) => {
   await redis.hdel(SESSION_KEYS.registry, agent);

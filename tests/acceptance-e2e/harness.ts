@@ -25,6 +25,7 @@
  * Every fake "model" is cooperative: given a turn, it claims, answers each
  * task with a correlated result, and acknowledges, until its inbox is empty.
  */
+import { testRedisUrl } from "../helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -49,7 +50,7 @@ import { publishSessionRecord, readProcess } from "../../src/claude/session-reco
 import { registerTools } from "../../src/transports/setup-tools.js";
 import { SESSION_KEYS } from "../../src/core/keys.js";
 
-export const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+export const REDIS_URL = testRedisUrl();
 // Keep registered-shell lifecycle logs out of the user's state directory.
 process.env.GPTQ_LOG_DIR ??= mkdtempSync(join(tmpdir(), "gptq-e2e-logs-"));
 

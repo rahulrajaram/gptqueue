@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Opt-in Linux live verification. Uses installed CLIs/adapter and Redis db14 only.
+// Opt-in Linux live verification. Uses installed CLIs/adapter and db14 of a private,
+// socket-only Redis owned by this run (scripts/lib/owned-redis.mjs); never a shared server.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -9,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Redis } from 'ioredis';
+import { startOwnedRedis } from './lib/owned-redis.mjs';
 import { WRAPPER_VISIBLE_TOOLS } from '../dist/experimental-wrapper/bridge.js';
 import { verificationChecks } from './wrapper-verification-checks.mjs';
 
@@ -42,7 +44,10 @@ const snapshot = async () => Object.fromEntries(await Promise.all(Object.entries
   .map(async ([key, path]) => [key, await fingerprint(path)])));
 const before = await snapshot();
 const localBefore = await files(workspace);
-const redis = new Redis('redis://127.0.0.1:6379/14', { maxRetriesPerRequest: 3, commandTimeout: 5_000 });
+const privateRedis = await startOwnedRedis({ db: 14 });
+const redis = new Redis(privateRedis.url, { maxRetriesPerRequest: 3, commandTimeout: 5_000 });
+// Must never reach the wrapped child; a dead socket, so a leak fails instead of touching any server.
+const leakSentinelRedisUrl = join(privateRedis.dir, 'leak-sentinel.sock') + '?db=15';
 const common = 'This disposable integration test is explicitly authorized. Use only the four GPTQueue tools. Do not use shell tools, skills, files, or other capabilities. First call list_agents and get_queue_status. Both peers are registered. Never register or supply session_id. ';
 const prompts = Object.freeze({
   codex: common + `Send exactly one ping to ${names.pi}, content ${nonce}, idempotency_key ${nonce}. Receive with timeout 60 up to four times for the reply. Verify content ack-${nonce} and in_reply_to equal to your sent ID. Return only JSON with sent_message_id and reply (the complete received message).`,
@@ -50,10 +55,10 @@ const prompts = Object.freeze({
 });
 const launch = kind => {
   const child = spawn(process.execPath, ['bin/gptqueue-experiment', kind, '--agent', names[kind],
-    '--workspace', workspace, '--redis-url', 'redis://127.0.0.1:6379/14', '--cleanup', 'unregister', '--', prompts[kind]], {
+    '--workspace', workspace, '--redis-url', privateRedis.url, '--cleanup', 'unregister', '--', prompts[kind]], {
     cwd: repo, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, GPTQ_SESSION_ID: 'verification-session-sentinel', GPTQUEUE_HTTP_TOKEN: 'verification-token-sentinel',
-      REDIS_URL: 'redis://127.0.0.1:6379/15', GPTQ_VERIFY_KIND: kind, GPTQ_VERIFY_RUN: run,
+      REDIS_URL: leakSentinelRedisUrl, GPTQ_VERIFY_REDIS_URL: privateRedis.url, GPTQ_VERIFY_KIND: kind, GPTQ_VERIFY_RUN: run,
       GPTQ_EXPERIMENT_CODEX_BIN: join(repo, 'scripts/verify-wrapper-child.mjs'),
       GPTQ_EXPERIMENT_PI_BIN: join(repo, 'scripts/verify-wrapper-child.mjs') },
   });
@@ -156,5 +161,5 @@ try {
     await writeFile(join(run, 'evidence.json'), JSON.stringify(evidence, null, 2));
     console.log(JSON.stringify(evidence));
     assert(passed, 'Verification failed: ' + JSON.stringify(checks) + (failure ?? ''));
-  } finally { await redis.quit(); }
+  } finally { await redis.quit(); await privateRedis.close(); }
 }

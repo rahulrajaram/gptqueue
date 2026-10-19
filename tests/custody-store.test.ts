@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
@@ -11,7 +12,7 @@ import {
 import { CUSTODY_KEYS } from "../src/core/keys.js";
 import type { HandoffRecordV1 } from "../src/core/custody-model.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 
 const T0 = "2030-01-01T00:00:00.000Z";

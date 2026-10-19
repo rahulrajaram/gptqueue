@@ -4,6 +4,7 @@
  * failures stay unclassified, and the controller, bootstrap and lifecycle
  * log report a pending adoption truthfully.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -22,10 +23,10 @@ import { createRuntimeController, refusedContinuity } from "../src/registered-sh
 import { bindingLifecycleEntry, bootstrapCodexBinding, withBindingState, type CodexBindingState } from "../src/registered-shell/codex-bootstrap.js";
 import { createLifecycleLog } from "../src/registered-shell/lifecycle-log.js";
 import type { RuntimeAdapter, RuntimeBinding } from "../src/registered-shell/runtime.js";
-import { flushTestKeys, assertNotLiveDb } from "./helpers/redis-test-utils.js";
+import { flushTestKeys, assertPrivateTestRedis } from "./helpers/redis-test-utils.js";
 
-const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
-assertNotLiveDb(redisUrl, "adoption refusal tests");
+const redisUrl = testRedisUrl();
+assertPrivateTestRedis(redisUrl, "adoption refusal tests");
 const clients: RedisClient[] = [];
 const connections: Redis[] = [];
 const closers: Array<() => Promise<unknown>> = [];

@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // Run a command against a private, throwaway Redis instead of a shared one.
-// The server binds 127.0.0.1 on a free port, persists nothing, and is stopped
-// when the command exits. The child gets REDIS_URL=redis://127.0.0.1:<port>/15.
+// The server listens only on a unix socket in a 0700 run directory (no TCP),
+// is verified private before use, persists nothing, and is stopped when the
+// command exits. The child gets REDIS_URL=<runDir>/redis.sock?db=15
+// (scripts/lib/owned-redis.mjs). A vitest command starts its own instance in
+// globalSetup regardless; this wrapper serves non-vitest commands.
 //
-//   node scripts/with-owned-redis.mjs -- npx vitest run tests/foo.test.ts
+//   node scripts/with-owned-redis.mjs -- <command> [args...]
 import { spawn } from "node:child_process";
 import { startOwnedRedis } from "./lib/owned-redis.mjs";
 

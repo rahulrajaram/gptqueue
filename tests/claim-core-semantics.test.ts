@@ -1,5 +1,6 @@
 // Core claim/recovery/dedupe semantics (acceptance criteria DL-2, DL-3, DL-7,
 // WK-6 core, clock-skew safety), exercised against a real Redis.
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { TaskClaimStore, claimLuaScript } from "../src/core/task-claim-store.js";
@@ -10,7 +11,7 @@ import type { QueueMessage } from "../src/mcp-server/types.js";
 import { dlqStatusResult } from "../src/mcp-server/tools/task-claim-result.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const url = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const url = testRedisUrl();
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const task = (id: string, to: string, from = "sender"): QueueMessage => ({

@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import type { AddressInfo } from "node:net";
 import { createServer, type Server } from "node:http";
@@ -17,8 +18,9 @@ const sessionLogTag = (sid: string): string =>
   `sid-sha256:${createHash("sha256").update(sid).digest("hex").slice(0, 12)}`;
 import { registerTools } from "../src/transports/setup-tools.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
-const TEST_PORT = 3198;
+const TEST_REDIS_URL = testRedisUrl();
+/** OS-assigned port of the in-process server (no fixed port: concurrent runs never collide). */
+let testPort = 0;
 // Root of the repo (tests/ -> repo root), used to spawn the built server.
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -50,19 +52,6 @@ function ensureBuilt(): Promise<void> {
   return buildPromise;
 }
 
-async function getFreePort(): Promise<number> {
-  const net = await import("node:net");
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address() as AddressInfo;
-      const port = addr.port;
-      srv.close(() => resolve(port));
-    });
-  });
-}
 
 interface Spawned {
   child: ChildProcess;
@@ -72,15 +61,17 @@ interface Spawned {
   stderr: string;
 }
 
-/** Spawn the real built HTTP server with an explicit env (REDIS_URL db-n scoped). */
+/**
+ * Spawn the real built HTTP server with an explicit env on an OS-assigned port
+ * (`--port 0`); the bound port is read from its startup line.
+ */
 async function spawnHttpServer(
   env: Record<string, string>
 ): Promise<Spawned> {
   await ensureBuilt();
-  const port = await getFreePort();
   const child = spawn(
     process.execPath,
-    ["dist/transports/http.js", "--port", String(port)],
+    ["dist/transports/http.js", "--port", "0"],
     {
       cwd: ROOT,
       env: { ...process.env, REDIS_URL: TEST_REDIS_URL, ...env },
@@ -94,6 +85,16 @@ async function spawnHttpServer(
   child.stderr?.on("data", (d: Buffer) => {
     rec.stderr = (rec.stderr + d.toString()).slice(-8000);
   });
+  const deadline = Date.now() + 10_000;
+  let port: number | undefined;
+  while (port === undefined) {
+    const bound = /gptqueue HTTP server listening on \S+:(\d+)/u.exec(rec.stdout)?.[1];
+    if (bound !== undefined) port = Number(bound);
+    else if (child.exitCode !== null || Date.now() > deadline) {
+      child.kill("SIGKILL");
+      throw new Error(`server did not report a bound port (exit=${child.exitCode})\nSTDOUT:\n${rec.stdout}\nSTDERR:\n${rec.stderr}`);
+    } else await new Promise((res) => setTimeout(res, 50));
+  }
   // Return the SAME live object the data handlers mutate, so captured output
   // keeps accumulating after spawn (a spread copy would freeze stdout/stderr at
   // spawn time).
@@ -223,7 +224,8 @@ describe("HTTP transport (NXT-018)", () => {
     });
 
     httpServer = createServer(app);
-    await new Promise<void>((resolve) => httpServer.listen(TEST_PORT, resolve));
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    testPort = (httpServer.address() as AddressInfo).port;
   }, 60_000); // dynamic SDK import + listen; slow under full-suite load
 
   afterAll(async () => {
@@ -244,7 +246,7 @@ describe("HTTP transport (NXT-018)", () => {
 
   it("connects via HTTP, registers, lists agents", async () => {
     const clientTransport = new StreamableHTTPClientTransport(
-      new URL(`http://127.0.0.1:${TEST_PORT}/mcp`)
+      new URL(`http://127.0.0.1:${testPort}/mcp`)
     );
     const client = new Client({ name: "test-client", version: "1.0.0" });
     await client.connect(clientTransport);
@@ -277,7 +279,7 @@ describe("HTTP transport (NXT-018)", () => {
   it("sends and receives messages over HTTP between two clients", async () => {
     // Client A
     const transportA = new StreamableHTTPClientTransport(
-      new URL(`http://127.0.0.1:${TEST_PORT}/mcp`)
+      new URL(`http://127.0.0.1:${testPort}/mcp`)
     );
     const clientA = new Client({ name: "client-a", version: "1.0.0" });
     await clientA.connect(transportA);
@@ -289,7 +291,7 @@ describe("HTTP transport (NXT-018)", () => {
 
     // Client B
     const transportB = new StreamableHTTPClientTransport(
-      new URL(`http://127.0.0.1:${TEST_PORT}/mcp`)
+      new URL(`http://127.0.0.1:${testPort}/mcp`)
     );
     const clientB = new Client({ name: "client-b", version: "1.0.0" });
     await clientB.connect(transportB);
@@ -497,10 +499,9 @@ describe("HTTP transport security (loopback bind + Bearer token)", () => {
 
   it("on a non-loopback host without a token, refuses to start (exit non-zero, clear message)", async () => {
     await ensureBuilt();
-    const port = await getFreePort();
     const child = spawn(
       process.execPath,
-      ["dist/transports/http.js", "--port", String(port)],
+      ["dist/transports/http.js", "--port", "0"],
       {
         cwd: ROOT,
         // GPTQUEUE_HOST set to a non-loopback; token explicitly emptied so the

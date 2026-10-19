@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenCodeSessionStatus } from "../src/registered-shell/opencode-runtime.js";
 import {
@@ -13,7 +14,7 @@ import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 
 const identity = { sessionID: `ses-plugin-${Date.now()}`, directory: "/workspace" };
-const testRedisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 const native = (_port: OpenCodeRuntimePort): OpenCodeNativeClient => ({
   session: {
@@ -35,7 +36,7 @@ describe("OpenCode plugin frontend", () => {
     };
     const client = native(port);
     const plugin = createOpenCodePlugin(clientInput(client), {
-      redisUrl: testRedisUrl,
+      redisUrl: TEST_REDIS_URL,
       epoch: "epoch",
       runtimePort: async () => port,
       dispatcherOptions: { intervalMs: 60_000 },
@@ -61,10 +62,10 @@ describe("OpenCode plugin frontend", () => {
     };
     // Without the idle wake the busy retry waits out a 3 s interval/backoff.
     const plugin = createOpenCodePlugin(clientInput(native(port)), {
-      redisUrl: testRedisUrl, epoch: "epoch", runtimePort: async () => port,
+      redisUrl: TEST_REDIS_URL, epoch: "epoch", runtimePort: async () => port,
       dispatcherOptions: { intervalMs: 3_000 }, // the plugin's dispatcher options have no maxBackoffMs
     });
-    const redis = new Redis(testRedisUrl);
+    const redis = new Redis(TEST_REDIS_URL);
     try {
       await plugin.event({ event: { type: "session.created", properties: { info: { id: sessionID, directory: identity.directory } } } });
       const agent = opencodeAgentName(sessionID);
@@ -91,7 +92,7 @@ describe("OpenCode plugin frontend", () => {
       promptAsync: vi.fn(async () => undefined), close: vi.fn(async () => undefined),
     };
     const plugin = createOpenCodePlugin(clientInput(native(port)), {
-      redisUrl: testRedisUrl, epoch: "epoch",
+      redisUrl: TEST_REDIS_URL, epoch: "epoch",
       runtimePort: async () => port, dispatcherOptions: { intervalMs: 60_000 },
     });
     await plugin["chat.message"]({ sessionID: identity.sessionID });
@@ -107,7 +108,7 @@ describe("OpenCode plugin frontend", () => {
       promptAsync: vi.fn(async () => undefined), close: vi.fn(async () => undefined),
     };
     const plugin = createOpenCodePlugin(clientInput(native(port)), {
-      redisUrl: testRedisUrl, epoch: "epoch",
+      redisUrl: TEST_REDIS_URL, epoch: "epoch",
       runtimePort: async () => port, dispatcherOptions: { intervalMs: 60_000 },
     });
     expect(Object.keys(plugin.tool)).toEqual([
@@ -133,7 +134,7 @@ describe("OpenCode plugin frontend", () => {
       promptAsync: vi.fn(async () => undefined), close: vi.fn(async () => undefined),
     };
     const plugin = createOpenCodePlugin(clientInput(native(port)), {
-      redisUrl: testRedisUrl, epoch: "epoch",
+      redisUrl: TEST_REDIS_URL, epoch: "epoch",
       runtimePort: async () => port, dispatcherOptions: { intervalMs: 60_000 },
     });
     await plugin.event({ event: { type: "session.created", properties: { info: { id: identity.sessionID, directory: identity.directory } } } });

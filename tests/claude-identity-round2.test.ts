@@ -4,6 +4,7 @@
  * AGENT_NAME_HELD fallback chain, old-format holder lease wait (ID-3) and the
  * old gptqueue-inbox-peek CLI contract.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -24,7 +25,7 @@ import { outagePolicy, parsePeekArgs, watchInbox, WATCH_RECORD_WAIT_MS } from ".
 import { GptQueueError } from "../src/mcp-server/errors.js";
 import { fallbackCandidates, holdToolCallsUntil, NameExhaustedError, registerClaudeAware, type RegisterDeps } from "../src/claude/mcp-record.js";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const REDIS_URL = testRedisUrl();
 const BIN = resolve(__dirname, "..", "bin");
 let home = "";
 let env: NodeJS.ProcessEnv = {};

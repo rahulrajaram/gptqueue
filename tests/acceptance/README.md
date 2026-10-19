@@ -7,9 +7,11 @@ sources explicitly before running native conformance:
 node ./node_modules/typescript/bin/tsc -p tests/acceptance/tsconfig.json
 ```
 
-Run focused tests with `REDIS_URL=redis://127.0.0.1:6379/15`. Native conformance
-fixtures must create their own Redis process with `startOwnedRedis` or
-`openOwnedRedis`; they must never connect to the shared server. Opt-in native
+Every vitest run gets its own private, socket-only Redis (no URL to pass;
+`docs/OPERATING_RULES.md` §10). Native conformance fixtures that need a
+separate instance create one with `startOwnedRedis` (the same socket-only
+helper); they must never connect to a shared server, and the URL validators
+here refuse every TCP Redis URL. Opt-in native
 gates require exclusive scheduling, existing authentication, and bounded cleanup.
 
 The frozen inventory is in `qualification-routes.ts`. Adapter conformance,

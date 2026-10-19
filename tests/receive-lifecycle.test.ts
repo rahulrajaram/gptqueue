@@ -1,3 +1,4 @@
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
@@ -10,7 +11,7 @@ import { registerTools } from "../src/transports/setup-tools.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 
 /**
  * Connections on this test's database currently parked in a blocking pop.

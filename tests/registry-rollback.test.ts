@@ -14,6 +14,7 @@
  *   - a successful rename or registration overlapping failed attempts;
  *   - that no public reader returns the side hashes' data.
  */
+import { testRedisUrl } from "./helpers/test-redis.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Redis } from "ioredis";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -26,7 +27,7 @@ import { AgentDiagnostics } from "../src/core/agent-diagnostics.js";
 import { listAgents } from "../src/mcp-server/tools/list-agents.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
 
-const TEST_REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379/15";
+const TEST_REDIS_URL = testRedisUrl();
 const N = "shared-new";
 
 type Gate = Readonly<{
