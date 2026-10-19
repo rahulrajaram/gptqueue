@@ -3,7 +3,7 @@
  * the plan's guards, and the apply script's atomic re-check of every guard it
  * can see inside Redis after the plan was read.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
 import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
@@ -13,6 +13,11 @@ import { flushTestKeys, assertNotLiveDb } from "./helpers/redis-test-utils.js";
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379/15";
 assertNotLiveDb(redisUrl, "runtime mailbox remap tests");
 const connections: Redis[] = [];
+// Start from an empty gptq:* namespace: other suites may leave audit entries behind.
+beforeEach(async () => {
+  const redis = new Redis(redisUrl);
+  try { await flushTestKeys(redis, redisUrl); } finally { await redis.quit(); }
+});
 afterEach(async () => { for (const redis of connections.splice(0)) { await flushTestKeys(redis, redisUrl); await redis.quit(); } });
 
 const alive = () => true;
