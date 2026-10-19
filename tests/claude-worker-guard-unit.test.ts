@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { decideAsk, renderAsk } from "../src/claude/hook.js";
 import type { Identity, ProbeResult } from "../src/claude/inbox-probe.js";
-import { isWorkerSession } from "../src/claude/worker-mode.js";
+import { isExplicitWorker, isWorkerSession } from "../src/claude/worker-mode.js";
 
 const ok = (unclaimed: number, mine: number | null = 0, latest: string | null = "1-0", expired = 0): ProbeResult =>
   ({ ok: true, counts: { unclaimed, claimed_by_session: mine, claimed_by_others: expired, expired_by_others: expired, latest_event_id: latest } });
@@ -27,6 +27,22 @@ describe("isWorkerSession truth table", () => {
     [{ GPTQUEUE_WORKER: "true", CLAUDE_CODE_ENTRYPOINT: "cli" }, false],
   ];
   it.each(cases)("%j -> %s", (env, expected) => { expect(isWorkerSession(env)).toBe(expected); });
+});
+
+describe("isExplicitWorker truth table (sidecar: explicit GPTQUEUE_WORKER only)", () => {
+  const cases: ReadonlyArray<[NodeJS.ProcessEnv, boolean]> = [
+    [{}, false],
+    [{ GPTQUEUE_WORKER: "1" }, true],
+    [{ GPTQUEUE_WORKER: "1", GPTQ_AGENT_NAME: "named" }, true],
+    [{ GPTQUEUE_WORKER: "0" }, false],
+    [{ GPTQUEUE_WORKER: "" }, false],
+    [{ GPTQUEUE_WORKER: "yes" }, false],
+    [{ GPTQUEUE_WORKER: "true" }, false],
+    // Not a Claude print-mode child: the sdk-cli inference does not apply.
+    [{ CLAUDE_CODE_ENTRYPOINT: "sdk-cli" }, false],
+    [{ CLAUDE_CODE_ENTRYPOINT: "sdk-cli", GPTQUEUE_WORKER: "0" }, false],
+  ];
+  it.each(cases)("%j -> %s", (env, expected) => { expect(isExplicitWorker(env)).toBe(expected); });
 });
 
 describe("test hermeticity (vitest.config.ts)", () => {

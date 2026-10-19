@@ -11,6 +11,8 @@ import { bindingLifecycleEntry, bootstrapCodexBinding, withBindingState, type Co
 import { activationOutcomeSchema, type ActivationOutcome } from "./runtime.js";
 import { SESSION_KEYS } from "../core/keys.js";
 import { parseRedisSocketUrl } from "../core/redis-socket-url.js";
+import { isExplicitWorker } from "../claude/worker-mode.js";
+import { startWorkerShell } from "./worker-shell.js";
 
 export type ShellClient = "codex" | "pi";
 export interface RegisteredShellOptions {
@@ -239,8 +241,11 @@ export const startRegisteredShell = async (
   }
 };
 
-export const runRegisteredShell = async (argv: readonly string[] = process.argv.slice(2)): Promise<void> => {
+export const runRegisteredShell = async (argv: readonly string[] = process.argv.slice(2),
+  env: NodeJS.ProcessEnv = process.env): Promise<void> => {
   const options = parseRegisteredShellArgs(argv);
+  // GPTQUEUE_WORKER=1: serve MCP without Redis, registration or binding (sv-2).
+  const worker = isExplicitWorker(env);
   const stop = new AbortController();
   const interrupt = () => { process.exitCode = 130; stop.abort(); };
   const terminate = () => { process.exitCode = 143; stop.abort(); };
@@ -249,7 +254,7 @@ export const runRegisteredShell = async (argv: readonly string[] = process.argv.
   process.once("SIGTERM", terminate);
   process.stdin.once("end", eof);
   try {
-    const handle = await startRegisteredShell(options, stop.signal);
+    const handle = worker ? await startWorkerShell(stop.signal) : await startRegisteredShell(options, stop.signal);
     if (process.stdin.readableEnded) stop.abort();
     await handle.closed;
     await handle.close();

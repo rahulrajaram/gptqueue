@@ -9,7 +9,8 @@ import { describe, expect, it } from "vitest";
 import { SESSION_KEYS } from "../src/core/keys.js";
 
 const launch = (url = testRedisUrl()) => {
-  const child = spawn(process.execPath, [resolve("bin/gptqueue-session"), "--client", "codex", "--redis-url", url], { stdio: "pipe" });
+  const child = spawn(process.execPath, [resolve("bin/gptqueue-session"), "--client", "codex", "--redis-url", url],
+    { stdio: "pipe", env: { ...process.env, GPTQUEUE_WORKER: "0" } });
   let stderr = "";
   const done = new Promise<{ code: number | null; signal: string | null }>((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
   const ready = new Promise<string>((resolve, reject) => {

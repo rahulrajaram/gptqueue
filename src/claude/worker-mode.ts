@@ -21,3 +21,12 @@ export const isWorkerSession = (env: NodeJS.ProcessEnv = process.env): boolean =
 
 export const WORKER_SESSION_CONTEXT =
   "gptqueue: headless worker session (print mode); not registered as a mailbox owner, no inbox to claim. Set GPTQUEUE_WORKER=0 to opt in.";
+
+/**
+ * Explicit-only worker mode for processes that are not Claude print-mode
+ * children, such as the registered-shell sidecar (bin/gptqueue-session) that
+ * Codex, Pi and OpenCode launch. Only GPTQUEUE_WORKER === "1" selects it;
+ * "0", unset or any other value keeps normal mailbox ownership.
+ */
+export const isExplicitWorker = (env: NodeJS.ProcessEnv = process.env): boolean =>
+  env.GPTQUEUE_WORKER === "1";

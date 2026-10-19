@@ -141,6 +141,26 @@ tools, also without the gptqueue MCP server (for example `--strict-mcp-config` w
 reviewer-specific MCP config) and in its own worktree. Never set `GPTQ_AGENT_NAME` for a reviewer
 unless it should own a mailbox.
 
+### Registered-shell sidecar (Codex, Pi, OpenCode)
+
+The registered-shell sidecar `bin/gptqueue-session`, which Codex (`gptqueue-shared`), Pi and
+OpenCode launch, is not a Claude print-mode child, so it honors only the explicit form
+(`isExplicitWorker` in `src/claude/worker-mode.ts`): `GPTQUEUE_WORKER=1` selects worker mode;
+`0`, unset or any other value keeps today's behavior. In worker mode the sidecar:
+
+- opens no Redis connection: no registration, session record, presence or heartbeat, runtime
+  binding, registration-audit event or inbox dispatcher;
+- still serves MCP and lists its usual tools, so a client that marks the server required (Codex
+  does) starts normally; every tool returns the error code `HEADLESS_WORKER` ("this session runs
+  with GPTQUEUE_WORKER=1 and has no mailbox; unset it (or set 0) to use gptqueue");
+- writes one stderr line at startup stating worker mode.
+
+Codex passes only whitelisted environment variables to stdio MCP servers, so for a headless
+`codex exec` worker the variable arrives only with
+`-c 'mcp_servers.gptqueue-shared.env_vars=["GPTQUEUE_WORKER"]'` (plus `GPTQUEUE_WORKER=1` in the
+caller's environment). The qualified alternative is not to start the sidecar at all:
+`-c mcp_servers.gptqueue-shared.enabled=false`.
+
 To prove a worker never registered, even transiently, query the registration audit for its time
 window and directory: `gptqueue-doctor registrations --since ... --until ... --cwd <worktree> --json`
 must return no events with `coverage: "complete"`, and every writer that could register in that
