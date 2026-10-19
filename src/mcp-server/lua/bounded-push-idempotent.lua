@@ -1,13 +1,18 @@
 -- Atomic bounded push, retry deduplication, eligible inbox event and its
 -- correlation record (a replay returns before any write). KEYS[7] task ledger,
--- KEYS[8] answered marker; ARGV[10] subject, ARGV[11] ISO now.
+-- KEYS[8] answered marker; ARGV[10] subject, ARGV[11] ISO now, ARGV[12] the
+-- outstanding-key prefix. Admission is the waking rule in
+-- waking-admission-lib.lua (composed in front), checked after the replay
+-- check; a refusal writes nothing (no dedupe record) and answers
+-- {0, id, reason}.
 local existing = redis.call('GET', KEYS[3])
 if existing then return {2, existing} end
 -- KEYS[6] (COR-F2): the recipient's forwarding tombstone; see bounded-push.lua.
 local forwarded = redis.call('GET', KEYS[6])
 if forwarded then return {-1, forwarded} end
 local current = redis.call('LLEN', KEYS[1])
-if current >= tonumber(ARGV[2]) then return {0, ARGV[3]} end
+local refusal = adm_refusal(KEYS[1], current, tonumber(ARGV[2]), ARGV[6] == 'task' or (ARGV[5] == '1' and adm_owner(KEYS[5]) == ARGV[9]), ARGV[8], ARGV[12])
+if refusal then return {0, ARGV[3], refusal} end
 if redis.call('TYPE', KEYS[2]).ok ~= 'none' and redis.call('TYPE', KEYS[2]).ok ~= 'hash' then return redis.error_reply('mailbox metadata key has wrong type') end
 if redis.call('TYPE', KEYS[4]).ok ~= 'none' and redis.call('TYPE', KEYS[4]).ok ~= 'stream' then return redis.error_reply('inbox event key has wrong type') end
 if redis.call('TYPE', KEYS[5]).ok ~= 'none' and redis.call('TYPE', KEYS[5]).ok ~= 'string' then return redis.error_reply('outstanding key has wrong type') end

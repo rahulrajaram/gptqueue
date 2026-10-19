@@ -279,8 +279,8 @@ describe("wake-on-send e2e", () => {
     // Inject the policy change between resolve and wake: while the enqueue is
     // in flight (e.g. retrying a full inbox) the owner updates the actor to
     // store_only. The send must observe the updated record, not the stale one.
-    const enqueue = sender.sendMessage.bind(sender);
-    sender.sendMessage = async (message) => {
+    const enqueue = sender.sendMessageWithOutcome.bind(sender);
+    sender.sendMessageWithOutcome = async (message) => {
       const sent = await enqueue(message);
       await registerActor(sender, "flipper", "store_only", sleepyLaunch(), sessionOf(reg));
       return sent;
@@ -305,8 +305,8 @@ describe("wake-on-send e2e", () => {
     // The reverse flip: the record read before the enqueue is store_only,
     // and the owner enables waking while the enqueue is in flight. The
     // offline recipient must be launched from the fresh record.
-    const enqueue = sender.sendMessage.bind(sender);
-    sender.sendMessage = async (message) => {
+    const enqueue = sender.sendMessageWithOutcome.bind(sender);
+    sender.sendMessageWithOutcome = async (message) => {
       const sent = await enqueue(message);
       await registerActor(sender, "unflipper", "wake_if_offline", sleepyLaunch(), sessionOf(reg));
       return sent;

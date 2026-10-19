@@ -544,6 +544,12 @@ export class RedisClient {
     return this.mailbox.send(message);
   }
 
+  /** sendMessage, reporting the refusal reason when the mailbox stayed full. */
+  async sendMessageWithOutcome(message: QueueMessage) {
+    this.requireRegistered();
+    return this.mailbox.sendWithOutcome(message);
+  }
+
   async sendMessageIdempotent(message: QueueMessage, idempotencyKey: string) {
     const sender = this.requireRegistered();
     return this.mailbox.sendIdempotent(message, sender, idempotencyKey);
@@ -604,7 +610,7 @@ export class RedisClient {
 
   async getQueueStatus(
     agent?: string
-  ): Promise<{ agent: string; depth: number; max_size: number }[]> {
+  ): Promise<{ agent: string; depth: number; max_size: number; waking_count: number; quiet_count: number }[]> {
     return this.mailbox.status(agent);
   }
 

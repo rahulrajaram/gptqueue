@@ -13,7 +13,7 @@ import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Redis } from "ioredis";
 import { SESSION_KEYS } from "./keys.js";
-import { MailboxStore } from "./mailbox-store.js";
+import { MailboxStore, type QueueFullReason } from "./mailbox-store.js";
 import { TurnStateStore } from "./turn-state.js";
 import { admitTaskLedgerEntry, taskLedgerKey } from "./task-ledger.js";
 import { WATCHDOG_RATE_WINDOW_MS } from "./watchdog-push.js";
@@ -229,21 +229,22 @@ const readFired = async (redis: Redis, keys: readonly string[]): Promise<FireRec
  */
 const sendOnce = async (
   mailbox: MailboxStore, to: string, action: WatchdogAction, now: Date, faults?: WatchdogOptions["faults"], rateCap?: number,
-): Promise<"ok" | "full" | "limited"> => {
-  let status: "sent" | "duplicate" | "full" | "limited";
+): Promise<Readonly<{ status: "ok" | "full" | "limited"; reason?: QueueFullReason }>> => {
+  let outcome: Awaited<ReturnType<MailboxStore["sendWatchdogTask"]>>;
   try {
     const message = systemTask(to, action, now);
     const key = `watchdog:${action.fire_key}`;
     // X3: a reminder's rate admission and enqueue are one script on Redis TIME (core/watchdog-push.ts).
-    status = rateCap === undefined
-      ? (await mailbox.sendIdempotent(message, WATCHDOG_SENDER, key, SEND_ATTEMPTS)).status
-      : (await mailbox.sendWatchdogTask(message, WATCHDOG_SENDER, key, { fireKey: action.fire_key, cap: rateCap }, SEND_ATTEMPTS)).status;
+    outcome = rateCap === undefined
+      ? await mailbox.sendIdempotent(message, WATCHDOG_SENDER, key, SEND_ATTEMPTS)
+      : await mailbox.sendWatchdogTask(message, WATCHDOG_SENDER, key, { fireKey: action.fire_key, cap: rateCap }, SEND_ATTEMPTS);
     faults?.afterSend?.(action.fire_key);
   } catch (error) {
     // X2: a thrown send (timeout, lost connection, lost ack) may or may not have enqueued.
     throw new UncertainDeliveryError(error);
   }
-  return status === "full" || status === "limited" ? status : "ok";
+  if (outcome.status === "full") return { status: "full", reason: outcome.reason };
+  return { status: outcome.status === "limited" ? "limited" : "ok" };
 };
 
 /** X2: the mailbox positively refused the message (full, nothing stored). */
@@ -298,8 +299,8 @@ const effect = async (
   switch (action.kind) {
     case "remind": {
       const sent = await sendOnce(mailbox, action.to, action, now, faults, config.max_reminders_per_recipient_per_hour);
-      if (sent === "full") throw new NotEnqueuedError(`mailbox ${action.to} is full`);
-      if (sent === "limited") throw new RateLimitedError(`recipient ${action.to} reached its hourly reminder cap`);
+      if (sent.status === "full") throw new NotEnqueuedError(`mailbox ${action.to} is full (${sent.reason ?? "full"})`);
+      if (sent.status === "limited") throw new RateLimitedError(`recipient ${action.to} reached its hourly reminder cap`);
       break;
     }
     case "escalate": {
@@ -310,7 +311,7 @@ const effect = async (
       // A full operator mailbox is a recorded partial success (F3), not a failure.
       const operatorMailbox: "ok" | "full" | "none" = config.operator === null
         ? "none"
-        : (await sendOnce(mailbox, config.operator, action, now, faults)) === "full" ? "full" : "ok"; // escalations are never rate limited
+        : (await sendOnce(mailbox, config.operator, action, now, faults)).status === "full" ? "full" : "ok"; // escalations are never rate limited
       const delivered = await deliverAlert(alerts, action, question ?? action.text, now);
       const line = { at: now.toISOString(), rule: action.rule, lead: action.lead, task_id: action.task_id, to: action.to, fire_key: action.fire_key, text: action.text, question, operator_mailbox: operatorMailbox, ...delivered };
       // R1: the log is at-least-once (consumers dedupe by fire_key); this guard skips the common retry,

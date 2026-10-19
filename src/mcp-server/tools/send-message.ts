@@ -409,7 +409,7 @@ export async function sendMessage(
 
   const outcome = params.idempotency_key
     ? await client.sendMessageIdempotent(message, params.idempotency_key)
-    : { status: (await client.sendMessage(message)) ? "sent" as const : "full" as const, messageId: message.id };
+    : await client.sendMessageWithOutcome(message);
 
   if (outcome.status === "full") {
     return toolResult({
@@ -418,6 +418,8 @@ export async function sendMessage(
         code: "QUEUE_FULL",
         message: "Queue full after retries",
         retryable: true,
+        // waking_full | full | oversize (waking admission, docs/QUEUE-CAPACITY.md).
+        reason: outcome.reason,
       },
       to: params.to,
     }, true);

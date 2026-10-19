@@ -35,6 +35,20 @@ const forwardedMessage = (message: QueueMessage, tombstone: string): QueueMessag
   return { ...message, to: target };
 };
 
+/** Why an ordinary send was refused (waking-admission-lib.lua). */
+export type QueueFullReason = "waking_full" | "full" | "oversize";
+const fullReason = (value: unknown): QueueFullReason =>
+  value === "waking_full" || value === "oversize" ? value : "full";
+
+/** The prefix of SESSION_KEYS.outstanding keys, passed to the admission Lua. */
+export const OUTSTANDING_PREFIX = SESSION_KEYS.outstanding("", "").slice(0, -1);
+
+const admissionLib: string = readFileSync(join(LUA_DIR, "waking-admission-lib.lua"), "utf-8");
+/** A push script with the waking-admission functions composed in front. */
+const withAdmission = (file: string): string => `${admissionLib}\n${readFileSync(join(LUA_DIR, file), "utf-8")}`;
+/** {waking, quiet} counts of one mailbox, by the same classification admission uses. */
+const CLASS_COUNTS_SCRIPT = `${admissionLib}\nlocal waking, quiet = adm_counts(KEYS[1], ARGV[1], ARGV[2])\nreturn {waking, quiet}`;
+
 const eligible = (message: QueueMessage): boolean =>
   message.type === "task" || (message.type === "result" || message.type === "error") && !!message.payload.in_reply_to;
 
@@ -62,14 +76,8 @@ export class MailboxStore {
         10
       );
 
-    this.boundedPushScript = readFileSync(
-      join(LUA_DIR, "bounded-push.lua"),
-      "utf-8"
-    );
-    this.boundedPushIdempotentScript = readFileSync(
-      join(LUA_DIR, "bounded-push-idempotent.lua"),
-      "utf-8"
-    );
+    this.boundedPushScript = withAdmission("bounded-push.lua");
+    this.boundedPushIdempotentScript = withAdmission("bounded-push-idempotent.lua");
     this.watchdogPushScript = composeWatchdogPush(this.boundedPushIdempotentScript);
     this.migrateMessagesScript = readFileSync(
       join(LUA_DIR, "migrate-messages.lua"),
@@ -79,7 +87,16 @@ export class MailboxStore {
 
   /** Push a message to a target agent's mailbox with bounded retry (a full mailbox is retried up to `maxAttempts` times). */
   async send(message: QueueMessage, maxAttempts = 10): Promise<boolean> {
+    return (await this.sendWithOutcome(message, maxAttempts)).status === "sent";
+  }
+
+  /** send(), reporting the last refusal's reason when every attempt was refused. */
+  async sendWithOutcome(
+    message: QueueMessage,
+    maxAttempts = 10
+  ): Promise<{ status: "sent"; messageId: string } | { status: "full"; messageId: string; reason: QueueFullReason }> {
     let current = message;
+    let reason: QueueFullReason = "full";
     let delay = 100;
     const maxDelay = 5000;
 
@@ -103,18 +120,20 @@ export class MailboxStore {
         current.to,
         current.from,
         taskSubject(current.payload.content),
-        new Date().toISOString()
-      ) as [number, string];
-      if (raw[0] === 1) return true;
+        new Date().toISOString(),
+        OUTSTANDING_PREFIX
+      ) as [number, string, string?];
+      if (raw[0] === 1) return { status: "sent", messageId: current.id };
       if (raw[0] === -1) {
         current = forwardedMessage(current, raw[1]);
         continue;
       }
+      reason = fullReason(raw[2]);
 
       await new Promise((r) => setTimeout(r, delay));
       delay = Math.min(delay * 2, maxDelay);
     }
-    return false;
+    return { status: "full", messageId: message.id, reason };
   }
 
   /**
@@ -129,8 +148,9 @@ export class MailboxStore {
     sender: string,
     idempotencyKey: string,
     maxAttempts = 10
-  ): Promise<{ status: "sent" | "duplicate" | "full"; messageId: string }> {
+  ): Promise<{ status: "sent" | "duplicate"; messageId: string } | { status: "full"; messageId: string; reason: QueueFullReason }> {
     let current = message;
+    let reason: QueueFullReason = "full";
     let delay = 100;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const raw = await this.redis.eval(
@@ -154,18 +174,20 @@ export class MailboxStore {
         current.to,
         current.from,
         taskSubject(current.payload.content),
-        new Date().toISOString()
-      ) as [number, string];
+        new Date().toISOString(),
+        OUTSTANDING_PREFIX
+      ) as [number, string, string?];
       if (raw[0] === 1) return { status: "sent", messageId: raw[1] };
       if (raw[0] === 2) return { status: "duplicate", messageId: raw[1] };
       if (raw[0] === -1) {
         current = forwardedMessage(current, raw[1]);
         continue;
       }
+      reason = fullReason(raw[2]);
       await new Promise((resolve) => setTimeout(resolve, delay));
       delay = Math.min(delay * 2, 5000);
     }
-    return { status: "full", messageId: message.id };
+    return { status: "full", messageId: message.id, reason };
   }
 
   /**
@@ -179,8 +201,9 @@ export class MailboxStore {
     idempotencyKey: string,
     rate: Readonly<{ fireKey: string; cap: number }>,
     maxAttempts = 10
-  ): Promise<{ status: "sent" | "duplicate" | "full" | "limited"; messageId: string }> {
+  ): Promise<{ status: "sent" | "duplicate" | "limited"; messageId: string } | { status: "full"; messageId: string; reason: QueueFullReason }> {
     let current = message;
+    let reason: QueueFullReason = "full";
     let delay = 100;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const raw = await this.redis.eval(
@@ -206,9 +229,10 @@ export class MailboxStore {
         current.from,
         taskSubject(current.payload.content),
         new Date().toISOString(),
+        OUTSTANDING_PREFIX,
         rate.fireKey,
         rate.cap
-      ) as [number, string];
+      ) as [number, string, string?];
       if (raw[0] === 1) return { status: "sent", messageId: raw[1] };
       if (raw[0] === 2) return { status: "duplicate", messageId: raw[1] };
       if (raw[0] === 3) return { status: "limited", messageId: raw[1] };
@@ -216,10 +240,11 @@ export class MailboxStore {
         current = forwardedMessage(current, raw[1]);
         continue;
       }
+      reason = fullReason(raw[2]);
       await new Promise((resolve) => setTimeout(resolve, delay));
       delay = Math.min(delay * 2, 5000);
     }
-    return { status: "full", messageId: message.id };
+    return { status: "full", messageId: message.id, reason };
   }
 
   /** Blocking pop from an agent's mailbox. */
@@ -315,7 +340,7 @@ export class MailboxStore {
   /** Get queue status for one or all agents. */
   async status(
     agentName?: string
-  ): Promise<{ agent: string; depth: number; max_size: number }[]> {
+  ): Promise<{ agent: string; depth: number; max_size: number; waking_count: number; quiet_count: number }[]> {
     const targets = agentName
       ? [agentName]
       : Object.keys(await this.redis.hgetall(SESSION_KEYS.registry));
@@ -324,14 +349,18 @@ export class MailboxStore {
     // One pipelined round trip for every agent's depth and bound.
     const pipe = this.redis.pipeline();
     for (const name of targets) {
-      pipe.llen(SESSION_KEYS.queue(name)).hget(SESSION_KEYS.mailboxMeta(name), "max_size");
+      pipe.llen(SESSION_KEYS.queue(name)).hget(SESSION_KEYS.mailboxMeta(name), "max_size")
+        .eval(CLASS_COUNTS_SCRIPT, 1, SESSION_KEYS.queue(name), name, OUTSTANDING_PREFIX);
     }
     const results = (await pipe.exec()) ?? [];
     return targets.map((name, i) => {
-      const [depthError, depth] = results[i * 2] ?? [null, 0];
-      const [boundError, bound] = results[i * 2 + 1] ?? [null, null];
+      const [depthError, depth] = results[i * 3] ?? [null, 0];
+      const [boundError, bound] = results[i * 3 + 1] ?? [null, null];
+      const [countError, counts] = results[i * 3 + 2] ?? [null, [0, 0]];
       if (depthError) throw depthError;
       if (boundError) throw boundError;
+      if (countError) throw countError;
+      const [waking, quiet] = counts as [number, number];
       return {
         agent: name,
         depth: Number(depth),
@@ -339,6 +368,8 @@ export class MailboxStore {
           (bound as string | null) || String(SESSION_DEFAULTS.DEFAULT_QUEUE_BOUND),
           10
         ),
+        waking_count: Number(waking),
+        quiet_count: Number(quiet),
       };
     });
   }

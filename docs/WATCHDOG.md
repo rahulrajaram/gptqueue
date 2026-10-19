@@ -31,7 +31,8 @@ configured leads. Scheduling it (a timer) is an operator decision and is not ins
     the normal idempotent send (`bounded-push-idempotent.lua`). It checks, in order:
     1. the idempotency key: a duplicate changes nothing and adds no rate entry;
     2. the forwarding tombstone;
-    3. the mailbox bound: full changes nothing;
+    3. waking admission (a reminder is a task, so it is refused only with `waking_full` or
+       `oversize`; see [QUEUE-CAPACITY.md](QUEUE-CAPACITY.md)): a refusal changes nothing;
     4. the rate set `gptq:watchdog:sent:<recipient>`: entries older than one hour by Redis TIME are
        trimmed, and at the cap the reminder is refused (`limited`) with nothing changed.
 

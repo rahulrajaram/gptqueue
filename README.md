@@ -325,7 +325,7 @@ Optionally add the hook script to `~/.claude/settings.json` for automatic startu
 | `GPTQUEUE_HTTP_IDLE_TIMEOUT_MS` | `3600000` (1 hour) | Close an HTTP MCP session after this long with no open request (an open SSE stream counts as open); the client gets `404` and re-initializes. `0` disables |
 | `GPTQUEUE_HTTP_MAX_SESSIONS` | `256` | Maximum concurrent HTTP MCP sessions; further `initialize` requests get `503` |
 | `GPTQ_AGENT_NAME` | _(none)_ | Pre-register with this agent name on startup (stdio only) |
-| `GPTQ_QUEUE_BOUND` | `10` | Max messages per agent inbox |
+| `GPTQ_QUEUE_BOUND` | `10` | Inbox `max_size`: the ordinary-send quota for each class of mail (see [docs/QUEUE-CAPACITY.md](docs/QUEUE-CAPACITY.md)) |
 | `AGENT_ATTRIBUTION_CALLER` | `gptqueue-pty` | Attribution for PTY-wrapped child CLI processes |
 | `AGENT_ATTRIBUTION_PROJECT` | Current directory name | Project attribution for PTY-wrapped child CLI processes |
 | `AGENT_ATTRIBUTION_SESSION` | Agent name | Session attribution for PTY-wrapped child CLI processes |
@@ -354,7 +354,7 @@ durable actor woken through the PTY consumes its batch at-least-once.
 
 3. **Discovery** -- Any agent (even unregistered) can call `list_agents` to see all registered agents and whether they're online. Online status is computed from active session leases.
 
-4. **Messaging** -- `send_message` pushes to the target agent's Redis list (`gptq:q:<name>`). A Lua script enforces the queue bound atomically. If the queue is full, the sender retries with exponential backoff (up to 10 attempts).
+4. **Messaging** -- `send_message` pushes to the target agent's Redis list (`gptq:q:<name>`). A Lua script enforces waking admission atomically: tasks and owned replies are admitted while fewer than `max_size` waking entries are queued, other mail while the queue holds fewer than `max_size` entries ([docs/QUEUE-CAPACITY.md](docs/QUEUE-CAPACITY.md)). If the send is refused, the sender retries with exponential backoff (up to 10 attempts), then fails with retryable `QUEUE_FULL` and a `reason`.
 
    **Resolve-then-push.** Before any queue write, `send_message` resolves the recipient: it proceeds when the target has a durable actor-directory record or is a registered agent; otherwise it rejects the send with a structured `unknown_recipient` error and creates no queue (`gptq:q:<name>`) or metadata (`gptq:meta:<name>`) keys. A typo'd or unknown name can never silently create an orphan mailbox. Self-send (to the caller's own registered name) remains valid.
 

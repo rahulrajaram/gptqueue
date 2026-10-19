@@ -81,7 +81,7 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
 
   server.tool(
     "send_message",
-    "[safety: writable] Send a message to another GPTQueue inbox. Supply idempotency_key for safely retryable delivery.",
+    "[safety: writable] Send a message to another GPTQueue inbox. Supply idempotency_key for safely retryable delivery. A full inbox fails with retryable QUEUE_FULL and a reason (waking_full, full or oversize).",
     sendMessageSchema.shape,
     WRITABLE,
     async (params) => safeToolCall(async () => {
@@ -114,7 +114,7 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
 
   server.tool(
     "get_queue_status",
-    "[safety: readonly] Get queue depth and metadata for an agent or all agents. Works before registration.",
+    "[safety: readonly] Get queue depth, max_size and the waking/quiet entry counts for an agent or all agents. Works before registration.",
     queueStatusSchema.shape,
     READ_ONLY,
     async (params) => safeToolCall(() => getQueueStatus(redisClient, queueStatusSchema.parse(params)))

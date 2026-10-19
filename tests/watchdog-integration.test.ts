@@ -236,11 +236,12 @@ describe("watchdog --once against Redis db 15", () => {
     expect(out.actions).toEqual([]);
   });
 
+  // Fillers are tasks: under waking admission only waking mail fills a task's quota.
   it("F3: a full operator mailbox is a recorded partial success; a second run duplicates nothing", async () => {
     const root = name("wd-root");
     const operator = name("wd-op");
     const { lead, id } = await leadWaitingOn(operator, 1, "may I purge the cache?");
-    await redis.rpush(SESSION_KEYS.queue(operator), ...Array.from({ length: 20 }, () => JSON.stringify({ id: randomUUID(), from: "filler", to: operator, type: "status", timestamp: new Date().toISOString(), payload: { content: "x" } })));
+    await redis.rpush(SESSION_KEYS.queue(operator), ...Array.from({ length: 20 }, () => JSON.stringify({ id: randomUUID(), from: "filler", to: operator, type: "task", timestamp: new Date().toISOString(), payload: { content: "x" } })));
     const stateHome = join(dir, "state-full");
     const configHome = join(dir, "cfg-full");
     await mkdir(join(configHome, "gptqueue"), { recursive: true });
@@ -468,7 +469,7 @@ describe("watchdog --once against Redis db 15", () => {
     const target = name("wd-full");
     extraKeys.push(WATCHDOG_KEYS.sent(target));
     const { lead, id } = await leadWaitingOn(target, 20);
-    await redis.rpush(SESSION_KEYS.queue(target), ...Array.from({ length: 20 }, () => JSON.stringify({ id: randomUUID(), from: "filler", to: target, type: "status", timestamp: new Date().toISOString(), payload: { content: "x" } })));
+    await redis.rpush(SESSION_KEYS.queue(target), ...Array.from({ length: 20 }, () => JSON.stringify({ id: randomUUID(), from: "filler", to: target, type: "task", timestamp: new Date().toISOString(), payload: { content: "x" } })));
     const configPath = await writeConfig({ ...config([lead], name("wd-root"), null), max_reminders_per_recipient_per_hour: 1 });
     const out = reportOf(await runWatchdog({ configPath, dryRun: false, redisUrl: REDIS_URL, stateHome: join(dir, "state-w1-full"), configHome: join(dir, "no-alerts") }));
     expect(out.actions).toEqual([expect.objectContaining({ fire_key: `remind:${lead}:${id}`, status: "failed" })]);

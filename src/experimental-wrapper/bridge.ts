@@ -150,7 +150,7 @@ const registerBoundTools = (
   );
   server.tool(
     "get_queue_status",
-    "[safety: readonly] Get queue depth and metadata for an agent or all agents.",
+    "[safety: readonly] Get queue depth, max_size and the waking/quiet entry counts for an agent or all agents.",
     queueStatusSchema.shape,
     READ_ONLY,
     async (params) =>

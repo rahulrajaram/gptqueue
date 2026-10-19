@@ -1,13 +1,17 @@
 -- Atomic bounded push plus an eligible header-only inbox event and its
 -- correlation record. KEYS[6] task ledger of this message, KEYS[7] answered
--- marker of its in_reply_to; ARGV[9] subject, ARGV[10] ISO now.
+-- marker of its in_reply_to; ARGV[9] subject, ARGV[10] ISO now, ARGV[11] the
+-- outstanding-key prefix (SESSION_KEYS.outstanding). Admission is the waking
+-- rule in waking-admission-lib.lua (composed in front); a refusal writes
+-- nothing and answers {0, '', reason}.
 -- KEYS[5] (COR-F2): the recipient's forwarding tombstone. A retired or
 -- adopted provisional name answers {-1, target|'retired'} so the caller
 -- forwards or refuses, instead of pushing into a queue nothing will claim.
 local forwarded = redis.call('GET', KEYS[5])
 if forwarded then return {-1, forwarded} end
 local current = redis.call('LLEN', KEYS[1])
-if current >= tonumber(ARGV[2]) then return {0, ''} end
+local refusal = adm_refusal(KEYS[1], current, tonumber(ARGV[2]), ARGV[4] == 'task' or (ARGV[5] == '1' and adm_owner(KEYS[4]) == ARGV[8]), ARGV[7], ARGV[11])
+if refusal then return {0, '', refusal} end
 if redis.call('TYPE', KEYS[2]).ok ~= 'none' and redis.call('TYPE', KEYS[2]).ok ~= 'hash' then return redis.error_reply('mailbox metadata key has wrong type') end
 if redis.call('TYPE', KEYS[3]).ok ~= 'none' and redis.call('TYPE', KEYS[3]).ok ~= 'stream' then return redis.error_reply('inbox event key has wrong type') end
 if redis.call('TYPE', KEYS[4]).ok ~= 'none' and redis.call('TYPE', KEYS[4]).ok ~= 'string' then return redis.error_reply('outstanding key has wrong type') end

@@ -94,9 +94,10 @@ describe("watchdog send script (rate admission + enqueue in one script)", () => 
   it("full is a definite non-delivery that changes nothing", async () => {
     const to = recipient();
     const store = new MailboxStore(redis, redis, 1);
-    await redis.rpush(SESSION_KEYS.queue(to), "{}");
+    // A reminder is a task: only waking mail fills its quota (waking admission).
+    await redis.rpush(SESSION_KEYS.queue(to), JSON.stringify(task(to)));
     const message = task(to);
-    expect((await send(store, message, "remind:f:t")).status).toBe("full");
+    expect(await send(store, message, "remind:f:t")).toEqual({ status: "full", messageId: message.id, reason: "waking_full" });
     expect(await redis.zcard(SESSION_KEYS.watchdogSent(to))).toBe(0);
     expect(await redis.exists(SESSION_KEYS.idempotencyFor(SYSTEM_SENDER, to, "watchdog:remind:f:t"), SESSION_KEYS.taskLedger(message.id))).toBe(0);
   });
