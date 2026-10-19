@@ -2,6 +2,8 @@ import { Redis } from "ioredis";
 import { HEARTBEAT_TTL, HEARTBEAT_INTERVAL } from "./types.js";
 import type { QueueMessage } from "./types.js";
 import { SESSION_KEYS, CLAIM_KEYS, DLQ_KEYS, DLQ_PROVISIONAL, SESSION_DEFAULTS } from "../core/keys.js";
+import { sessionTag } from "../core/session-tag.js";
+import { auditClaudeSession, auditRuntime } from "../core/registration-audit.js";
 import { occupancyGuardLua, recheckHintLua } from "../core/occupancy-guard.js";
 import { AdoptionRefusedError, parseGuardReply, RUNTIME_ADOPTION_REFUSALS } from "../core/adoption-refusal.js";
 import { sweepProvisional } from "../core/provisional-sweeper.js";
@@ -451,7 +453,11 @@ export class RedisClient {
     };
     // A completed value: publishing it also drops the name's rollback
     // bookkeeping, so no failed attempt's undo can overwrite it (R2).
-    await this.sessionStore.publishRegistration(name, JSON.stringify(registration));
+    const runtime = auditRuntime(metadata?.client, process.env);
+    await this.sessionStore.publishRegistration(name, JSON.stringify(registration), {
+      name, session_tag: sessionTag(session.session_id), runtime, pid: process.pid,
+      cwd: metadata?.working_directory ?? process.cwd(), claude_session: auditClaudeSession(runtime, process.env),
+    });
     await this.mailbox.ensureMailbox(name);
 
     // Start both session lease refresh and legacy heartbeat

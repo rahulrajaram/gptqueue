@@ -137,6 +137,11 @@ tools, also without the gptqueue MCP server (for example `--strict-mcp-config` w
 reviewer-specific MCP config) and in its own worktree. Never set `GPTQ_AGENT_NAME` for a reviewer
 unless it should own a mailbox.
 
+To prove a worker never registered, even transiently, query the registration audit for its time
+window and directory: `gptqueue-doctor registrations --since ... --until ... --cwd <worktree> --json`
+must return no events with `coverage: "complete"` (see "Registration audit" in
+AUTOMATIC_SHELL_REGISTRATION.md).
+
 ## Optional: AskUserQuestion guard
 
 `AskUserQuestion` blocks the session until the operator answers. An orchestrator that asks while

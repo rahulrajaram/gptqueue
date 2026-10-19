@@ -419,3 +419,47 @@ Exit codes:
 - 1: a bad or missing option;
 - 2: a connection or other error. After `--apply yes` the outcome is then
   unknown, so run the dry run again before retrying.
+
+### Registration audit: proving who registered
+
+Every committed registration of a new session (any runtime: the Claude MCP server, registered
+shells, the plain MCP server, HTTP) appends one entry to the stream `gptq:registration-audit`
+(`MAXLEN ~ 10000`). The entry is written by the same Lua script that publishes the registry entry
+(`PUBLISH_REGISTRATION_AUDITED_SCRIPT` in `src/core/session-store.ts`), so it exists if and only
+if the registration committed. A failed or rolled-back attempt never reaches that script and
+writes nothing (there is no `rolled_back` event). Unregistering, reaping or rolling back later
+never removes the entry, so it proves a transient registration that a registry snapshot no longer
+shows. A registered shell's later metadata republish is not a new registration and is not audited.
+
+Fields: `event=registered`, `name`, `session_tag` (the `sid-sha256:` tag, never the raw session
+id), `runtime` (`claude` | `codex` | `pi` | `generic` | `unknown`; a declared client outside that
+list, such as `opencode`, is `unknown`), `pid`, `cwd` (the shell's working directory when it
+declared one, else the registering process's cwd), and `claude_session` (the Claude session UUID
+from `CLAUDE_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` when the Claude MCP path has it, else empty).
+
+Query it read-only (EXISTS, XINFO STREAM and XRANGE only):
+
+```
+bin/gptqueue-doctor registrations --since 2026-10-19T00:00:00Z --until 2026-10-19T12:00:00Z \
+  [--cwd /abs/dir] [--claude-session UUID] [--name NAME] [--redis-url URL] --json
+```
+
+`--redis-url` defaults to `$REDIS_URL`, then `redis://127.0.0.1:6379/0`. The output is one JSON
+object: `{schema_version: 1, since, until, coverage, complete_from, events: [{at, name,
+session_tag, runtime, pid, cwd, claude_session}], truncated}`, with at most 500 events
+(`truncated: true` beyond). Filters are exact matches (`--claude-session` ignores case).
+
+`coverage` says whether an empty result proves absence:
+
+- `complete`: the stream provably holds every registration since `--since`
+  (`complete_from <= since`). Nothing was removed and the stream's first entry is older, or
+  entries were removed (`entries-added > length` for MAXLEN trims, `max-deleted-entry-id` for
+  XDEL) but only before `--since`.
+- `incomplete`: events before `complete_from` were trimmed or deleted, or the audit started
+  writing to this Redis after `--since`. When the audit was deployed after `--since`,
+  `complete_from` is the first audited registration, so the caller sees the deploy time there.
+  An empty stream gives `unknown`, since nothing proves when it started.
+- `unknown`: no audit stream on this Redis, or a Redis older than 7.0 without the XINFO fields.
+
+Exit codes: 0 success, 2 invalid arguments, 4 Redis unavailable (or the query failed).
+`bin/gptqueue-doctor registrations --help` prints the same summary.

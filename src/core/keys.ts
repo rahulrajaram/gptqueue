@@ -121,6 +121,12 @@ export const SESSION_KEYS = {
   /** Append-only audit of agent-name takeovers from dead holders (stream). */
   identityAudit: "gptq:identity-audit",
   /**
+   * Append-only audit of committed registrations (stream, MAXLEN ~ 10000):
+   * one event per registry publication of a new session, written atomically
+   * with it. Carries session tags, never raw session ids.
+   */
+  registrationAudit: "gptq:registration-audit",
+  /**
    * DL-2: names registered as a sidecar's per-startup provisional identity
    * and not yet adopted or bound. The provisional sweeper retires a member
    * whose sessions all expired (core/provisional-sweeper.ts).

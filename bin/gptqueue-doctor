@@ -15,15 +15,29 @@ import { reapOfflineIdentities } from '../dist/core/registry-reaper.js';
 import { CodexSocketClient } from '../dist/registered-shell/codex-socket.js';
 
 const [command, ...args] = process.argv.slice(2);
-const allowed = ['agent', 'find', 'delivery', 'connection', 'config', 'continuity-plan', 'continuity-apply', 'sweep-provisional', 'reap-offline', 'remap-runtime-mailbox'];
+// Read-only registration audit query; its own parser, help and exit codes (0 ok, 2 args, 4 Redis).
+if (command === 'registrations') {
+  const { runRegistrationsCli } = await import('../dist/core/registration-audit.js');
+  const outcome = await runRegistrationsCli(args, process.env, url => {
+    const client = new Redis(url, { maxRetriesPerRequest: 0, enableOfflineQueue: true, connectTimeout: 2000, retryStrategy: () => null });
+    client.on('error', () => undefined);
+    return client;
+  });
+  if (outcome.stdout) console.log(outcome.stdout);
+  if (outcome.stderr) console.error(outcome.stderr);
+  process.exit(outcome.exitCode);
+}
+const allowed = ['registrations', 'agent', 'find', 'delivery', 'connection', 'config', 'continuity-plan', 'continuity-apply', 'sweep-provisional', 'reap-offline', 'remap-runtime-mailbox'];
 if (!allowed.includes(command)) {
-  console.log('Usage: node scripts/gptqueue-doctor.mjs <agent|find|delivery|connection|config|continuity-plan|continuity-apply|sweep-provisional|reap-offline> --redis-url redis://host/db [--agent NAME] [--message-id ID] [--query TEXT] [--thread-id ID] [--client codex|pi --runtime-id ID --cwd PATH --legacy yes --out PLAN] [--plan PLAN --apply yes] [--tier base|sandbox-auto|sandbox-max] [--limit N]');
+  console.log('Usage: node scripts/gptqueue-doctor.mjs <registrations|agent|find|delivery|connection|config|continuity-plan|continuity-apply|sweep-provisional|reap-offline> --redis-url redis://host/db [--agent NAME] [--message-id ID] [--query TEXT] [--thread-id ID] [--client codex|pi --runtime-id ID --cwd PATH --legacy yes --out PLAN] [--plan PLAN --apply yes] [--tier base|sandbox-auto|sandbox-max] [--limit N]');
   console.log('       node scripts/gptqueue-doctor.mjs reap-offline --redis-url URL [--dry-run | --apply] [--min-age-hours N] [--limit N] [--max-keys N] [--timeout-seconds N] [--json]   (dry run unless --apply)');
   console.log('       --max-keys: growth breaker, refuse without scanning above this DBSIZE (default 25000). --timeout-seconds (default 30) kills this');
   console.log('       client only: a Lua step already running on the server cannot be interrupted; the breaker bounds that.');
   console.log('       reap-offline exit codes: 0 evaluated (skips/remaining are normal), 4 batch refused with nothing written (report.refused),');
   console.log('       5 evaluated but report.anomalies > 0 unexpected_key_type skips (other names may be reaped; unhealthy),');
   console.log('       3 client timeout (server outcome unknown), 1 usage, 2 connection/other error. Precedence 3 > 4 > 5 > 0.');
+  console.log('       node scripts/gptqueue-doctor.mjs registrations --since ISO --until ISO [--cwd PATH] [--claude-session UUID] [--name N] [--redis-url URL] --json');
+  console.log('         read-only registration audit query; run `registrations --help` for coverage and exit codes');
   console.log('       node scripts/gptqueue-doctor.mjs remap-runtime-mailbox --redis-url URL --client codex|pi --runtime-id ID --from MAILBOX --to MAILBOX');
   console.log('         [--apply yes] [--accept-incomplete-disclosure yes] [--max-correlation-scan N]');
   console.log('       Repoint one runtime\'s mailbox mapping from a dormant FROM to a live TO (dry run unless --apply yes). Previews both');

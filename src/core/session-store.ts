@@ -13,6 +13,7 @@ import { SESSION_KEYS, SESSION_DEFAULTS, SYSTEM_SENDER } from "./keys.js";
 import type { SessionRecord, LeaseState, AgentPresence } from "./types.js";
 import { GptQueueError } from "../mcp-server/errors.js";
 import { sessionTag } from "./session-tag.js";
+import { auditFieldList, REGISTRATION_AUDIT_MAXLEN, type RegistrationAuditEvent } from "./registration-audit.js";
 
 /** KEYS order shared by the registry rollback scripts below. */
 const REGISTRY_ROLLBACK_KEYS = [
@@ -203,6 +204,22 @@ redis.call('HDEL', KEYS[3], ARGV[1])
 return 1
 `;
 
+/**
+ * PUBLISH_REGISTRATION_SCRIPT plus the registration audit event, in the same
+ * script so the event exists iff the registration committed (no event for a
+ * failed or rolled-back attempt). KEYS[4] audit stream; ARGV 3 MAXLEN, then
+ * the event's field/value pairs.
+ */
+const PUBLISH_REGISTRATION_AUDITED_SCRIPT = `
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('HDEL', KEYS[2], ARGV[1])
+redis.call('HDEL', KEYS[3], ARGV[1])
+local fields = {}
+for i = 4, #ARGV do fields[#fields + 1] = ARGV[i] end
+redis.call('XADD', KEYS[4], 'MAXLEN', '~', ARGV[3], '*', unpack(fields))
+return 1
+`;
+
 /** The provisional registry value a createSession stored. */
 export interface RegistryWrite {
   readonly agent_name: string;
@@ -355,8 +372,14 @@ export class SessionStore {
    * rollback bookkeeping in one step. Every writer of a completed value goes
    * through this, so a failed attempt's undo can never overwrite it.
    */
-  async publishRegistration(agentName: string, value: string): Promise<void> {
-    await this.redis.eval(PUBLISH_REGISTRATION_SCRIPT, 3, ...REGISTRY_ROLLBACK_KEYS, agentName, value);
+  async publishRegistration(agentName: string, value: string, audit?: RegistrationAuditEvent): Promise<void> {
+    if (audit === undefined) {
+      // A metadata republish of an already-audited session.
+      await this.redis.eval(PUBLISH_REGISTRATION_SCRIPT, 3, ...REGISTRY_ROLLBACK_KEYS, agentName, value);
+      return;
+    }
+    await this.redis.eval(PUBLISH_REGISTRATION_AUDITED_SCRIPT, 4, ...REGISTRY_ROLLBACK_KEYS, SESSION_KEYS.registrationAudit,
+      agentName, value, REGISTRATION_AUDIT_MAXLEN, ...auditFieldList(audit));
   }
 
   /**
