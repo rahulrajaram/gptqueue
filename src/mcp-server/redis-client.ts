@@ -66,6 +66,14 @@ const forwardProvisionalLua = (src: string, dst: string, sourceArg: string, targ
       -- the target instead of landing in the deleted, unclaimed queue.
       redis.call('SET', '${SESSION_KEYS.forward("")}' .. ${sourceArg}, 'to:' .. ${targetArg}, 'EX', ${SESSION_DEFAULTS.FORWARD_TOMBSTONE_TTL_SECONDS})`;
 
+/**
+ * DL-2 shutdown retirement outcome. Only "retired" changed anything:
+ * "mapping_changed" means the runtime mapping no longer names the refused
+ * target, "claims_held" means the provisional name still holds a claim, and
+ * "not_owner" means this client does not hold that provisional name.
+ */
+export type ProvisionalRetirement = "retired" | "claims_held" | "mapping_changed" | "not_owner";
+
 type ParsedRegistration = Readonly<{ name: string; reg: Record<string, unknown> }>;
 
 /** Registrations whose JSON is an object, in input order; corrupt ones are skipped. */
@@ -255,13 +263,22 @@ export class RedisClient {
    * DL-2: retire a provisional name whose adoption of `target` was refused.
    * In one atomic step its pending messages move to the bound mailbox's tail
    * and its registry entry is removed, so a peer can no longer discover it
-   * and no send to it is accepted afterwards. Refused (returns false, nothing
-   * changes) while the provisional name holds a claim: claimed work stays
-   * durable under its claim and is recovered by the normal lease path.
+   * and no send to it is accepted afterwards.
+   *
+   * Fenced on the runtime mapping (`mappingKey`): retirement is valid only
+   * while that mapping still names `target`. If it changed (for example an
+   * operator remapped the runtime to this provisional name), nothing changes
+   * and the name, its registration and its work are kept. Also refused,
+   * writing nothing, while the provisional name holds a claim: claimed work
+   * stays durable under its claim and is recovered by the normal lease path.
    */
-  async retireProvisionalMailbox(source: string, target: string): Promise<boolean> {
-    if (source === target || this._agentName !== source) return false;
+  async retireProvisionalMailbox(source: string, target: string, mappingKey: string): Promise<ProvisionalRetirement> {
+    if (source === target || this._agentName !== source) return "not_owner";
     const result = await this.redis.eval(`
+      local raw = redis.call('GET', KEYS[6])
+      if not raw then return -1 end
+      local ok, mapping = pcall(cjson.decode, raw)
+      if not ok or type(mapping) ~= 'table' or mapping.agent ~= ARGV[2] then return -1 end
       if redis.call('ZCARD', KEYS[2]) > 0 then return 0 end
       local moved = redis.call('LLEN', KEYS[1])
       ${forwardProvisionalLua("KEYS[1]", "KEYS[3]", "ARGV[1]", "ARGV[2]")}
@@ -269,9 +286,14 @@ export class RedisClient {
       redis.call('SREM', '${SESSION_KEYS.provisional}', ARGV[1])
       if moved > 0 then redis.call('XADD', KEYS[5], '*', 'type', 'forwarded') end
       return 1
-    `, 5, SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), SESSION_KEYS.queue(target),
-      SESSION_KEYS.registry, SESSION_KEYS.inboxEvents(target), source, target);
-    return result === 1;
+    `, 6, SESSION_KEYS.queue(source), CLAIM_KEYS.index(source), SESSION_KEYS.queue(target),
+      SESSION_KEYS.registry, SESSION_KEYS.inboxEvents(target), mappingKey, source, target);
+    switch (result) {
+      case 1: return "retired";
+      case 0: return "claims_held";
+      case -1: return "mapping_changed";
+      default: throw new Error(`Unexpected provisional retirement reply: ${JSON.stringify(result)}`);
+    }
   }
 
   /**

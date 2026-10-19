@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
-import { restoreRuntimeMailbox } from "../src/registered-shell/runtime-mailbox.js";
+import { restoreRuntimeMailbox, RuntimeMailboxAdoptionRefused } from "../src/registered-shell/runtime-mailbox.js";
+import { applyRuntimeMailboxRemap, planRuntimeMailboxRemap } from "../src/core/runtime-mailbox-remap.js";
 import { createRuntimeController } from "../src/registered-shell/runtime-controller.js";
 import type { RuntimeAdapter } from "../src/registered-shell/runtime.js";
 import { SESSION_KEYS } from "../src/core/keys.js";
@@ -100,11 +101,18 @@ describe("provisional sidecar mailboxes (DL-2)", () => {
     await replyWakesPeer(next, bound, "m-adopt");
   });
 
+  /** A runtime mapping that still names `target`: the fence DL-2 retirement requires (F1). */
+  const mappingTo = async (target: string) => {
+    const key = SESSION_KEYS.runtimeMailbox("pi", `rt-${randomUUID()}`);
+    await redis.set(key, JSON.stringify({ agent: target, working_directory: binding.working_directory }));
+    return key;
+  };
+
   it("COR-F1: a refused adoption's retirement re-points the outstanding owner too", async () => {
     const c = client(); const p = `prov-${randomUUID()}`; await c.register("both", p);
     const target = `bound-${randomUUID()}`;
     await c.sendMessage(task(p, "m-retire"));
-    expect(await c.retireProvisionalMailbox(p, target)).toBe(true);
+    expect(await c.retireProvisionalMailbox(p, target, await mappingTo(target))).toBe("retired");
     expect(await redis.get(SESSION_KEYS.outstanding("peer", "m-retire"))).toBe(target);
     await replyWakesPeer(c, target, "m-retire");
   });
@@ -114,13 +122,58 @@ describe("provisional sidecar mailboxes (DL-2)", () => {
     const target = `bound-${randomUUID()}`;
     const peer = client(); await peer.register("both", "peer");
     expect(await peer.sessions.resolveRegistered(p)).toBe(true);
-    expect(await c.retireProvisionalMailbox(p, target)).toBe(true);
+    expect(await c.retireProvisionalMailbox(p, target, await mappingTo(target))).toBe("retired");
     expect(await peer.sendMessage(task(p, "m-race"))).toBe(true);
     expect((await peer.sendMessageIdempotent(task(p, "m-race-2"), "idem-1")).status).toBe("sent");
     expect(await ids(redis, p)).toEqual([]);
     const moved = (await redis.lrange(SESSION_KEYS.queue(target), 0, -1)).map((raw) => JSON.parse(raw));
     expect(moved.map((m) => [m.id, m.to])).toEqual([["m-race", target], ["m-race-2", target]]);
     expect(await redis.get(SESSION_KEYS.outstanding("peer", "m-race"))).toBe(target);
+  });
+
+  it("F1: retirement is fenced on the runtime mapping still naming the target, writing nothing otherwise", async () => {
+    const c = client(); const p = `prov-${randomUUID()}`; await c.register("both", p);
+    const target = `bound-${randomUUID()}`;
+    await c.sendMessage(task(p, "m-fenced"));
+    const elsewhere = await mappingTo(`other-${randomUUID()}`);
+    const missing = SESSION_KEYS.runtimeMailbox("pi", `rt-missing-${randomUUID()}`);
+    for (const key of [elsewhere, missing]) {
+      expect(await c.retireProvisionalMailbox(p, target, key)).toBe("mapping_changed");
+      expect(await ids(redis, p)).toEqual(["m-fenced"]);
+      expect(await ids(redis, target)).toEqual([]);
+      expect(await redis.hexists(SESSION_KEYS.registry, p)).toBe(1);
+      expect(await redis.get(SESSION_KEYS.outstanding("peer", "m-fenced"))).toBe(p);
+      expect(await redis.get(SESSION_KEYS.forward(p))).toBeNull();
+    }
+  });
+
+  it("F1: an operator remap to the provisional name survives its shutdown before any rebind", async () => {
+    const first = client(); await first.register("both", `prov-${randomUUID()}`);
+    const bound = await restoreRuntimeMailbox(first, binding);
+    await redis.set(SESSION_KEYS.runtimeBinding(bound), "old-owner", "EX", 30);
+    await first.closeCurrentSession();
+
+    const live = client(); const p = `prov-${randomUUID()}`;
+    await live.register("both", p, "sidecar", undefined, { provisional: true });
+    const adapter = async (identity: RuntimeBinding): Promise<RuntimeAdapter> =>
+      ({ binding: identity, activate: async () => ({ status: "queued" }), close: async () => undefined });
+    const controller = createRuntimeController(live, { client: "pi", working_directory: binding.working_directory }, adapter);
+    await expect(controller.bind(binding)).rejects.toBeInstanceOf(RuntimeMailboxAdoptionRefused);
+    await live.sendMessage(task(p, "m-kept"));
+
+    // The old owner is gone; the operator promotes the live provisional name.
+    await redis.del(SESSION_KEYS.runtimeBinding(bound));
+    const plan = await planRuntimeMailboxRemap(redis, { client: "pi", runtimeId: binding.runtime_id, from: bound, to: p }, { isPidAlive: () => true });
+    expect(plan.guards.filter((g) => !g.ok)).toEqual([]);
+    expect((await applyRuntimeMailboxRemap(redis, plan)).status).toBe("applied");
+
+    // The sidecar shuts down before any rebind: the remembered refused target must not undo the remap.
+    expect(await controller.close()).toBe("mapping_changed");
+    expect(JSON.parse((await redis.get(SESSION_KEYS.runtimeMailbox("pi", binding.runtime_id)))!).agent).toBe(p);
+    expect(await redis.hexists(SESSION_KEYS.registry, p)).toBe(1);
+    expect(await ids(redis, p)).toEqual(["m-kept"]);
+    expect(await ids(redis, bound)).toEqual([]);
+    expect(await redis.get(SESSION_KEYS.forward(p))).toBeNull();
   });
 
   it("COR-F5: first start clears the provisional mark with the mapping, so a sweep refuses the bound name", async () => {

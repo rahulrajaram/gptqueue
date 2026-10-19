@@ -1,9 +1,10 @@
-import type { RedisClient } from "../mcp-server/redis-client.js";
+import type { ProvisionalRetirement, RedisClient } from "../mcp-server/redis-client.js";
 import { startInboxDispatcher, type InboxDispatcher } from "./inbox-dispatcher.js";
 import { subscribeStale, validateRuntimeBinding, type RuntimeAdapter, type RuntimeBinding } from "./runtime.js";
 import type { RuntimeTools } from "./runtime-tools.js";
 import { restoreRuntimeMailbox, RuntimeMailboxAdoptionError, RuntimeMailboxAdoptionRefused } from "./runtime-mailbox.js";
 import { operatorActionRequired, type AdoptionRefusalReason, type AdoptionRefusalSignal } from "../core/adoption-refusal.js";
+import { runtimeMailboxKey } from "../core/mailbox-continuity.js";
 
 /**
  * A pending mailbox adoption the guard refused (status `continuity`; null when
@@ -49,14 +50,24 @@ export const createRuntimeController = (
   createAdapter: (binding: RuntimeBinding) => Promise<RuntimeAdapter>,
   /** Called once the bound runtime reports it was closed by its host; the owner should retire the session. */
   onRuntimeStale: (binding: RuntimeBinding) => void = () => undefined,
-): RuntimeTools & { close(): Promise<void> } => {
+): RuntimeTools & {
+  /**
+   * Stop the dispatcher and, after a failed adoption, retire the provisional
+   * name into the refused target. Resolves with that retirement's outcome
+   * ("none" when nothing was attempted, "error" on an infrastructure failure);
+   * a fenced refusal is returned, never thrown.
+   */
+  close(): Promise<ProvisionalRetirement | "none" | "error">;
+} => {
   let binding: RuntimeBinding | undefined;
   let host: RuntimeAdapter | undefined;
   let dispatcher: InboxDispatcher | undefined;
   let closed = false;
-  // DL-2: the bound mailbox a failed adoption targeted. While this client
-  // still holds its provisional name, closing retires that name into it.
-  let refusedTarget: string | undefined;
+  // DL-2: the bound mailbox a failed adoption targeted, and the runtime
+  // mapping that named it. While this client still holds its provisional
+  // name, closing retires that name into it, but only while that mapping
+  // still names the target (an operator remap must not be undone).
+  let refusedTarget: Readonly<{ target: string; mappingKey: string }> | undefined;
   // The pending adoption the guard last refused; cleared by a successful restore.
   let continuity: ContinuityState | null = null;
   let operation: Promise<unknown> = Promise.resolve();
@@ -96,7 +107,7 @@ export const createRuntimeController = (
             refusedTarget = undefined;
             continuity = null;
           } catch (error) {
-            if (error instanceof RuntimeMailboxAdoptionError) refusedTarget = error.target;
+            if (error instanceof RuntimeMailboxAdoptionError) refusedTarget = Object.freeze({ target: error.target, mappingKey: runtimeMailboxKey(binding) });
             // Only a classified refusal is recorded; an infrastructure failure is not one.
             if (error instanceof RuntimeMailboxAdoptionRefused) continuity = refusedContinuity(continuity, error, client.agentName, Date.now());
             throw error;
@@ -128,11 +139,12 @@ export const createRuntimeController = (
       await dispatcher?.close();
       dispatcher = undefined;
       const provisional = client.agentName;
-      if (refusedTarget && provisional && provisional !== refusedTarget) {
-        // Hand anything a peer sent to the provisional name to the bound
-        // mailbox and stop the name being discoverable, in one atomic step.
-        await client.retireProvisionalMailbox(provisional, refusedTarget).catch(() => false);
-      }
+      if (!refusedTarget || !provisional || provisional === refusedTarget.target) return "none";
+      // Hand anything a peer sent to the provisional name to the bound
+      // mailbox and stop the name being discoverable, in one atomic step,
+      // fenced on the runtime mapping still naming that mailbox.
+      return client.retireProvisionalMailbox(provisional, refusedTarget.target, refusedTarget.mappingKey)
+        .catch((): "error" => "error");
     },
   };
 };
