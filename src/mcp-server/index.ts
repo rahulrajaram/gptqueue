@@ -6,9 +6,15 @@ import { RedisClient } from "./redis-client.js";
 import { GPTQUEUE_INSTRUCTIONS, registerTools } from "../transports/setup-tools.js";
 import { VERSION } from "../version.js";
 import { holdToolCallsUntil, registerClaudeAware, registerUntilFinal, startClaudeSessionRecord } from "../claude/mcp-record.js";
+import { isWorkerSession } from "../claude/worker-mode.js";
 
 // Name comes from CLI arg or env var. If neither, starts unregistered.
-const initialName = process.argv[2] || process.env.GPTQ_AGENT_NAME || null;
+// A headless worker session (worker-mode.ts) is not auto-registered from its
+// inherited env: no mailbox, session record or lease; explicit register_agent
+// still works. A name given on the command line is an explicit choice and
+// always registers.
+const workerSession = !process.argv[2] && isWorkerSession(process.env);
+const initialName = process.argv[2] || (workerSession ? null : process.env.GPTQ_AGENT_NAME) || null;
 
 const redisClient = new RedisClient(null);
 
@@ -21,7 +27,7 @@ registerTools(server, redisClient);
 
 // Under Claude Code, publish the identity this server holds so the session's
 // hooks and inbox watcher use it instead of re-deriving a name (ID-2).
-const claudeRecord = startClaudeSessionRecord(redisClient);
+const claudeRecord = workerSession ? null : startClaudeSessionRecord(redisClient);
 
 // Auto-register if name provided via CLI arg or env var (backward compat).
 // Under Claude, registration may wait up to a lease TTL for an old-format

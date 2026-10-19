@@ -2,9 +2,19 @@
 // stdio MCP entry for Claude Code: run the gptqueue MCP server in this process
 // (so its parent is the Claude process, which keys the session record),
 // auto-registered under this project's agent name (see gptqueue-claude-name).
+// A headless worker session (`claude -p` without GPTQ_AGENT_NAME; see
+// worker-mode.ts) is not auto-registered and publishes no session record:
+// the server starts unregistered and an explicit register_agent still works.
 import { resolveAgentName } from "../dist/claude/agent-name.js";
+import { isWorkerSession } from "../dist/claude/worker-mode.js";
 process.env.REDIS_URL ||= "redis://127.0.0.1:6379/0";
-process.env.GPTQ_AGENT_NAME = resolveAgentName(process.env.CLAUDE_PROJECT_DIR || process.cwd());
-process.env.GPTQ_CLAUDE_SESSION_RECORD = "1";
+if (isWorkerSession(process.env)) {
+  delete process.env.GPTQ_AGENT_NAME;
+  delete process.env.GPTQ_CLAUDE_SESSION_RECORD;
+  process.stderr.write(`${JSON.stringify({ event: "worker_session_unregistered", reason: "headless worker session (GPTQUEUE_WORKER / print mode)" })}\n`);
+} else {
+  process.env.GPTQ_AGENT_NAME = resolveAgentName(process.env.CLAUDE_PROJECT_DIR || process.cwd());
+  process.env.GPTQ_CLAUDE_SESSION_RECORD = "1";
+}
 process.argv.length = 2;
 await import("../dist/mcp-server/index.js");

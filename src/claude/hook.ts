@@ -1,7 +1,13 @@
 /**
  * Claude Code hook for gptqueue: SessionStart context, a Stop gate, and turn
  * state for the loop adapter.
- *   gptqueue-claude-hook session-start | stop | user-prompt-submit     (hook JSON on stdin)
+ *   gptqueue-claude-hook session-start | stop | user-prompt-submit | pre-tool-use   (hook JSON on stdin)
+ *
+ * - Headless worker sessions (worker-mode.ts, f-1965): every event is a no-op
+ *   apart from a one-line SessionStart context; no Redis connection is opened.
+ * - pre-tool-use (opt-in AskUserQuestion guard, f-1915): denies
+ *   AskUserQuestion once per (session, latest inbox event) while this session
+ *   has actionable mail, so an operator question does not stall lead mail.
  *
  * - Turn state: user-prompt-submit records the session's agent as running and
  *   prints nothing; an allowed stop records it as idle. Only a confirmed
@@ -29,6 +35,7 @@ import { quoteAgent } from "./session-record.js";
 import { writeFileSync } from "node:fs";
 import { claudeSeatStartupContext } from "../integrations/agent-tracking.js";
 import { TurnStateStore, type TurnPhase } from "../core/turn-state.js";
+import { isWorkerSession, WORKER_SESSION_CONTEXT } from "./worker-mode.js";
 
 export type HookEvent = "session-start" | "stop";
 export type StopReason = "mail" | "error" | "watch";
@@ -148,13 +155,69 @@ export const decideHook = (input: HookInput): HookDecision => {
   }
 };
 
+/** The AskUserQuestion denial recorded for a session: the inbox event it was raised for. */
+export type PriorAsk = Readonly<{ event_id: string | null }> | null;
+
+export type AskInput = Readonly<{ identity: Identity; probe: ProbeResult; prior: PriorAsk }>;
+
+export type AskDecision =
+  | Readonly<{ kind: "deny"; reason: string; record: Exclude<PriorAsk, null> }>
+  /** No permission decision: Claude Code's normal flow (never "allow", which would bypass permission prompts). */
+  | Readonly<{ kind: "pass"; systemMessage: string | null; clearRecord: boolean }>;
+
+/**
+ * Pure AskUserQuestion guard decision. Never blocks on gptqueue trouble or a
+ * guessed identity; denies once per latest inbox event while mail is actionable.
+ */
+export const decideAsk = (input: AskInput): AskDecision => {
+  const { identity, probe, prior } = input;
+  if (!isConfirmed(identity)) return { kind: "pass", systemMessage: null, clearRecord: false };
+  switch (probe.ok) {
+    case false:
+      return { kind: "pass", clearRecord: false, systemMessage: `gptqueue inbox check for ${quoteAgent(identity.agent)} FAILED (${probe.code}); AskUserQuestion not gated, inbox state unknown.` };
+    case true: {
+      if (actionable(probe) === 0) return { kind: "pass", systemMessage: null, clearRecord: true };
+      const latest = probe.counts.latest_event_id;
+      if (prior !== null && prior.event_id === latest) return { kind: "pass", systemMessage: null, clearRecord: false };
+      return {
+        kind: "deny", record: Object.freeze({ event_id: latest }),
+        reason: `gptqueue inbox for ${identityText(identity)}: ${countsText(probe)}. AskUserQuestion blocks this session until the operator answers, so this mail and any lead waiting on it stall. Claim and handle it first (${CONSUME}), then ask. Asking again without new mail goes through: this guard does not repeat.`,
+      };
+    }
+    default: { const unreachable: never = probe; throw new Error(String(unreachable)); }
+  }
+};
+
+export const renderAsk = (decision: AskDecision): string | null => {
+  switch (decision.kind) {
+    case "deny": return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } });
+    case "pass": return decision.systemMessage === null ? null : JSON.stringify({ systemMessage: decision.systemMessage });
+    default: { const unreachable: never = decision; throw new Error(String(unreachable)); }
+  }
+};
+
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 
 /** Name-free: the watcher resolves this session's registered name itself from the session record. */
 export const watchCommandFor = (binDir: string, claudeSessionId: string): string =>
   `${shellQuote(join(binDir, "gptqueue-inbox-peek"))} --watch --session ${shellQuote(claudeSessionId)}`;
 
-type RawHookJson = { session_id?: unknown; cwd?: unknown; stop_hook_active?: unknown };
+type RawHookJson = { session_id?: unknown; cwd?: unknown; stop_hook_active?: unknown; tool_name?: unknown };
+
+const parseHookJson = (stdin: string): RawHookJson => {
+  try {
+    const parsed: unknown = JSON.parse(stdin || "{}");
+    return typeof parsed === "object" && parsed !== null ? parsed as RawHookJson : {};
+  } catch { return {}; }
+};
+const sessionFileTag = (claudeSession: string): string => claudeSession.replace(/[^A-Za-z0-9._-]/g, "_");
+
+const readPriorAsk = (path: string): PriorAsk => {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { event_id?: unknown };
+    return { event_id: typeof parsed.event_id === "string" ? parsed.event_id : null };
+  } catch { return null; }
+};
 
 const readChain = (raw: unknown): ChainHistory | undefined => {
   if (typeof raw !== "object" || raw === null) return undefined;
@@ -196,8 +259,49 @@ const recordTurn = async (identity: Identity, phase: TurnPhase, claudeSession: s
   }
 };
 
+export type CliEvent = HookEvent | "user-prompt-submit" | "pre-tool-use";
+export const CLI_EVENTS: readonly CliEvent[] = Object.freeze(["session-start", "stop", "user-prompt-submit", "pre-tool-use"]);
+const isCliEvent = (value: string | undefined): value is CliEvent => CLI_EVENTS.includes(value as CliEvent);
+
+/** Worker mode: no Redis, no state, no records; only SessionStart says why. */
+const workerOutput = (event: CliEvent): string | null => {
+  switch (event) {
+    case "session-start": return JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: WORKER_SESSION_CONTEXT } });
+    case "stop":
+    case "user-prompt-submit":
+    case "pre-tool-use": return null;
+    default: { const unreachable: never = event; throw new Error(String(unreachable)); }
+  }
+};
+
+const runAskGuard = async (stdin: string, env: NodeJS.ProcessEnv): Promise<{ stdout: string | null; exitCode: number }> => {
+  const json = parseHookJson(stdin);
+  if (json.tool_name !== "AskUserQuestion") return { stdout: null, exitCode: 0 };
+  const claudeSession = typeof json.session_id === "string" && json.session_id ? json.session_id : "unknown";
+  const resolved = resolveIdentity(typeof json.cwd === "string" ? json.cwd : undefined, env);
+  // A guessed name may be another session's inbox: never gate on it, and skip Redis entirely.
+  if (!isConfirmed(resolved)) return { stdout: null, exitCode: 0 };
+  const redis = probeClient(env.REDIS_URL);
+  const { identity, probe } = await (async () => {
+    const checked = await confirmLegacyLiveness(redis, resolved, env);
+    return { identity: checked, probe: await probeInbox(redis, checked.agent, checked.gptqueue_session_id) };
+  })().finally(() => redis.disconnect());
+  let dir: string | null = null;
+  try { dir = ensureRuntimeDir(env); } catch { /* unsafe dir: no record, so the guard may repeat */ }
+  const statePath = dir && claudeSession !== "unknown" ? join(dir, `ask-${sessionFileTag(claudeSession)}.json`) : null;
+  const decision = decideAsk({ identity, probe, prior: statePath ? readPriorAsk(statePath) : null });
+  if (statePath) {
+    if (decision.kind === "deny") writeFileSync(statePath, JSON.stringify(decision.record), { mode: 0o600 });
+    else if (decision.clearRecord) rmSync(statePath, { force: true });
+  }
+  return { stdout: renderAsk(decision), exitCode: 0 };
+};
+
 export const runClaudeHook = async (argv: readonly string[], stdin: string, binDir: string, env: NodeJS.ProcessEnv = process.env): Promise<{ stdout: string | null; exitCode: number }> => {
   const event = argv[0];
+  if (!isCliEvent(event)) return { stdout: null, exitCode: 2 };
+  if (isWorkerSession(env)) return { stdout: workerOutput(event), exitCode: 0 };
+  if (event === "pre-tool-use") return runAskGuard(stdin, env);
   if (event === "user-prompt-submit") {
     let raw: RawHookJson = {};
     try { raw = JSON.parse(stdin || "{}") as RawHookJson; } catch { /* nothing to record */ }
@@ -205,7 +309,6 @@ export const runClaudeHook = async (argv: readonly string[], stdin: string, binD
     await recordTurn(resolveIdentity(typeof raw.cwd === "string" ? raw.cwd : undefined, env), "running", session, env);
     return { stdout: null, exitCode: 0 };
   }
-  if (event !== "session-start" && event !== "stop") return { stdout: null, exitCode: 2 };
   let json: RawHookJson = {};
   try { json = JSON.parse(stdin || "{}") as RawHookJson; } catch { /* treat as empty input; still report inbox state */ }
   const claudeSession = typeof json.session_id === "string" && json.session_id ? json.session_id : "unknown";
@@ -226,7 +329,7 @@ export const runClaudeHook = async (argv: readonly string[], stdin: string, binD
 
   let dir: string | null = null;
   try { dir = ensureRuntimeDir(env); } catch { /* unsafe dir: no state, no watcher detection */ }
-  const statePath = dir ? join(dir, `stop-${claudeSession.replace(/[^A-Za-z0-9._-]/g, "_")}.json`) : null;
+  const statePath = dir ? join(dir, `stop-${sessionFileTag(claudeSession)}.json`) : null;
   const decision = decideHook({
     event,
     identity,

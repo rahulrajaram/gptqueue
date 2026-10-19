@@ -5,7 +5,7 @@ Entry points in `bin/` are thin Node shims over `dist/claude/*` (run `npm run bu
 | Entry | Role |
 |---|---|
 | `bin/gptqueue-claude-mcp` | stdio MCP server for Claude Code; registers under the project's agent name and publishes the name it holds for the session |
-| `bin/gptqueue-claude-hook session-start\|stop\|user-prompt-submit` | SessionStart context, Stop gate, and turn state (hook JSON on stdin) |
+| `bin/gptqueue-claude-hook session-start\|stop\|user-prompt-submit\|pre-tool-use` | SessionStart context, Stop gate, turn state, and the optional AskUserQuestion guard (hook JSON on stdin) |
 | `bin/gptqueue-inbox-peek` | non-consuming inbox counts, the `--list` listing and the event-driven background watcher |
 | `bin/gptqueue-claude-name [dir]` | fallback name: `GPTQ_AGENT_NAME`, then the longest prefix in `~/.config/gptqueue/claude-agent-names.tsv`, then `claude-<git top-level basename>` |
 | `scripts/verify-claude-mcp.mjs` | drive the MCP server over stdio as Claude would (`selftest`, `send`, `claim`, `list`, `unregister`) |
@@ -102,6 +102,61 @@ the gptqueue session only by its `sid-sha256:` tag, never by the raw id.
   the path the hook was invoked by (the installed wrapper or `<prefix>/current/bin`), not a
   resolved release directory.
   `GPTQ_CLAUDE_WATCH=off` turns this reminder off.
+
+## Headless worker sessions
+
+A `claude -p` child (print mode) inherits the user's hooks and the gptqueue MCP server, but it is
+a one-shot worker, not a mailbox owner. Claude Code sets `CLAUDE_CODE_ENTRYPOINT=cli` for
+interactive sessions and `CLAUDE_CODE_ENTRYPOINT=sdk-cli` for print mode, and hooks and MCP
+servers inherit it. A session is a **worker** when (`src/claude/worker-mode.ts`):
+
+```
+GPTQUEUE_WORKER === "1"
+  || (GPTQUEUE_WORKER !== "0" && CLAUDE_CODE_ENTRYPOINT === "sdk-cli" && GPTQ_AGENT_NAME unset or empty)
+```
+
+| Variable | Effect |
+|---|---|
+| `GPTQUEUE_WORKER=1` | force worker mode in any session |
+| `GPTQUEUE_WORKER=0` | opt a print-mode session back in as a mailbox owner |
+| `GPTQ_AGENT_NAME=<name>` | a deliberately named print-mode actor keeps today's behavior and owns its mailbox |
+
+In worker mode:
+
+- the MCP server (`gptqueue-claude-mcp`, and the plain server) does not auto-register: no
+  mailbox, no session record, no lease. Its tools still work after an explicit `register_agent`;
+- SessionStart prints only one context line ("headless worker session ... Set GPTQUEUE_WORKER=0
+  to opt in."): no probe, no seat binding;
+- Stop allows with no output and writes no state file; UserPromptSubmit records nothing;
+  PreToolUse (the AskUserQuestion guard) is a no-op;
+- the hook opens no Redis connection at all.
+
+Recommended isolation for print-mode reviewers: launch them with `GPTQUEUE_WORKER=1` (explicit,
+independent of how Claude Code labels the entrypoint), and, when the reviewer needs no gptqueue
+tools, also without the gptqueue MCP server (for example `--strict-mcp-config` with an empty or
+reviewer-specific MCP config) and in its own worktree. Never set `GPTQ_AGENT_NAME` for a reviewer
+unless it should own a mailbox.
+
+## Optional: AskUserQuestion guard
+
+`AskUserQuestion` blocks the session until the operator answers. An orchestrator that asks while
+leads are mailing it stalls them all. The guard is a PreToolUse hook that denies
+`AskUserQuestion` **once** per session and latest inbox event while the session's confirmed inbox
+has actionable mail (the same counts the Stop gate uses). The denial reason names the agent and
+the counts and tells the model to claim and handle the mail first, then ask. Asking again without
+new mail goes through; new mail since the denial denies again. The denial is recorded in the
+runtime dir as `ask-<session>.json` (mode 0600).
+
+It never blocks on gptqueue trouble: worker mode, an unconfirmed identity, or a failed probe let
+the question through (a failed probe adds a `systemMessage`). It never emits
+`permissionDecision: "allow"`, which would bypass permission prompts; other tools get no output.
+
+It is **opt-in and off by default**; the operator enables it by adding this entry to
+`~/.claude/settings.json` (`<bin>` is the directory holding `gptqueue-claude-hook`):
+
+```
+"PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": "<bin>/gptqueue-claude-hook pre-tool-use", "timeout": 10}]}]
+```
 
 ## Watcher
 
