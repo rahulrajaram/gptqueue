@@ -96,11 +96,47 @@ describe("TaskClaimStore.acknowledgeMessages (claims-ack-messages.lua)", () => {
     expect(!after.ok && after.error.code).toBe("unknown_claim");
   });
 
-  it("a late ack of an expired, unrecovered claim succeeds, as acknowledge_tasks does", async () => {
-    const claim = await claimAll();
-    // claims-ack.lua checks ownership only, never expiry; recovery has not run.
-    const r = await ack(claim.claim_id, ["m1"]);
-    expect(r).toMatchObject({ ok: true, acknowledged: 1, remaining: 5 });
+  /** Seed a raw claim record and its index member directly. */
+  const seed = async (claimId: string, raw: string, score: number) => {
+    await redis.hset(CLAIM_KEYS.claims, claimId, raw);
+    await redis.zadd(CLAIM_KEYS.index(actor), score, claimId);
+  };
+  const redisNowMs = async () => { const [s, us] = await redis.time(); return Number(s) * 1000 + Math.floor(Number(us) / 1000); };
+
+  it("late ack of an ALREADY expired, unrecovered claim succeeds for subset and whole-claim ack", async () => {
+    // claims-ack.lua:47-52 checks ownership and presence only, never expiry;
+    // acknowledge_messages keeps that rule (claims-ack-messages.lua:58).
+    const past = (await redisNowMs()) - 60_000;
+    const iso = (ms: number) => new Date(ms).toISOString();
+    await seed("late-c", JSON.stringify({ claim_id: "late-c", actor_id: actor, session_id: session,
+      claimed_at: iso(past - 300_000), expires_at: iso(past), tasks: [env("m1"), env("m2"), env("m3")] }), past);
+    const now = await redisNowMs();
+    expect(Number(await redis.zscore(CLAIM_KEYS.index(actor), "late-c"))).toBeLessThan(now);
+    expect(Date.parse(JSON.parse((await redis.hget(CLAIM_KEYS.claims, "late-c"))!).expires_at)).toBeLessThan(now);
+
+    const partial = await ack("late-c", ["m2"]);
+    expect(partial).toMatchObject({ ok: true, acknowledged: 1, remaining: 2, claim_deleted: false });
+    expect(Number(await redis.zscore(CLAIM_KEYS.index(actor), "late-c"))).toBe(past);
+    const whole = await store.acknowledge({ claim_id: "late-c", actor_id: actor, session_id: session });
+    expect(whole).toMatchObject({ ok: true, acknowledged: 2 });
+    expect(await redis.hexists(CLAIM_KEYS.claims, "late-c")).toBe(0);
+    expect(await redis.zscore(CLAIM_KEYS.index(actor), "late-c")).toBeNull();
+  });
+
+  it("a remainder that cannot be re-encoded is store_corrupt with nothing written, counters included", async () => {
+    // 1e999 decodes (to inf) but cjson refuses to encode it.
+    const raw = `{"claim_id":"enc-c","actor_id":"${actor}","session_id":"${session}","claimed_at":"${T0}",`
+      + `"expires_at":"2030-01-01T00:05:00.000Z","x":1e999,"tasks":${JSON.stringify([env("m1"), env("m2")])}}`;
+    await seed("enc-c", raw, Date.parse("2030-01-01T00:05:00.000Z"));
+    await redis.set(counter("m1"), "3");
+    await redis.set(counter("m2"), "3");
+    const before = await snapshot(redis);
+    const r = await ack("enc-c", ["m1"]);
+    expect(await snapshot(redis)).toEqual(before);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("store_corrupt");
+    expect(await redis.hget(CLAIM_KEYS.claims, "enc-c")).toBe(raw);
+    expect(await redis.get(counter("m1"))).toBe("3");
   });
 
   it("every refusal writes nothing", async () => {

@@ -92,25 +92,34 @@ end
 
 if redis.call('ZSCORE', index, claimId) == false then return { -1, 'index_member' } end
 
--- Mutation: every key above is validated.
+-- Compute everything, including the re-encoded remainder, before any write:
+-- a failed encode (e.g. a numeric field that decodes to inf) must refuse
+-- with nothing changed, counters included.
 local remainder = {}
-local acknowledged = 0
+local ackedIds = {}
 for i, task in ipairs(claim.tasks) do
   local id = ids[i]
   if id ~= nil and selected[id] then
-    acknowledged = acknowledged + 1
-    redis.call('DEL', 'gptq:rc:' .. actorId .. ':' .. id)
+    ackedIds[#ackedIds + 1] = id
   else
     remainder[#remainder + 1] = task
   end
 end
+local encoded
+if #remainder > 0 then
+  claim.tasks = remainder
+  local encodedOk = pcall(function() encoded = cjson.encode(claim) end)
+  if not encodedOk or type(encoded) ~= 'string' then return { -1, 'encode' } end
+end
 
+-- Writes: only after every check and the encode succeeded.
+for _, id in ipairs(ackedIds) do
+  redis.call('DEL', 'gptq:rc:' .. actorId .. ':' .. id)
+end
 if #remainder == 0 then
   redis.call('HDEL', claims, claimId)
   redis.call('ZREM', index, claimId)
-  return { 1, acknowledged, 0, 1 }
+  return { 1, #ackedIds, 0, 1 }
 end
-
-claim.tasks = remainder
-redis.call('HSET', claims, claimId, cjson.encode(claim))
-return { 1, acknowledged, #remainder, 0 }
+redis.call('HSET', claims, claimId, encoded)
+return { 1, #ackedIds, #remainder, 0 }
