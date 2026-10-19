@@ -132,10 +132,10 @@ describe("TaskClaimStore.acknowledgeMessages (claims-ack-messages.lua)", () => {
     await redis.set(counter("m1"), "3");
     await redis.set(counter("m2"), "3");
     const before = await snapshot(redis);
-    const r = await ack("enc-c", ["m1"]);
+    // A script error must not skip the no-write check, so capture it first.
+    const r = await ack("enc-c", ["m1"]).catch((error: unknown) => ({ ok: false as const, thrown: error }));
     expect(await snapshot(redis)).toEqual(before);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("store_corrupt");
+    expect(r).toMatchObject({ ok: false, error: { code: "store_corrupt" } });
     expect(await redis.hget(CLAIM_KEYS.claims, "enc-c")).toBe(raw);
     expect(await redis.get(counter("m1"))).toBe("3");
   });
