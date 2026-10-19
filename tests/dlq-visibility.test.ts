@@ -145,3 +145,40 @@ describe("dead-lettered counts", () => {
     expect((await peek(["--name", agent, "--list"])).stdout.trimEnd().split("\n").at(-1)).toBe("dead-lettered: 0, dropped ?");
   });
 });
+
+describe("a wrong-type DLQ key or drop counter (gate F1)", () => {
+  const corruptions = [
+    { label: "a hash at the DLQ key", field: "dead_lettered_count", corrupt: (a: string) => redis.hset(DLQ_KEYS.list(a), "x", "y") },
+    { label: "a list at the drop counter", field: "dead_lettered_dropped", corrupt: (a: string) => redis.rpush(DLQ_KEYS.dropped(a), "x") },
+  ] as const;
+  for (const { label, field, corrupt } of corruptions) {
+    it(`${label}: only that field of that mailbox is null, in all-agent status and --list`, async () => {
+      const healthy = [mailbox("dv-ok"), mailbox("dv-ok")];
+      const bad = mailbox("dv-bad");
+      await deadLetter(healthy[0]!, 2, 3);
+      await deadLetter(healthy[1]!, 5, 3);
+      await deadLetter(bad, 1, 3);
+      await redis.rpush(SESSION_KEYS.queue(bad), JSON.stringify({ id: "q", from: "p", to: bad, timestamp: "2030-01-01T00:00:00.000Z", type: "task", payload: { content: "x" } }));
+      if (field === "dead_lettered_count") await redis.del(DLQ_KEYS.list(bad));
+      await corrupt(bad);
+      const names = [...healthy, bad];
+      for (const name of names) await redis.hset(SESSION_KEYS.registry, name, "{}");
+      try {
+        const all = await new MailboxStore(redis, redis, 10).status();
+        const byName = new Map(all.map((entry) => [entry.agent, entry]));
+        expect(byName.get(healthy[0]!)).toMatchObject({ dead_lettered_count: 2, dead_lettered_dropped: 0 });
+        expect(byName.get(healthy[1]!)).toMatchObject({ dead_lettered_count: 3, dead_lettered_dropped: 2 });
+        const expectedBad = field === "dead_lettered_count"
+          ? { dead_lettered_count: null, dead_lettered_dropped: 0 }
+          : { dead_lettered_count: 1, dead_lettered_dropped: null };
+        expect(byName.get(bad)).toEqual({ agent: bad, depth: 1, max_size: expect.any(Number), waking_count: 1, quiet_count: 0, ...expectedBad });
+
+        for (const name of healthy) expect((await listJson(name)).json).toMatchObject({ dead_lettered_count: expect.any(Number), dead_lettered_dropped: expect.any(Number) });
+        expect((await listJson(bad)).json).toMatchObject({ agent: bad, unclaimed: 1, listed: 1, ...expectedBad });
+        const human = await peek(["--name", bad, "--list"]);
+        expect(human.code).toBe(0);
+        expect(human.stdout.trimEnd().split("\n").at(-1)).toBe(field === "dead_lettered_count" ? "dead-lettered: ?, dropped 0" : "dead-lettered: 1, dropped ?");
+      } finally { await redis.hdel(SESSION_KEYS.registry, ...names); }
+    });
+  }
+});

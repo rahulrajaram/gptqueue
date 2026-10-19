@@ -235,13 +235,16 @@ whole queue, since recovered mail returns to the tail; null when empty or no tim
 it, a table and summary lines.
 
 The listing also reports `dead_lettered_count` (the mailbox's dead-letter queue length, LLEN) and
-`dead_lettered_dropped` (entries the DLQ bound of 1000 has discarded; `null` when the stored counter
-is unreadable), read in the same MULTI/EXEC as LLEN and GET; a missing key reads as 0 and nothing is
-created. These are counts only: no DLQ content, message ids or senders. The human form ends with
-`dead-lettered: <count>, dropped <dropped>` (`?` when unreadable). A non-zero count means tasks were
-quarantined, usually after repeated claim-expiry recoveries: the mailbox's owner inspects them with
-`dlq_status` and re-queues them with `dlq_requeue` (also on the sidecar after the parity release).
-`get_queue_status` reports the same two fields per queue (`docs/QUEUE-CAPACITY.md`).
+`dead_lettered_dropped` (the claim-recovery drop counter: entries recovery's DLQ bound of 1000
+discarded; other DLQ trims, on malformed-message receive or mailbox migration, do not count, so it
+is a lower bound). Both are read in the same MULTI/EXEC with LLEN and GET; a missing key reads as 0
+and nothing is created. Each is `null` when unreadable (a wrong-type key or a corrupt counter); that
+affects only the field, and the rest of the listing is still reported. These are counts only: no
+DLQ content, message ids or senders. The human form ends with `dead-lettered: <count>, dropped
+<dropped>` (`?` for null). A non-zero count means tasks were quarantined, usually after repeated
+claim-expiry recoveries: the mailbox's owner inspects them with `dlq_status` and re-queues them
+with `dlq_requeue` (also on the sidecar after the parity release). `get_queue_status` reports the
+same two fields per queue (`docs/QUEUE-CAPACITY.md`).
 
 `wakes` is the dispatcher's own rule (`wakesRecipient` in `src/core/inbox-events.ts`). A `task`
 always wakes the recipient. A `result` or `error` wakes it only when it answers the recipient's own

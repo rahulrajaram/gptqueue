@@ -60,8 +60,8 @@ export type QueueStatusEntry = {
   max_size: number;
   waking_count: number;
   quiet_count: number;
-  /** Current DLQ length for this mailbox (0 when it has none). */
-  dead_lettered_count: number;
+  /** Current DLQ length for this mailbox (0 when it has none); null when the DLQ key is unreadable. */
+  dead_lettered_count: number | null;
   /** Entries the DLQ length bound has discarded; null when the counter is unreadable. */
   dead_lettered_dropped: number | null;
 };
@@ -355,7 +355,8 @@ export class MailboxStore {
   /**
    * Get queue status for one or all agents. `dead_lettered_count` is the
    * mailbox's DLQ length (LLEN) and `dead_lettered_dropped` the DLQ drop
-   * counter (GET; null when unreadable); both are plain reads that create no
+   * counter (GET); each is null when its key is unreadable (wrong type,
+   * corrupt value) without affecting any other field or mailbox; both are plain reads that create no
    * key, and a missing key reads as 0.
    */
   async status(agentName?: string): Promise<QueueStatusEntry[]> {
@@ -382,8 +383,6 @@ export class MailboxStore {
       if (depthError) throw depthError;
       if (boundError) throw boundError;
       if (countError) throw countError;
-      if (deadError) throw deadError;
-      if (droppedError) throw droppedError;
       const [waking, quiet] = counts as [number, number];
       return {
         agent: name,
@@ -394,8 +393,9 @@ export class MailboxStore {
         ),
         waking_count: Number(waking),
         quiet_count: Number(quiet),
-        dead_lettered_count: Number(dead),
-        dead_lettered_dropped: parseDeadLetterDropped(dropped as string | null),
+        // Isolated: a wrong-type DLQ key or counter makes only that field null.
+        dead_lettered_count: deadError ? null : Number(dead),
+        dead_lettered_dropped: droppedError ? null : parseDeadLetterDropped(dropped as string | null),
       };
     });
   }

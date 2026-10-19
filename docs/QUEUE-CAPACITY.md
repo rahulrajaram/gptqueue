@@ -90,12 +90,19 @@ pipeline as `depth`, not the same transaction.
 
 `dead_lettered_count` is the mailbox's current dead-letter queue length (LLEN
 of `gptq:dlq:<agent>`): tasks that lazy claim recovery quarantined after
-repeated claim expiry, or mail dead-lettered for a retired recipient.
-`dead_lettered_dropped` is the DLQ drop counter (`gptq:dlq-dropped:<agent>`):
-entries the per-mailbox DLQ bound (`DLQ_MAX_LENGTH`, 1000) has discarded, which
-are gone for good; it is `null` when the stored counter is unreadable. Both
-are plain reads in the same pipeline; a missing key reads as 0 and no key is
-created. A non-zero `dead_lettered_count` means work is stuck: the mailbox's
+repeated claim expiry, or mail dead-lettered for another reason (for example a
+retired recipient or a malformed message).
+`dead_lettered_dropped` is the drop counter that claim recovery maintains
+(`gptq:dlq-dropped:<agent>`): entries recovery's DLQ trim to `DLQ_MAX_LENGTH`
+(1000) discarded, which are gone for good. Other paths that trim the DLQ
+(dead-lettering a malformed message on receive, mailbox migration) do not
+increment it, so it is a lower bound on discarded entries.
+
+Both are plain reads in the same pipeline; a missing key reads as 0 and no key
+is created. Each field is `null` when it is unreadable: a key of the wrong type
+(for example a hash at the DLQ key) or a counter that is not a non-negative
+integer. That affects only the field; every other field and mailbox is still
+reported. A non-zero `dead_lettered_count` means work is stuck: the mailbox's
 owner inspects it with `dlq_status` and re-queues entries with `dlq_requeue`
 (the sidecar exposes both too, after the parity release). Observers see the
 counts only, never the entries.
