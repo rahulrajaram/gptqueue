@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+// Public gptqueue dispatcher. Single command today: retire-thread (retire ONE
+// idle Codex daemon thread). The command implementations live in dist/; this
+// file only dispatches argv and maps the outcome to the process exit code.
+import { GPTQUEUE_USAGE, retireThreadMain } from "../dist/core/retire-thread.js";
+
+const [command, ...rest] = process.argv.slice(2);
+
+if (command === "retire-thread") {
+  retireThreadMain(rest).then(
+    (code) => { process.exit(code); },
+    (error) => {
+      process.stderr.write(`${JSON.stringify({ error: "internal_error", message: error instanceof Error ? error.message : String(error) })}\n`);
+      process.exit(1);
+    },
+  );
+} else if (command === "--help" || command === "-h" || command === "help") {
+  process.stdout.write(`${GPTQUEUE_USAGE}\n`);
+  process.exit(0);
+} else {
+  process.stderr.write(`${GPTQUEUE_USAGE}\n`);
+  process.exit(2);
+}

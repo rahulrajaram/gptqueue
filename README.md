@@ -82,7 +82,7 @@ The registered shell (`bin/gptqueue-session`) registers six additive tools on to
 
 These two are the self-serve recovery path for a runtime whose tasks were dead-lettered: inspect with `dlq_status`, restore with `dlq_requeue`, then claim as usual. OpenCode exposes them as `gptqueue_dlq_status` and `gptqueue_dlq_requeue`.
 
-`package.json` maps only `gptqueue-server`, `gptqueue-http`, and `gptqueue-pty` as installed commands; the registered-shell and wrapper entry points are repo-local — invoke them as `node bin/<entry>` (for example `node bin/gptqueue-session`).
+`package.json` maps `gptqueue`, `gptqueue-server`, `gptqueue-http`, and `gptqueue-pty` as installed commands; the registered-shell and wrapper entry points are repo-local — invoke them as `node bin/<entry>` (for example `node bin/gptqueue-session`).
 
 ### Dead-letter queue (provisional policy)
 
@@ -354,6 +354,17 @@ When a woken agent has pending messages, the injected prompt instructs it to
 consume via `claim_tasks` (optional `max_batch`, `ttl_seconds`) and confirm
 with `acknowledge_tasks` (`claim_id`) rather than `receive_message`, so a
 durable actor woken through the PTY consumes its batch at-least-once.
+
+## Operator CLI (`gptqueue`)
+
+`gptqueue retire-thread` retires ONE idle Codex daemon thread: it unloads the thread (`thread/archive`), which stops its MCP servers (its gptqueue sidecar exits, its session closes, its mailbox goes offline), then verifies the unload with a bounded wait. It connects to the existing daemon behind the selected control socket only (never launches or restarts a Codex process) and is reversible: `thread/unarchive` + `codex resume <thread-id> --remote unix://<socket> ...` reloads the thread and a new sidecar re-adopts the same mailbox.
+
+```bash
+gptqueue retire-thread <thread-id> (<expected-mailbox> | --expect-no-mailbox) \
+  [--dry-run] [--allow-pending-mail] --redis-url <url> [--socket <path>] [--verify-timeout-ms <n>]
+```
+
+It refuses unless the thread is idle, its parent (for sub-agent threads) is positively idle, the thread's runtime binding AND durable runtime-mailbox mapping name exactly the expected mailbox (or, with `--expect-no-mailbox`, neither exists), the mailbox holds no unexpired claims, and its queue is empty unless `--allow-pending-mail`. Every Redis/RPC/`/proc` observation fails closed: unreadable, duplicate or ambiguous evidence refuses instead of guessing. Exactly one archive request is sent; a lost or ambiguous response is reported as outcome-unknown and never retried. Output is one JSON event per line on stdout. Exit codes: `0` verified / already unloaded / dry-run ok; `2` usage; `3` refused, nothing changed; `4` environment error, nothing changed; `1` failed or unknown after the archive request was sent. Run `gptqueue retire-thread --help` for the full contract.
 
 ## How it works
 

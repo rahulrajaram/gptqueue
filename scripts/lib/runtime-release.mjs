@@ -35,7 +35,7 @@ import { privateRedisEnv } from "./owned-redis.mjs";
 
 export const STAGED_ENTRIES = Object.freeze(["dist", "bin", "package.json", "package-lock.json"]);
 /** bin/ entry points a release must ship (operator tools are invoked from <prefix>/current/bin). */
-export const REQUIRED_ENTRY_POINTS = Object.freeze(["gptqueue-session", "gptqueue-claude-hook", "gptqueue-doctor"]);
+export const REQUIRED_ENTRY_POINTS = Object.freeze(["gptqueue", "gptqueue-session", "gptqueue-claude-hook", "gptqueue-doctor"]);
 export const LUA_SOURCE_DIR = "src/mcp-server/lua";
 export const LUA_DIST_DIR = "dist/mcp-server/lua";
 const DEPS_DIR = "node_modules";

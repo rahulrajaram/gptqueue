@@ -219,33 +219,120 @@ describe("RT-1 switch, rollback and prune", () => {
   };
 
   it("switches atomically: a concurrent reader always sees current resolve to a complete release", async () => {
-    await nextRelease("A");
+    const a = await nextRelease("A");
+    // Event-driven reader controlled over IPC (a blocking sync loop could never
+    // receive the stop message). The child reports cumulative observations, so
+    // no early observation is lost; the parent advances only on positive
+    // observations of each phase. Every ms bound below is a failure limit,
+    // never the oracle for success.
     const reader = spawn(process.execPath, ["-e", `
       const fs = require("fs"); const path = require("path");
       const cur = path.join(${JSON.stringify(prefix)}, "current");
-      let reads = 0, failures = 0; const seen = new Set();
-      const end = Date.now() + 6000;
-      while (Date.now() < end) {
+      let reads = 0, failures = 0, attempts = 0; const seen = new Set(); const lastSeenAt = new Map();
+      const readOnce = () => {
+        attempts += 1;
         try {
           const m = JSON.parse(fs.readFileSync(path.join(cur, "manifest.json"), "utf8"));
           fs.statSync(path.join(cur, "bin/gptqueue-session")); fs.statSync(path.join(cur, "verify.json"));
-          seen.add(m.id); reads++;
-        } catch (e) { failures++; }
+          reads += 1; seen.add(m.id); lastSeenAt.set(m.id, attempts);
+        } catch (e) {
+          failures += 1;
+          if (failures <= 3) process.send({ type: "failure", message: String((e && e.message) || e) });
+        }
+      };
+      const timer = setInterval(() => {
+        for (let i = 0; i < 10; i += 1) readOnce();
+        const lastSeen = {}; for (const [id, at] of lastSeenAt) lastSeen[id] = at;
+        process.send({ type: "state", n: attempts, reads, failures, seen: [...seen], lastSeen });
+      }, 5);
+      process.on("message", (m) => {
+        if (!m || m.type !== "stop") return;
+        clearInterval(timer);
+        process.send({ type: "summary", reads, failures, seen: [...seen] }, null, () => process.exit(0));
+      });
+    `], { stdio: ["ignore", "ignore", "inherit", "ipc"] });
+    type ReaderState = { n: number; reads: number; failures: number; seen: string[]; lastSeen: Record<string, number> };
+    type ReaderMessage =
+      | ({ type: "state" } & ReaderState)
+      | { type: "failure"; message: string }
+      | { type: "summary"; reads: number; failures: number; seen: string[] };
+    // `latest` buffers the freshest cumulative report, so a wait started after a
+    // report already arrived is still satisfied by it (predicates are monotone).
+    let latest: ReaderState = { n: 0, reads: 0, failures: 0, seen: [], lastSeen: {} };
+    let summary: { reads: number; failures: number; seen: string[] } | undefined;
+    let failureMessage = "";
+    let readerError: Error | undefined;
+    let earlyExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    let stopSent = false;
+    let reaped = false;
+    reader.on("message", (m: ReaderMessage) => {
+      if (m.type === "state") latest = m;
+      else if (m.type === "failure" && !failureMessage) failureMessage = m.message;
+      else if (m.type === "summary") summary = m;
+    });
+    reader.on("error", (e: Error) => { readerError = e; });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      reader.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    void exited.then((info) => { if (!stopSent) earlyExit = info; reaped = true; });
+    const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const waitFor = async (what: string, observed: (s: ReaderState) => boolean, boundMs: number) => {
+      const endAt = Date.now() + boundMs;
+      while (!observed(latest)) {
+        if (failureMessage) throw new Error(`reader saw an incomplete release: ${failureMessage}`);
+        if (readerError) throw new Error(`reader process error: ${readerError.message}`);
+        if (earlyExit) throw new Error(`reader exited before being stopped (code=${earlyExit.code} signal=${earlyExit.signal})`);
+        if (Date.now() > endAt) {
+          throw new Error(`reader did not ${what} within ${boundMs}ms; latest=${JSON.stringify(latest)} failure=${failureMessage || "none"}`);
+        }
+        await pause(5);
       }
-      process.stdout.write(JSON.stringify({ reads, failures, seen: [...seen] }));
-    `], { stdio: ["ignore", "pipe", "inherit"] });
-    let out = "";
-    reader.stdout.on("data", (c) => { out += c; });
-    const done = new Promise((r) => reader.once("exit", r));
-    const b = await nextRelease("B");
-    for (let i = 0; i < 200; i += 1) rr.rollback(prefix);
-    await done;
-    const result = JSON.parse(out);
-    expect(result.failures).toBe(0);
-    expect(result.reads).toBeGreaterThan(100);
-    expect(result.seen).toEqual(expect.arrayContaining([ids[0], b.id]));
-    expect(lstatSync(join(prefix, "current")).isSymbolicLink()).toBe(true);
-    expect(existsSync(join(prefix, "current.new"))).toBe(false);
+    };
+    try {
+      // Phase 1: prove the reader is reading A before B is installed.
+      await waitFor(`observe release ${a.id}`, (s) => s.seen.includes(a.id), 20_000);
+      const b = await nextRelease("B");
+      // Phase 2: positively observe the atomic switch to B.
+      await waitFor(`observe the switch to ${b.id}`, (s) => s.seen.includes(b.id), 20_000);
+      // Phase 3: 200 rollbacks (even count, so current ends on B), then a
+      // fresh post-storm observation of B at an attempt index past the storm.
+      const stormStart = latest.n;
+      for (let i = 0; i < 200; i += 1) rr.rollback(prefix);
+      await waitFor(`observe ${b.id} again after the rollback storm`, (s) => (s.lastSeen[b.id] ?? 0) > stormStart, 20_000);
+      // Stop the reader and await its complete report and close, bounded.
+      stopSent = true;
+      if (reader.connected) reader.send({ type: "stop" });
+      const stopEnd = Date.now() + 5_000;
+      while ((!summary || !reaped) && Date.now() < stopEnd) await pause(5);
+      if (!summary) {
+        throw new Error(`reader did not report a summary; exit=${JSON.stringify(earlyExit ?? null)} error=${readerError?.message ?? "none"} failure=${failureMessage || "none"}`);
+      }
+      if (!reaped) {
+        reader.kill("SIGKILL");
+        await Promise.race([exited, pause(2_000)]);
+        if (!reaped) throw new Error("reader could not be reaped after SIGKILL");
+      }
+      const exit = await exited;
+      if (exit.code !== 0) throw new Error(`reader exited with code ${exit.code} signal ${exit.signal}`);
+      const result = summary;
+      expect(result.failures).toBe(0);
+      expect(result.reads).toBeGreaterThan(100);
+      expect(result.seen).toEqual(expect.arrayContaining([ids[0], b.id]));
+      expect(lstatSync(join(prefix, "current")).isSymbolicLink()).toBe(true);
+      expect(existsSync(join(prefix, "current.new"))).toBe(false);
+    } finally {
+      // Deterministic cleanup of the owned reader only: bounded stop, then
+      // bounded kill and reap. Never orphans the child, whatever failed.
+      if (!reaped) {
+        try { if (!stopSent && reader.connected) reader.send({ type: "stop" }); } catch { /* channel already closed */ }
+        const graceEnd = Date.now() + 1_500;
+        while (!reaped && Date.now() < graceEnd) await pause(5);
+        if (!reaped) {
+          reader.kill("SIGKILL");
+          await Promise.race([exited, pause(1_500)]);
+        }
+      }
+    }
   }, 90_000);
 
   it("rollback swaps current and previous; it refuses without a previous release", () => {

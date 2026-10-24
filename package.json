@@ -5,6 +5,7 @@
   "type": "module",
   "main": "dist/mcp-server/index.js",
   "bin": {
+    "gptqueue": "./bin/gptqueue",
     "gptqueue-server": "./bin/gptqueue-server",
     "gptqueue-http": "./bin/gptqueue-http",
     "gptqueue-pty": "./bin/gptqueue-pty"
