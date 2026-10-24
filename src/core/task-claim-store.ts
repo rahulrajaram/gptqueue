@@ -23,10 +23,13 @@ import { join } from "path";
 import {
   CLAIM_KEYS,
   DLQ_KEYS,
+  DLQ_NOTICE_KEYS,
   DLQ_PROVISIONAL,
   SESSION_KEYS,
+  SYSTEM_SENDER,
 } from "./keys.js";
 import { LUA_DIR, describeStored, firstNonStringField } from "./stored-read.js";
+import { tryNotifyDeadLetters } from "./dlq-notice.js";
 
 /**
  * The Lua `purge_actor_claims(claims, index, dlq, events, trace, actor)`
@@ -151,6 +154,8 @@ export interface ClaimInput {
 export interface RecoverInput {
   readonly actor_id: string;
   readonly now: string; // ISO timestamp; the adapter layer reads the clock, not the core
+  /** Rename only: transfer pending state before notifying the destination. */
+  readonly suppress_notify?: boolean;
 }
 
 export interface AcknowledgeInput {
@@ -194,10 +199,11 @@ export interface ActiveClaimInput {
 export type ClaimClock = "redis" | "caller";
 
 const claimsLib: string = readFileSync(join(LUA_DIR, "claims-lib.lua"), "utf-8");
+const noticeLib = readFileSync(join(LUA_DIR, "dlq-notice-lib.lua"), "utf-8");
 
 /** A claim script with the shared claims-lib.lua functions composed in front. */
 export const claimLuaScript = (file: string): string =>
-  `${claimsLib}\n${readFileSync(join(LUA_DIR, file), "utf-8")}`;
+  `${claimsLib}\n${noticeLib}\n${readFileSync(join(LUA_DIR, file), "utf-8")}`;
 
 export class TaskClaimStore {
   private readonly redis: Redis;
@@ -260,7 +266,7 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
   async recoverExpired(input: RecoverInput): Promise<RecoverResult> {
     const [recovered, deadlettered] = (await this.redis.eval(
       this.recoverScript,
-      7,
+      10,
       CLAIM_KEYS.index(input.actor_id),
       CLAIM_KEYS.claims,
       SESSION_KEYS.queue(input.actor_id),
@@ -268,17 +274,25 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
       SESSION_KEYS.inboxEvents(input.actor_id),
       SESSION_KEYS.mailboxMeta(input.actor_id),
       DLQ_KEYS.dropped(input.actor_id),
+      DLQ_NOTICE_KEYS.pending(input.actor_id),
+      DLQ_NOTICE_KEYS.overflow(input.actor_id),
+      DLQ_NOTICE_KEYS.window(input.actor_id),
       this.nowArg(input.now),
       DLQ_PROVISIONAL.RECOVER_CAP,
       DLQ_PROVISIONAL.DLQ_MAX_LENGTH,
-      DLQ_PROVISIONAL.RECOVER_COUNTER_TTL_SECONDS
+      DLQ_PROVISIONAL.RECOVER_COUNTER_TTL_SECONDS,
+      SYSTEM_SENDER
     )) as [number, number | string];
+    // Every recovery opportunity retries pending state, including zero new
+    // dead letters. claim() and dispatcher reconcile both pass through here.
+    // A refused recovery must retain its no-writes contract.
     if (recovered === -1) {
       return fail(
         "store_corrupt",
         `cannot recover expired claims for actor '${input.actor_id}': its ${String(deadlettered)} key holds the wrong type; the claims are kept`
       );
     }
+    if (!input.suppress_notify) await tryNotifyDeadLetters(this.redis, input.actor_id);
     return { ok: true, recovered, deadlettered: deadlettered as number };
   }
 

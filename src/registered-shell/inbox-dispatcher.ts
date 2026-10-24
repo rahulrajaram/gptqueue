@@ -112,6 +112,8 @@ export const startInboxDispatcher = async (
 
   const reconcile = async (): Promise<void> => {
     if (!await renewLease()) return;
+    // recoverExpired also attempts pending/overflow notices on every pass,
+    // even when no claim expired; notification failure is isolated there.
     const recovered = await claims.recoverExpired({ actor_id: agent, now: new Date().toISOString() });
     if (!recovered.ok) throw new Error(recovered.error.message);
     const pending = await events.pending(agent);

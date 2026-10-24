@@ -8,7 +8,7 @@
 import { Redis } from "ioredis";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_PROVISIONAL, parseDeadLetterDropped } from "./keys.js";
+import { SESSION_KEYS, SESSION_DEFAULTS, DLQ_KEYS, DLQ_NOTICE_KEYS, DLQ_PROVISIONAL, parseDeadLetterDropped } from "./keys.js";
 import type { QueueMessage } from "./types.js";
 import { LUA_DIR } from "./stored-read.js";
 import { taskSubject } from "./task-ledger.js";
@@ -64,9 +64,11 @@ export type QueueStatusEntry = {
   dead_lettered_count: number | null;
   /** Entries the DLQ length bound has discarded; null when the counter is unreadable. */
   dead_lettered_dropped: number | null;
+  dlq_notice_pending: number | null;
+  dlq_notice_overflow: number | null;
 };
 /** Pipelined commands per mailbox in status(): LLEN, HGET, class counts, DLQ LLEN, drop GET. */
-const STATUS_COMMANDS = 5;
+const STATUS_COMMANDS = 7;
 
 export class MailboxStore {
   private readonly redis: Redis;
@@ -94,7 +96,7 @@ export class MailboxStore {
     this.boundedPushScript = withAdmission("bounded-push.lua");
     this.boundedPushIdempotentScript = withAdmission("bounded-push-idempotent.lua");
     this.watchdogPushScript = composeWatchdogPush(this.boundedPushIdempotentScript);
-    this.migrateMessagesScript = readFileSync(
+    this.migrateMessagesScript = `${readFileSync(join(LUA_DIR, "dlq-notice-lib.lua"), "utf-8")}\n` + readFileSync(
       join(LUA_DIR, "migrate-messages.lua"),
       "utf-8"
     );
@@ -370,7 +372,8 @@ export class MailboxStore {
     for (const name of targets) {
       pipe.llen(SESSION_KEYS.queue(name)).hget(SESSION_KEYS.mailboxMeta(name), "max_size")
         .eval(CLASS_COUNTS_SCRIPT, 1, SESSION_KEYS.queue(name), name, OUTSTANDING_PREFIX)
-        .llen(DLQ_KEYS.list(name)).get(DLQ_KEYS.dropped(name));
+        .llen(DLQ_KEYS.list(name)).get(DLQ_KEYS.dropped(name))
+        .scard(DLQ_NOTICE_KEYS.pending(name)).get(DLQ_NOTICE_KEYS.overflow(name));
     }
     const results = (await pipe.exec()) ?? [];
     return targets.map((name, i) => {
@@ -380,6 +383,8 @@ export class MailboxStore {
       const [countError, counts] = results[at + 2] ?? [null, [0, 0]];
       const [deadError, dead] = results[at + 3] ?? [null, 0];
       const [droppedError, dropped] = results[at + 4] ?? [null, null];
+      const [pendingError, pending] = results[at + 5] ?? [null, 0];
+      const [overflowError, overflow] = results[at + 6] ?? [null, null];
       if (depthError) throw depthError;
       if (boundError) throw boundError;
       if (countError) throw countError;
@@ -396,6 +401,8 @@ export class MailboxStore {
         // Isolated: a wrong-type DLQ key or counter makes only that field null.
         dead_lettered_count: deadError ? null : Number(dead),
         dead_lettered_dropped: droppedError ? null : parseDeadLetterDropped(dropped as string | null),
+        dlq_notice_pending: pendingError ? null : Number(pending),
+        dlq_notice_overflow: overflowError ? null : parseDeadLetterDropped(overflow as string | null),
       };
     });
   }
@@ -416,7 +423,9 @@ export class MailboxStore {
   async deleteMailbox(agentName: string): Promise<void> {
     await this.redis.del(
       SESSION_KEYS.queue(agentName),
-      SESSION_KEYS.mailboxMeta(agentName)
+      SESSION_KEYS.mailboxMeta(agentName),
+      DLQ_NOTICE_KEYS.pending(agentName), DLQ_NOTICE_KEYS.overflow(agentName),
+      DLQ_NOTICE_KEYS.window(agentName), DLQ_NOTICE_KEYS.collisions(agentName)
     );
   }
 

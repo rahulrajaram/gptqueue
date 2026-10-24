@@ -207,6 +207,14 @@ export const DLQ_KEYS = {
 /** Reserved sender of gptqueue's own envelopes (e.g. RECIPIENT_RETIRED); no agent may register it. */
 export const SYSTEM_SENDER = "gptqueue-system";
 
+/** Durable, bounded notice state. Pending and overflow never expire silently. */
+export const DLQ_NOTICE_KEYS = {
+  pending: (actor: string) => `gptq:dlq-notice-pending:${actor}`,
+  overflow: (actor: string) => `gptq:dlq-notice-overflow:${actor}`,
+  window: (actor: string) => `gptq:dlq-notice-window:${actor}`,
+  collisions: (actor: string) => `gptq:dlq-notice-collisions:${actor}`,
+} as const;
+
 /**
  * Parse a stored DLQ drop counter for a read-only observer view: a missing key
  * is 0; a value that is not a canonical non-negative safe integer is null

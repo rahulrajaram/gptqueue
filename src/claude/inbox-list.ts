@@ -10,7 +10,7 @@
  * pops, claims, leases or writes anything.
  */
 import type { Redis } from "ioredis";
-import { CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS, parseDeadLetterDropped } from "../core/keys.js";
+import { CLAIM_KEYS, DLQ_KEYS, DLQ_NOTICE_KEYS, SESSION_KEYS, parseDeadLetterDropped } from "../core/keys.js";
 import { parseQueueEntry, replyOwners, wakesRecipient } from "../core/inbox-events.js";
 import type { QueueMessage } from "../core/types.js";
 import { probeFailure, type ProbeErrorCode } from "./inbox-probe.js";
@@ -58,6 +58,8 @@ export type InboxListing = Readonly<{
   dead_lettered_count: number | null;
   /** Entries the DLQ length bound has discarded; null when the counter is unreadable. */
   dead_lettered_dropped: number | null;
+  dlq_notice_pending: number | null;
+  dlq_notice_overflow: number | null;
 }>;
 export type ListResult =
   | Readonly<{ ok: true; listing: InboxListing }>
@@ -128,11 +130,14 @@ export const listInbox = async (redis: Redis, agent: string, limit: number): Pro
     // list is read because claims-recover.lua RPUSHes recovered (older) tasks
     // to the tail, so the oldest unclaimed mail may lie beyond `limit`.
     const replies = await redis.multi().time().llen(queue).lrange(queue, 0, -1).zrange(CLAIM_KEYS.index(agent), 0, -1, "WITHSCORES")
-      .llen(DLQ_KEYS.list(agent)).get(DLQ_KEYS.dropped(agent)).exec();
+      .llen(DLQ_KEYS.list(agent)).get(DLQ_KEYS.dropped(agent))
+      .scard(DLQ_NOTICE_KEYS.pending(agent)).get(DLQ_NOTICE_KEYS.overflow(agent)).exec();
     // The two DLQ reads are isolated: an error on either (e.g. WRONGTYPE) makes only its field null.
     const [time, unclaimed, raw, index] = execResults(replies?.slice(0, 4) ?? null) as [[string, string], number, string[], string[]];
     const [deadError, deadLettered] = replies?.[4] ?? [null, null];
     const [droppedError, droppedRaw] = replies?.[5] ?? [null, null];
+    const [pendingError, pending] = replies?.[6] ?? [null, 0];
+    const [overflowError, overflow] = replies?.[7] ?? [null, null];
     const nowMs = Number(time[0]) * 1000 + Math.floor(Number(time[1]) / 1000);
     const entries = raw.map(parseQueueEntry);
     const shown = entries.slice(0, limit);
@@ -163,6 +168,8 @@ export const listInbox = async (redis: Redis, agent: string, limit: number): Pro
       expired_claims: claims.filter((claim) => claim.expired).length,
       dead_lettered_count: deadError ? null : Number(deadLettered),
       dead_lettered_dropped: droppedError ? null : parseDeadLetterDropped(droppedRaw as string | null),
+      dlq_notice_pending: pendingError ? null : Number(pending),
+      dlq_notice_overflow: overflowError ? null : parseDeadLetterDropped(overflow as string | null),
     }) });
   } catch (error) {
     return probeFailure(error);
@@ -192,7 +199,7 @@ export const formatListing = (listing: InboxListing): string => {
     ...(messageRows.length === 0 ? [] : table([["#", "AGE", "TYPE", "WAKES", "FROM", "ID", "PREVIEW"], ...messageRows])),
     listing.claims.length === 0 ? "claims: none" : `claims: ${listing.claims.length} open, ${listing.expired_claims} expired`,
     ...(claimRows.length === 0 ? [] : table([["CLAIM", "SESSION", "AGE", "EXPIRES", "EXPIRED", "TASKS"], ...claimRows])),
-    `dead-lettered: ${listing.dead_lettered_count ?? "?"}, dropped ${listing.dead_lettered_dropped ?? "?"}`,
+    `dead-lettered: ${listing.dead_lettered_count ?? "?"}, dropped ${listing.dead_lettered_dropped ?? "?"}, notice pending ${listing.dlq_notice_pending ?? "?"}, overflow ${listing.dlq_notice_overflow ?? "?"}`,
   ];
   return `${lines.join("\n")}\n`;
 };

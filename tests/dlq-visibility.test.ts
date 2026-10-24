@@ -16,7 +16,7 @@ import { Redis } from "ioredis";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { MailboxStore } from "../src/core/mailbox-store.js";
 import { TaskClaimStore, claimLuaScript } from "../src/core/task-claim-store.js";
-import { CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS, parseDeadLetterDropped } from "../src/core/keys.js";
+import { CLAIM_KEYS, DLQ_KEYS, DLQ_NOTICE_KEYS, SESSION_KEYS, parseDeadLetterDropped } from "../src/core/keys.js";
 import { runPeek } from "../src/claude/peek.js";
 import { RedisClient } from "../src/mcp-server/redis-client.js";
 import { getQueueStatus } from "../src/mcp-server/tools/queue-status.js";
@@ -41,6 +41,7 @@ afterAll(async () => { redis.disconnect(); await rm(home, { recursive: true, for
 const allKeys = (agent: string): string[] => [
   SESSION_KEYS.queue(agent), SESSION_KEYS.mailboxMeta(agent), SESSION_KEYS.inboxEvents(agent),
   CLAIM_KEYS.index(agent), DLQ_KEYS.list(agent), DLQ_KEYS.dropped(agent), DLQ_KEYS.reasons(agent),
+  ...Object.values(DLQ_NOTICE_KEYS).map((key) => key(agent)),
 ];
 const mailbox = (prefix: string): string => {
   const agent = `${prefix}-${randomUUID().slice(0, 8)}`;
@@ -51,6 +52,8 @@ const mailbox = (prefix: string): string => {
 /** Dead-letter `n` tasks through the real recovery Lua with cap 0 and DLQ bound `bound`. */
 const deadLetter = async (agent: string, n: number, bound: number): Promise<void> => {
   const store = new TaskClaimStore(redis, { clock: "caller" });
+  // Keep these pure DLQ fixtures from delivering notices on the next claim.
+  if (n > 0) await redis.set(DLQ_NOTICE_KEYS.window(agent), "1", "EX", 900);
   for (let i = 0; i < n; i++) {
     const id = `${agent}-m${i}`;
     keys.add(CLAIM_KEYS.recoverCount(agent, id));
@@ -108,18 +111,18 @@ describe("dead-lettered counts", () => {
       try {
         const tool = await getQueueStatus(client, { agent });
         const body = tool.structuredContent as { queues: Record<string, unknown>[] };
-        expect(body.queues).toEqual([{ agent, depth: 0, max_size: expect.any(Number), waking_count: 0, quiet_count: 0, dead_lettered_count: count, dead_lettered_dropped: dropped }]);
+        expect(body.queues).toEqual([{ agent, depth: 0, max_size: expect.any(Number), waking_count: 0, quiet_count: 0, dead_lettered_count: count, dead_lettered_dropped: dropped, dlq_notice_pending: n, dlq_notice_overflow: 0 }]);
       } finally { await client.shutdown(); }
 
       const { raw, json } = await listJson(agent);
-      expect(json).toMatchObject({ agent, dead_lettered_count: count, dead_lettered_dropped: dropped });
+      expect(json).toMatchObject({ agent, dead_lettered_count: count, dead_lettered_dropped: dropped, dlq_notice_pending: n, dlq_notice_overflow: 0 });
       expect(raw).not.toContain(DLQ_BODY);
       expect(raw).not.toContain(`${agent}-m`); // no DLQ message ids
       expect(raw).not.toContain("sender"); // no DLQ senders
 
       const human = await peek(["--name", agent, "--list"]);
       expect(human.code).toBe(0);
-      expect(human.stdout.trimEnd().split("\n").at(-1)).toBe(`dead-lettered: ${count}, dropped ${dropped}`);
+      expect(human.stdout.trimEnd().split("\n").at(-1)).toBe(`dead-lettered: ${count}, dropped ${dropped}, notice pending ${n}, overflow 0`);
       expect(human.stdout).not.toContain(DLQ_BODY);
       expect(human.stdout).not.toContain(`${agent}-m`);
     });
@@ -142,7 +145,7 @@ describe("dead-lettered counts", () => {
     await redis.set(DLQ_KEYS.dropped(agent), "not-a-number");
     expect((await new MailboxStore(redis, redis, 10).status(agent))[0]).toMatchObject({ dead_lettered_count: 0, dead_lettered_dropped: null });
     expect((await listJson(agent)).json).toMatchObject({ dead_lettered_count: 0, dead_lettered_dropped: null });
-    expect((await peek(["--name", agent, "--list"])).stdout.trimEnd().split("\n").at(-1)).toBe("dead-lettered: 0, dropped ?");
+    expect((await peek(["--name", agent, "--list"])).stdout.trimEnd().split("\n").at(-1)).toBe("dead-lettered: 0, dropped ?, notice pending 0, overflow 0");
   });
 });
 
@@ -171,14 +174,47 @@ describe("a wrong-type DLQ key or drop counter (gate F1)", () => {
         const expectedBad = field === "dead_lettered_count"
           ? { dead_lettered_count: null, dead_lettered_dropped: 0 }
           : { dead_lettered_count: 1, dead_lettered_dropped: null };
-        expect(byName.get(bad)).toEqual({ agent: bad, depth: 1, max_size: expect.any(Number), waking_count: 1, quiet_count: 0, ...expectedBad });
+        expect(byName.get(bad)).toEqual({ agent: bad, depth: 1, max_size: expect.any(Number), waking_count: 1, quiet_count: 0, ...expectedBad, dlq_notice_pending: 1, dlq_notice_overflow: 0 });
 
         for (const name of healthy) expect((await listJson(name)).json).toMatchObject({ dead_lettered_count: expect.any(Number), dead_lettered_dropped: expect.any(Number) });
         expect((await listJson(bad)).json).toMatchObject({ agent: bad, unclaimed: 1, listed: 1, ...expectedBad });
         const human = await peek(["--name", bad, "--list"]);
         expect(human.code).toBe(0);
-        expect(human.stdout.trimEnd().split("\n").at(-1)).toBe(field === "dead_lettered_count" ? "dead-lettered: ?, dropped 0" : "dead-lettered: 1, dropped ?");
+        expect(human.stdout.trimEnd().split("\n").at(-1)).toBe(field === "dead_lettered_count" ? "dead-lettered: ?, dropped 0, notice pending 1, overflow 0" : "dead-lettered: 1, dropped ?, notice pending 1, overflow 0");
       } finally { await redis.hdel(SESSION_KEYS.registry, ...names); }
+    });
+  }
+});
+
+describe("notice visibility through the CLI and MCP tool", () => {
+  for (const corruption of ["none", "pending", "overflow-type", "overflow-value"] as const) {
+    it(`isolates ${corruption} across fields and mailboxes without writing`, async () => {
+      const healthy = mailbox("notice-healthy");
+      const bad = mailbox("notice-bad");
+      await redis.hset(SESSION_KEYS.registry, healthy, "{}", bad, "{}");
+      await redis.sadd(DLQ_NOTICE_KEYS.pending(healthy), "a", "b");
+      await redis.set(DLQ_NOTICE_KEYS.overflow(healthy), "4");
+      if (corruption === "pending") await redis.set(DLQ_NOTICE_KEYS.pending(bad), "bad");
+      else await redis.sadd(DLQ_NOTICE_KEYS.pending(bad), "c");
+      if (corruption === "overflow-type") await redis.sadd(DLQ_NOTICE_KEYS.overflow(bad), "bad");
+      else await redis.set(DLQ_NOTICE_KEYS.overflow(bad), corruption === "overflow-value" ? "NaN" : "3");
+      const expected = { dlq_notice_pending: corruption === "pending" ? null : 1,
+        dlq_notice_overflow: corruption.startsWith("overflow") ? null : 3 };
+      const snapshot = async () => Promise.all(allKeys(bad).map(async (key) => [key, (await redis.dumpBuffer(key))?.toString("base64")]));
+      const before = await snapshot();
+      const client = new RedisClient(null, REDIS_URL);
+      try {
+        const result = await getQueueStatus(client, {});
+        const queues = (result.structuredContent as { queues: Record<string, unknown>[] }).queues;
+        expect(queues.find((entry) => entry.agent === healthy)).toMatchObject({ dlq_notice_pending: 2, dlq_notice_overflow: 4 });
+        expect(queues.find((entry) => entry.agent === bad)).toMatchObject({ ...expected, depth: 0, dead_lettered_count: 0, dead_lettered_dropped: 0 });
+        expect((await listJson(bad)).json).toMatchObject({ ...expected, unclaimed: 0 });
+        expect((await peek(["--name", bad, "--list"])).stdout).toContain(`notice pending ${expected.dlq_notice_pending ?? "?"}, overflow ${expected.dlq_notice_overflow ?? "?"}`);
+        expect(await snapshot()).toEqual(before);
+      } finally {
+        await client.shutdown();
+        await redis.hdel(SESSION_KEYS.registry, healthy, bad);
+      }
     });
   }
 });

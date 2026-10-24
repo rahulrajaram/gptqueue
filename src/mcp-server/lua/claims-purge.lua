@@ -64,6 +64,8 @@ local function purge_actor_claims(claims, index, dlq, events, trace, actor)
     for _, payload in ipairs(redis.call('LRANGE', dlq, 0, -1)) do track(payload) end
   end
   for key in pairs(counters) do redis.call('DEL', key) end
-  redis.call('DEL', index, dlq, events, trace, 'gptq:dlq-dropped:' .. actor)
+  redis.call('DEL', index, dlq, events, trace, 'gptq:dlq-dropped:' .. actor,
+    'gptq:dlq-notice-pending:' .. actor, 'gptq:dlq-notice-overflow:' .. actor,
+    'gptq:dlq-notice-window:' .. actor, 'gptq:dlq-notice-collisions:' .. actor)
   return #claimIds
 end

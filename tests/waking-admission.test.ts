@@ -231,7 +231,7 @@ describe("waking admission (real Lua)", () => {
     const to = mailbox();
     const store = new MailboxStore(redis, redis, BOUND);
     await legacy(to, [envelope(to, "task"), await owned(to), envelope(to, "status"), envelope(to, "result", { in_reply_to: "gone" }), "[]"]);
-    expect(await statusOf(store, to)).toEqual({ agent: to, depth: 5, max_size: BOUND, waking_count: 2, quiet_count: 3, dead_lettered_count: 0, dead_lettered_dropped: 0 });
+    expect(await statusOf(store, to)).toEqual({ agent: to, depth: 5, max_size: BOUND, waking_count: 2, quiet_count: 3, dead_lettered_count: 0, dead_lettered_dropped: 0, dlq_notice_pending: 0, dlq_notice_overflow: 0 });
     const empty = mailbox();
     expect(await statusOf(store, empty)).toMatchObject({ depth: 0, waking_count: 0, quiet_count: 0 });
   });

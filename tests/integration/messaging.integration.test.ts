@@ -516,6 +516,11 @@ describe("dead-letter queue recovery quarantine", () => {
     expect(dlq.data.status).toBe("ok");
     expect((dlq.data.entries as Array<{ message_id: string }>)[0]!.message_id).toBe(msgId);
 
+    // The next claim drains durable pending state as an ordinary owner notice.
+    const notice = expectClaimed(await b.call("claim_tasks", { session_id: b.sessionId, max_batch: 1, ttl_seconds: 300 }));
+    expect(JSON.parse(notice.tasks[0]!)).toMatchObject({ to: b.name, type: "task", payload: { metadata: { kind: "dlq_notice" } } });
+    await b.call("acknowledge_tasks", { session_id: b.sessionId, claim_id: notice.claim_id });
+
     // Requeue -> fresh budget, back to inbox.
     const requeued = await b.call("dlq_requeue", { session_id: b.sessionId, message_id: msgId });
     expect(requeued.data).toMatchObject({ status: "ok", requeued: 1 });
@@ -547,11 +552,17 @@ describe("dead-letter queue recovery quarantine", () => {
     const msgLine = await ctx.redis.lindex(SESSION_KEYS.queue(b.name), 0);
     const msgId = taskIdOf(msgLine!);
 
-    // 7 claim cycles at ttl 1s: the 7th recovery increments past cap 5 -> DLQ.
+    // The 7th recovery increments past cap 5 and claims the owner notice.
     let lastDeadlettered = false;
     for (let i = 0; i < 7; i += 1) {
       const r = await b.call("claim_tasks", { session_id: b.sessionId, max_batch: 1, ttl_seconds: 1 });
       if (r.data.claimed === true) {
+        const claim = expectClaimed(r);
+        if (JSON.parse(claim.tasks[0]!).payload.metadata?.kind === "dlq_notice") {
+          await b.call("acknowledge_tasks", { session_id: b.sessionId, claim_id: claim.claim_id });
+          lastDeadlettered = true;
+          break;
+        }
         await delay(1300); // let the 1s lease lapse before the next (recovering) claim
       } else {
         lastDeadlettered = true;

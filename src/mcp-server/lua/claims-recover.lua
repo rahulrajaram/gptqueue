@@ -63,6 +63,12 @@ local dlq = KEYS[4]
 local events = KEYS[5]
 local meta = KEYS[6]
 local dropped = KEYS[7]
+-- Optional explicit keys keep direct/older script callers compatible.
+local actor = string.sub(inbox, #'gptq:q:' + 1)
+local noticePending = KEYS[8] or ('gptq:dlq-notice-pending:' .. actor)
+local noticeOverflow = KEYS[9] or ('gptq:dlq-notice-overflow:' .. actor)
+local noticeWindow = KEYS[10] or ('gptq:dlq-notice-window:' .. actor)
+local system = ARGV[5] or 'gptqueue-system'
 local now = tonumber(ARGV[1]) or server_ms()
 local recoverCap = tonumber(ARGV[2])
 local dlqMaxLength = tonumber(ARGV[3])
@@ -95,6 +101,7 @@ end
 -- legacy envelope, or a claim without an actor id, which is re-queued
 -- without counter accounting.
 local plan = {}
+local noticeIncrements = 0
 for _, claimId in ipairs(expired) do
   local entry = { id = claimId, tasks = {} }
   local raw = redis.call('HGET', claims, claimId)
@@ -119,7 +126,11 @@ for _, claimId in ipairs(expired) do
         end
         local wake = wake_plan(task)
         if wake == false then return { -1, 'outstanding' } end
-        entry.tasks[#entry.tasks + 1] = { task = task, counterKey = counterKey, wake = wake }
+        -- System-authored tasks (including notices) still dead-letter normally,
+        -- but never generate another notice: no recursive system traffic.
+        local noticeId = counterKey and msg.from ~= system and msgId or nil
+        if noticeId then noticeIncrements = noticeIncrements + 1 end
+        entry.tasks[#entry.tasks + 1] = { task = task, counterKey = counterKey, wake = wake, noticeId = noticeId }
       end
     end
   end
@@ -132,6 +143,11 @@ if not holds(meta, 'hash') then return { -1, 'meta' } end
 if not holds(dropped, 'string') then return { -1, 'dropped' } end
 local droppedSoFar = redis.call('GET', dropped)
 if droppedSoFar and not incrementable(droppedSoFar) then return { -1, 'dropped' } end
+if not dn_holds(noticePending, 'set') then return { -1, 'notice_pending' } end
+local overflow = dn_count(noticeOverflow)
+if overflow == false or overflow > DN_MAX_COUNT - noticeIncrements then return { -1, 'notice_overflow' } end
+if dn_count(noticeWindow) == false then return { -1, 'notice_window' } end
+local pendingCount = redis.call('SCARD', noticePending)
 
 -- Pass 2: every write below targets a validated key.
 local recovered = 0
@@ -166,6 +182,13 @@ for _, entry in ipairs(plan) do
           dlqDropped = dlqDropped + (length - dlqMaxLength)
         end
         redis.call('DEL', counterKey)
+        if item.noticeId then
+          if pendingCount < 256 then
+            pendingCount = pendingCount + redis.call('SADD', noticePending, item.noticeId)
+          elseif redis.call('SISMEMBER', noticePending, item.noticeId) == 0 then
+            redis.call('INCR', noticeOverflow)
+          end
+        end
         deadlettered = deadlettered + 1
       else
         requeue(item)

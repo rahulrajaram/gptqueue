@@ -11,6 +11,7 @@ import {
   ACTOR_KEYS,
   CLAIM_KEYS,
   DLQ_KEYS,
+  DLQ_NOTICE_KEYS,
   SESSION_KEYS,
 } from "../src/core/keys.js";
 import {
@@ -1058,6 +1059,9 @@ describe("dead-letter queue (tranche 2)", () => {
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
     await flushTestKeys(redis);
     store = new TaskClaimStore(redis, { clock: "caller" });
+    // These fixture builders exercise raw DLQ transitions independently of
+    // opportunistic notice delivery (covered by dlq-notice.test.ts).
+    await redis.set(DLQ_NOTICE_KEYS.window(actorId), "1", "EX", 900);
   });
 
   afterEach(async () => {

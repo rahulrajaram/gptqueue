@@ -13,6 +13,7 @@ import { CustodyStore } from "../core/custody-store.js";
 import { ActorDirectory } from "../core/actor-directory.js";
 import { WakeLeaseStore } from "../core/wake-lease.js";
 import { TaskClaimStore, purgeActorClaimsLua } from "../core/task-claim-store.js";
+import { tryNotifyDeadLetters } from "../core/dlq-notice.js";
 import { discoveryNames, discoveryPage, discoveryRecord, type AgentDiscoveryMetadata, type AgentDiscoveryRecord, type DiscoveryPage, type DiscoveryPaging } from "../core/agent-discovery.js";
 import { GptQueueError } from "./errors.js";
 
@@ -432,7 +433,9 @@ export class RedisClient {
         // any claim remains (live, or expired since this recovery), so no
         // claimed task is stranded under the retired name. A recovery that
         // cannot place its tasks changes nothing (FIX1) and fails the rename.
-        const recovery = await this.taskClaimStore.recoverExpired({ actor_id: oldName!, now: new Date().toISOString() });
+        // R4a: new pending notices follow the rename before any enqueue, so
+        // they address and wake the destination rather than the retired name.
+        const recovery = await this.taskClaimStore.recoverExpired({ actor_id: oldName!, now: new Date().toISOString(), suppress_notify: true });
         if (!recovery.ok) throw new Error(recovery.error.message);
         // FIX5: the old name's DLQ, including any task that recovery just
         // quarantined, moves with the mailbox so the new name can requeue it.
@@ -466,6 +469,9 @@ export class RedisClient {
         }
         throw error;
       }
+
+      // R4a: migration committed; notification failure cannot roll it back.
+      await tryNotifyDeadLetters(this.redis, name);
 
       // Messages are safe under the new name; retire the old identity.
       await this.sessionStore.closeSession(oldSessionId!).catch(() => {});

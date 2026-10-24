@@ -301,8 +301,10 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
     expect(await redis.exists(DLQ_KEYS.list("old-name"))).toBe(0);
     const listed = await client.taskClaim.deadLetterEntries({ actor_id: "new-name" });
     expect(listed.ok && listed.entries.map((e) => e.message_id)).toEqual(["t-capped", "t-older-dead", "t-new-name-dead"]);
+    const notice = (await contents(redis, "new-name"))[0]!;
+    expect(JSON.parse(notice)).toMatchObject({ to: "new-name", type: "task", payload: { metadata: { kind: "dlq_notice" } } });
     expect(await client.taskClaim.requeue({ actor_id: "new-name", message_id: "t-capped" })).toMatchObject({ ok: true });
-    expect(await contents(redis, "new-name")).toEqual([capped]);
+    expect(await contents(redis, "new-name")).toEqual([notice, capped]);
   });
 
   it("a rename moves the old DLQ even when the old inbox is empty, and trims to the DLQ bound (FIX5)", async () => {

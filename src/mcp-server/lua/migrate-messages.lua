@@ -39,7 +39,54 @@ end
 if claimsIndex and redis.call('ZCARD', claimsIndex) > 0 then
   return -1
 end
+for _, key in ipairs({src, dst}) do
+  if not dn_holds(key, 'list') then return redis.error_reply('mailbox key has wrong type') end
+end
+-- R5: exact actor keys, merged in this same transaction, including a rename
+-- with no queued messages. Preserve the longest coalescing window.
+local sourceActor = string.sub(src, #'gptq:q:' + 1)
+local destActor = string.sub(dst, #'gptq:q:' + 1)
+local function noticeKeys(actor)
+  return { 'gptq:dlq-notice-pending:' .. actor, 'gptq:dlq-notice-overflow:' .. actor,
+    'gptq:dlq-notice-window:' .. actor, 'gptq:dlq-notice-collisions:' .. actor }
+end
+local ns, nd = noticeKeys(sourceActor), noticeKeys(destActor)
+for _, keys in ipairs({ns, nd}) do
+  if not dn_holds(keys[1], 'set') then return redis.error_reply('notice pending key has wrong type') end
+  for i = 2, 4 do
+    if dn_count(keys[i]) == false then return redis.error_reply('notice counter is corrupt') end
+  end
+end
+local pending = redis.call('SMEMBERS', nd[1])
+if #pending > 256 then return redis.error_reply('notice pending exceeds cap') end
+local present = {}
+for _, id in ipairs(pending) do present[id] = true end
+local incoming = redis.call('SMEMBERS', ns[1])
+table.sort(incoming)
+local extra = 0
+for _, id in ipairs(incoming) do
+  if not present[id] then
+    if #pending < 256 then
+      pending[#pending + 1] = id
+      present[id] = true
+    else
+      extra = extra + 1
+    end
+  end
+end
+local sourceOverflow, destOverflow = dn_count(ns[2]), dn_count(nd[2])
+if sourceOverflow > DN_MAX_COUNT - destOverflow or sourceOverflow + destOverflow > DN_MAX_COUNT - extra then
+  return redis.error_reply('notice overflow exceeds integer capacity')
+end
+local mergedOverflow = sourceOverflow + destOverflow + extra
+local sourceDiagnostic, destDiagnostic = dn_count(ns[4]), dn_count(nd[4])
+if sourceDiagnostic > DN_MAX_COUNT - destDiagnostic then return redis.error_reply('notice diagnostic exceeds integer capacity') end
+local sourceWindow, destWindow = redis.call('PTTL', ns[3]), redis.call('PTTL', nd[3])
+local windowTtl = math.max(sourceWindow, destWindow)
+if sourceWindow == -1 or destWindow == -1 then windowTtl = -1 end
 if dlqSrc then
+  local bound = dn_number(ARGV[1])
+  if bound == false or bound < 1 then return redis.error_reply('invalid DLQ bound') end
   for _, key in ipairs({ dlqSrc, dlqDst }) do
     local t = redis.call('TYPE', key).ok
     if t ~= 'none' and t ~= 'list' then
@@ -77,4 +124,13 @@ if dlqSrc and dlqSrc ~= dlqDst then
     redis.call('DEL', dlqSrc)
   end
 end
+-- All merge destinations and numeric additions have been checked.
+for _, id in ipairs(pending) do redis.call('SADD', nd[1], id) end
+if mergedOverflow > 0 then redis.call('SET', nd[2], string.format('%.0f', mergedOverflow)) end
+if sourceDiagnostic + destDiagnostic > 0 then
+  redis.call('SET', nd[4], string.format('%.0f', sourceDiagnostic + destDiagnostic))
+end
+if windowTtl == -1 then redis.call('SET', nd[3], '1')
+elseif windowTtl > 0 then redis.call('SET', nd[3], '1', 'PX', windowTtl) end
+redis.call('DEL', unpack(ns))
 return #msgs

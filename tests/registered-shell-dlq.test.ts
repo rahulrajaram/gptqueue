@@ -61,6 +61,12 @@ const deadLetter = async (redis: Redis, agent: string, id: string): Promise<stri
   if (!claimed.ok || !claimed.claim) throw new Error(`seed claim failed: ${JSON.stringify(claimed)}`);
   await delay(1100);
   expect(await store.recoverExpired({ actor_id: agent, now: new Date().toISOString() })).toMatchObject({ ok: true, deadlettered: 1 });
+  // The owner receives an ordinary task notice; acknowledge it before the
+  // restoration assertions compare the underlying payload byte for byte.
+  const notification = await store.claim({ actor_id: agent, session_id: "dlq-seed", max_batch: 1, ttl_seconds: 300, now: new Date().toISOString() });
+  if (!notification.ok || !notification.claim) throw new Error("expected DLQ notice claim");
+  expect(JSON.parse(notification.claim.tasks[0]!)).toMatchObject({ to: agent, type: "task", payload: { metadata: { kind: "dlq_notice" } } });
+  expect(await store.acknowledge({ actor_id: agent, session_id: "dlq-seed", claim_id: notification.claim.claim_id })).toMatchObject({ ok: true });
   return raw;
 };
 
