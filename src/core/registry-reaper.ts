@@ -76,11 +76,19 @@
  *   gptq:wake-lease:<n>                     BLOCKING
  *   gptq:claims-index:<n>                   BLOCKING
  *   gptq:dlq:<n>, dlq-dropped, dlq-reason   BLOCKING
+ *   gptq:dlq-notice-pending:<n>             BLOCKING (unsent notice ids)
+ *   gptq:dlq-notice-overflow:<n>            BLOCKING (unsent notice count)
+ *   gptq:dlq-notice-window:<n>              BLOCKING (notice delivery window)
+ *   gptq:dlq-notice-collisions:<n>          BLOCKING (reserved-sender diagnostic)
  *   gptq:rc:<n>:*                           BLOCKING
  *   gptq:claims record (actor_id/session_id) BLOCKING
  *   snapshot session whose record names another agent: refuses the name (never deleted)
  *   runtime-mailbox mapping naming <n>      BLOCKING
  *   gptq:inbox-events:<n>, inbox-trace:<n>  intentionally KEPT (diagnostic history)
+ * Notice keys are checked by exact actor key inside the atomic step. Any
+ * existing value (including zero counters or wrong types) blocks, as with
+ * dlq-dropped/recover counters. Colon-suffixed actors own separate notice
+ * keys; the reaper never deletes notice state to make an identity reapable.
  */
 import type { Redis } from "ioredis";
 import { ACTOR_KEYS, CLAIM_KEYS, SESSION_KEYS, SYSTEM_SENDER } from "./keys.js";
@@ -96,6 +104,7 @@ export const DEFAULT_MAX_KEYS = 25_000;
 export type SkipReason =
   | "reserved_name" | "claude_name" | "durable_actor" | "live_lease" | "heartbeat" | "runtime_binding"
   | "wrapper_claim" | "queue_not_empty" | "claims_outstanding" | "dlq_not_empty" | "dlq_dropped" | "dlq_reason"
+  | "dlq_notice_pending" | "dlq_notice_overflow" | "dlq_notice_window" | "dlq_notice_collisions"
   | "recover_count" | "activation" | "agent_profile" | "outbound_activity" | "wake_lease" | "idempotency"
   | "legacy_agent_hash" | "registration_in_flight" | "session_outside_snapshot" | "runtime_mapping_reference"
   | "outstanding_request" | "keyspace_too_large" | "unexpected_key_type" | "session_owner_mismatch" | "claim_record" | "too_young" | "age_unknown" | "limit_reached" | "changed_before_delete";
@@ -232,6 +241,8 @@ local exact = {
   {'gptq:agent-profile:', 'agent_profile'}, {'gptq:outbound-activity:', 'outbound_activity'},
   {'gptq:wake-lease:', 'wake_lease'}, {'gptq:claims-index:', 'claims_outstanding'}, {'gptq:dlq:', 'dlq_not_empty'},
   {'gptq:dlq-dropped:', 'dlq_dropped'}, {'gptq:dlq-reason:', 'dlq_reason'},
+  {'gptq:dlq-notice-pending:', 'dlq_notice_pending'}, {'gptq:dlq-notice-overflow:', 'dlq_notice_overflow'},
+  {'gptq:dlq-notice-window:', 'dlq_notice_window'}, {'gptq:dlq-notice-collisions:', 'dlq_notice_collisions'},
 }
 -- Redis does not roll scripts back, so nothing below may error once mutation starts:
 -- phase A validates key TYPEs and decides every candidate with no writes; phase B

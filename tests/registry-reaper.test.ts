@@ -6,7 +6,7 @@ import { testRedisUrl } from "./helpers/test-redis.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
-import { ACTOR_KEYS, CLAIM_KEYS, DLQ_KEYS, SESSION_KEYS, SYSTEM_SENDER, WAKE_LEASE_KEYS } from "../src/core/keys.js";
+import { ACTOR_KEYS, CLAIM_KEYS, DLQ_KEYS, DLQ_NOTICE_KEYS, SESSION_KEYS, SYSTEM_SENDER, WAKE_LEASE_KEYS } from "../src/core/keys.js";
 import { REAP_AUDIT_REASON, reapOfflineIdentities, type SkipReason } from "../src/core/registry-reaper.js";
 import { flushTestKeys } from "./helpers/redis-test-utils.js";
 
@@ -156,6 +156,72 @@ describe("registry reaper (reap-offline)", () => {
       return real(...args);
     }) as typeof redis.eval;
   };
+
+  const snapshot = async () => Promise.all(
+    (await redis.keys("gptq:*")).sort().map(async key => [key, await redis.dump(key)]),
+  );
+  const noticeState: ReadonlyArray<[string, (name: string) => string, (key: string) => Promise<unknown>]> = [
+    ["dlq_notice_pending", DLQ_NOTICE_KEYS.pending, key => redis.sadd(key, "m:1")],
+    // Even a zero-valued counter is owned state: existence alone must block.
+    ["dlq_notice_overflow", DLQ_NOTICE_KEYS.overflow, key => redis.set(key, "0")],
+    ["dlq_notice_window", DLQ_NOTICE_KEYS.window, key => redis.set(key, "1")],
+    ["dlq_notice_collisions", DLQ_NOTICE_KEYS.collisions, key => redis.set(key, "0")],
+  ];
+  for (const [reason, keyOf, arrange] of noticeState) {
+    for (const dryRun of [true, false]) {
+      for (const wrongType of [false, true]) {
+        it(`preserves exact ${reason} alone (${wrongType ? "wrong type" : "native type"}, dryRun=${dryRun})`, async () => {
+          const { name } = await dead();
+          const control = await reapOfflineIdentities(redis, { dryRun: true });
+          expect(control.candidates.map(c => c.name)).toEqual([name]);
+          const key = keyOf(name);
+          if (wrongType) await redis.hset(key, "unexpected", "retain me");
+          else await arrange(key);
+          const before = await snapshot();
+          const report = await reapOfflineIdentities(redis, { dryRun });
+          expect(report.refused).toBeNull();
+          expect(report.candidates).toEqual([]);
+          expect(skipOf(report, name)).toBe(reason);
+          expect(report.counts[reason]).toBe(1);
+          expect(await snapshot()).toEqual(before);
+        });
+      }
+
+      it(`blocks ${reason} appearing immediately before Lua (dryRun=${dryRun})`, async () => {
+        const { name } = await dead();
+        let atStep: Awaited<ReturnType<typeof snapshot>> = [];
+        beforeStep(async () => {
+          await arrange(keyOf(name));
+          atStep = await snapshot();
+        });
+        const report = await reapOfflineIdentities(redis, { dryRun });
+        expect(report.candidates).toEqual([]);
+        expect(skipOf(report, name)).toBe(reason);
+        expect(await snapshot()).toEqual(atStep);
+      });
+
+      it(`attributes ${reason} only to its exact colon-suffixed owner (dryRun=${dryRun})`, async () => {
+        const short = await dead();
+        const neighbor = await dead(`${short.name}:neighbor`);
+        const key = keyOf(neighbor.name);
+        await arrange(key);
+        const neighborKeys = [key, SESSION_KEYS.agentSessions(neighbor.name), SESSION_KEYS.session(neighbor.sid),
+          SESSION_KEYS.mailboxMeta(neighbor.name), SESSION_KEYS.inboxTrace(neighbor.name)];
+        const before = await Promise.all(neighborKeys.map(k => redis.dump(k)));
+        const registration = await redis.hget(SESSION_KEYS.registry, neighbor.name);
+        // Include both names, so an owner-prefix bug cannot hide behind the default shape filter.
+        const report = await reapOfflineIdentities(redis, { dryRun, nameShape: /^/u });
+        expect(report.candidates.map(c => c.name)).toEqual([short.name]);
+        expect(skipOf(report, neighbor.name)).toBe(reason);
+        expect(await redis.hexists(SESSION_KEYS.registry, short.name)).toBe(dryRun ? 1 : 0);
+        expect(await redis.exists(SESSION_KEYS.session(short.sid), SESSION_KEYS.agentSessions(short.name),
+          SESSION_KEYS.mailboxMeta(short.name))).toBe(dryRun ? 3 : 0);
+        expect(await redis.hget(SESSION_KEYS.registry, neighbor.name)).toBe(registration);
+        expect(await redis.sismember(SESSION_KEYS.provisional, neighbor.name)).toBe(1);
+        expect(await Promise.all(neighborKeys.map(k => redis.dump(k)))).toEqual(before);
+      });
+    }
+  }
 
   const newlyBlocking: ReadonlyArray<[SkipReason, (n: string) => Promise<unknown>]> = [
     ["dlq_dropped", n => redis.set(DLQ_KEYS.dropped(n), "3")],
