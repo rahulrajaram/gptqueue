@@ -325,14 +325,24 @@ export const listensOnSocket = (argv: readonly string[], socketPath: string): bo
   listenEndpoint(argv) === `unix://${socketPath}`;
 
 /**
- * Token-wise confirmation of a gptqueue Codex sidecar: some token's basename
- * is `gptqueue-session` (argv[0] itself, or the script after the interpreter)
- * and `--client codex` appears as two adjacent tokens.
+ * Token-wise confirmation of a gptqueue Codex sidecar. The
+ * `gptqueue-session` script must sit in the executable position: argv[0]
+ * itself (direct execution), or the script argument of the project's native
+ * Node launch (`node <sidecar> --client codex ...` — the form bin/gptqueue-session
+ * is spawned in by pi-extension.ts, the Codex/MCP registration and worker
+ * mode). `--client codex` is parsed from the selected command's own
+ * arguments only: matching tokens carried among an unrelated executable's
+ * or script's arguments (python3 /tmp/other.py /opt/gptqueue/bin/gptqueue-session
+ * --client codex, node /tmp/other.js ...) never qualify.
  */
 export const isGptqueueSessionSidecarArgv = (argv: readonly string[]): boolean => {
-  if (!argv.some((token) => basename(token) === "gptqueue-session")) return false;
-  const index = argv.indexOf("--client");
-  return index >= 0 && argv[index + 1] === "codex";
+  if (argv.length === 0) return false;
+  const args = basename(argv[0]!) === "gptqueue-session" ? argv.slice(1)
+    : basename(argv[0]!) === "node" && argv.length > 1 && basename(argv[1]!) === "gptqueue-session" ? argv.slice(2)
+    : null;
+  if (args === null) return false;
+  const index = args.indexOf("--client");
+  return index >= 0 && args[index + 1] === "codex";
 };
 
 /**

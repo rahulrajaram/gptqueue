@@ -591,6 +591,26 @@ describe("retire-thread guards (injected fakes)", () => {
     expect(fixture.events.some(event => event.sidecar_exited === true)).toBe(false);
   });
 
+  // P004-SOL-FINAL-1: a stale registry PID reused by an unrelated process that
+  // merely carries the sidecar filename and --client codex among its own
+  // arguments is NOT positively pinned; the sidecar-identity refusal fires
+  // before any archive request.
+  it.each([
+    { label: "python3 decoy", argv: ["python3", "/tmp/other.py", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"] },
+    { label: "node decoy", argv: ["node", "/tmp/other.js", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"] },
+  ])("a registry-named decoy argv never pins the sidecar: $label", async ({ argv }) => {
+    const fixture = makeFixture({}, {
+      "thread/read": times(2, ok(idleThread("t1"))),
+      "thread/archive": [{ run: () => { throw new Error("archive must not be reached"); } }],
+    });
+    fixture.pins.set(8100, { pid: 8100, startTicks: "222", ppid: 4242, argv });
+    const result = await fixture.run();
+    expect(result.exitCode).toBe(3);
+    expect(result.outcome).toBe("refused");
+    expect(problemsOf(fixture.events[1])).toContain("mailbox sidecar was not positively pinned before archive");
+    expect(archiveCalls(fixture)).toBe(0);
+  });
+
   it("loaded-list pagination: follows cursors and never assumes the first 500 entries are complete", async () => {
     const fullPage = Array.from({ length: 500 }, (_, index) => `other-${index}`);
     const paginated = makeFixture({}, {

@@ -177,12 +177,20 @@ describe("codex daemon discovery (synthetic /proc)", () => {
     expect(listensOnSocket(["codex", "app-server", "--listen", "unix://", "--managed-daemon"], "/x.sock")).toBe(false);
   });
 
-  it("sidecar classification is token-wise over the whole argv", () => {
+  it("sidecar classification is positional: executable or native node script position only", () => {
+    // Positive real forms: direct executable and the project's native Node launch.
     const sidecar = ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis:///x.sock"];
     expect(isGptqueueSessionSidecarArgv(sidecar)).toBe(true);
     expect(isGptqueueSessionSidecarArgv(["/opt/gptqueue/bin/gptqueue-session", "--client", "codex"])).toBe(true);
     expect(isGptqueueSessionSidecarArgv(["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "pi"])).toBe(false);
     expect(isGptqueueSessionSidecarArgv(["sh", "-c", "gptqueue-session --client codex"])).toBe(false);
+    // P004-SOL-FINAL-1: an unrelated executable or script carrying the sidecar
+    // filename and --client codex as separate argument tokens never qualifies.
+    expect(isGptqueueSessionSidecarArgv(["python3", "/tmp/other.py", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"])).toBe(false);
+    expect(isGptqueueSessionSidecarArgv(["node", "/tmp/other.js", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"])).toBe(false);
+    // --client must come from the selected command's own arguments, not another
+    // command's tokens (the interpreter's own flags, or a script's arguments).
+    expect(isGptqueueSessionSidecarArgv(["node", "/opt/gptqueue/bin/gptqueue-session", "--client"])).toBe(false);
   });
 
   it("refuses ambiguity loudly: two owners, two same-path inodes, unproven argv candidates", async () => {
@@ -281,12 +289,14 @@ describe("codex daemon discovery (synthetic /proc)", () => {
         101: { argv: ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "pi"], ppid: 4242, startTicks: "801" },
         102: { argv: ["codex", "exec", "--sandbox"], ppid: 4242, startTicks: "802" },
         103: { argv: ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"], ppid: 999, startTicks: "803" },
+        104: { argv: ["python3", "/tmp/other.py", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"], ppid: 4242, startTicks: "804" },
+        105: { argv: ["node", "/tmp/other.js", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"], ppid: 4242, startTicks: "805" },
       },
     };
     const { root, socketPath } = await makeProcTree(spec);
     const identity = await discoverCodexDaemon({ socketPath: socketPath(), procRoot: root });
     const snapshot = await snapshotDaemon(identity, { procRoot: root });
-    expect(snapshot.children.map((child) => child.pid).sort()).toEqual([100, 101, 102]);
+    expect(snapshot.children.map((child) => child.pid).sort()).toEqual([100, 101, 102, 104, 105]);
     expect(snapshot.sidecars.map((sidecar) => sidecar.pid)).toEqual([100]);
 
     // PID reuse: the daemon pid now names a different process (start ticks moved).
