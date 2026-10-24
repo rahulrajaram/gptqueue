@@ -34,6 +34,11 @@
  * narrow that window, not to eliminate it.
  */
 import { Redis } from "ioredis";
+import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import { runtimeBindingSchema } from "./runtime-binding.js";
+import { parseRedisSocketUrl } from "./redis-socket-url.js";
 import { SESSION_KEYS, CLAIM_KEYS } from "./keys.js";
 import {
   CodexSocketClient,
@@ -41,6 +46,7 @@ import {
 } from "../registered-shell/codex-socket.js";
 import {
   discoverCodexDaemon,
+  assertDaemonIdentity,
   isGptqueueSessionSidecarArgv,
   readProcessPin,
   snapshotDaemon,
@@ -50,6 +56,20 @@ import {
 // ---------------------------------------------------------------- CLI surface
 
 export const DEFAULT_VERIFY_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 300_000;
+const PREFLIGHT_TIMEOUT_MS = 20_000;
+const ARCHIVE_TIMEOUT_MS = 60_000;
+
+const explicitRedisEndpoint = (value: string): boolean => {
+  try {
+    if (parseRedisSocketUrl(value)) return true;
+    // Require an authority in the supplied spelling, never URL/default recovery.
+    if (!/^rediss?:\/\/[^/\s?#]+(?:[/?#]|$)/u.test(value)) return false;
+    const url = new URL(value);
+    return ["redis:", "rediss:"].includes(url.protocol) && url.hostname.length > 0 &&
+      !url.search && !url.hash && /^\/(?:[0-9]+)?$/u.test(url.pathname || "/");
+  } catch { return false; }
+};
 
 export const RETIRE_THREAD_USAGE = [
   "usage: gptqueue retire-thread <thread-id> (<expected-mailbox> | --expect-no-mailbox)",
@@ -74,10 +94,11 @@ export const RETIRE_THREAD_HELP = [
   "  --redis-url          REQUIRED: the Redis endpoint holding gptqueue state (no default)",
   "  --socket             the app-server control socket; default $GPTQUEUE_CODEX_APP_SERVER_SOCKET,",
   `                       then ${defaultCodexSocketPathLabel()}`,
-  "  --verify-timeout-ms  bounded post-archive verification budget (default 30000)",
+  "  --verify-timeout-ms  post-archive budget, 1-300000 ms (default 30000)",
   "",
   "Connects to the existing daemon behind the selected socket only; it never launches or",
   "restarts a Codex process, and never unarchives or cleans anything up.",
+  "Requires a same-UID daemon and complete readable ownership/child evidence.",
   "Output: one JSON event per line on stdout (check / already_unloaded / refused / dry_run /",
   "archived / verify).",
   "Exit codes: 0 verified or already unloaded or dry-run ok; 2 usage; 3 refused, nothing",
@@ -143,10 +164,11 @@ export const parseRetireThreadArgs = (args: readonly string[]): ParsedRetireThre
   if (mailboxArg && expectNoMailbox) return "Pass either <expected-mailbox> or --expect-no-mailbox, not both";
   const redisUrl = values.get("--redis-url");
   if (!redisUrl) return "Required --redis-url (the Redis endpoint is explicit; there is no default)";
+  if (!explicitRedisEndpoint(redisUrl)) return "--redis-url requires an explicit Redis host or absolute socket path";
   let verifyTimeoutMs = DEFAULT_VERIFY_TIMEOUT_MS;
   const timeoutRaw = values.get("--verify-timeout-ms");
   if (timeoutRaw !== undefined) {
-    if (!/^\d+$/.test(timeoutRaw) || Number(timeoutRaw) <= 0) return "--verify-timeout-ms must be a positive integer of milliseconds";
+    if (!/^\d+$/.test(timeoutRaw) || (!Number.isSafeInteger(Number(timeoutRaw)) || Number(timeoutRaw) <= 0 || Number(timeoutRaw) > MAX_TIMEOUT_MS)) return "--verify-timeout-ms must be an integer from 1 to 300000 milliseconds";
     verifyTimeoutMs = Number(timeoutRaw);
   }
   return {
@@ -165,6 +187,7 @@ export const parseRetireThreadArgs = (args: readonly string[]): ParsedRetireThre
 
 /** The read-only Redis surface the guards use; the core drives the SCAN cursor loop. */
 export type RetireStore = Readonly<{
+  time(): Promise<readonly string[]>;
   scan(cursor: string, pattern: string, count: number): Promise<readonly [string, readonly string[]]>;
   get(key: string): Promise<string | null>;
   zcount(key: string, min: string, max: string): Promise<number>;
@@ -176,25 +199,28 @@ export type RetireStore = Readonly<{
 export type RpcKind = "read" | "archive";
 
 export type RetireRpc = Readonly<{
-  request(method: string, params: Record<string, unknown>, kind: RpcKind): Promise<Record<string, unknown>>;
+  request(method: string, params: Record<string, unknown>, kind: RpcKind, signal?: AbortSignal): Promise<Record<string, unknown>>;
 }>;
 
 /** Minimal structural daemon/process views (satisfied by registered-shell/codex-daemon). */
 export type DaemonRef = Readonly<{ pid: number; startTicks: string; argv: readonly string[]; basis: string; socketPath: string }>;
 export type ChildRef = Readonly<{ pid: number; startTicks: string; argv: readonly string[] | null }>;
 export type DaemonSnapshotRef = Readonly<{ daemon: DaemonRef; children: readonly ChildRef[]; sidecars: readonly ChildRef[] }>;
-export type ProcPinRef = Readonly<{ pid: number; startTicks: string; ppid: number | null; argv: readonly string[] | null }>;
+export type ProcPinRef = Readonly<{ pid: number; startTicks: string; ppid: number | null; argv: readonly string[] | null; nsPid?: string | null }>;
 
 export type RetireDeps = Readonly<{
   store: RetireStore;
   rpc: RetireRpc;
   /** Resolve the daemon behind the selected socket; throws with a `mode` on refusal. */
-  discover: () => Promise<DaemonRef>;
+  discover: (signal?: AbortSignal) => Promise<DaemonRef>;
   /** Re-verify the pinned daemon identity and snapshot children/sidecars. */
-  snapshot: () => Promise<DaemonSnapshotRef>;
+  snapshot: (signal?: AbortSignal) => Promise<DaemonSnapshotRef>;
   /** Pin a process by pid, or null when gone; throws when present but unreadable. */
-  pinProcess: (pid: number) => Promise<ProcPinRef | null>;
+  pinProcess: (pid: number, signal?: AbortSignal) => Promise<ProcPinRef | null>;
   clock: () => number;
+  monotonic?: () => number;
+  /** Must close transports and settle outstanding operations on deadline expiry. */
+  cancel?: () => Promise<void>;
   sleep: (ms: number) => Promise<void>;
   onEvent?: (event: RetireEvent) => void;
 }>;
@@ -230,21 +256,25 @@ const BINDING_PATTERN = "gptq:runtime-binding:*";
 const BINDING_PREFIX = "gptq:runtime-binding:";
 /** Read-only growth breaker for the binding scan: never proportional to the whole DB. */
 const BINDING_SCAN_BUDGET = 20_000;
+const BINDING_SCAN_CALL_BUDGET = 100;
 const SCAN_COUNT = 500;
 const LOADED_PAGE_LIMIT = 500;
 const LOADED_MAX_PAGES = 100;
 
 type SidecarEvidence =
   | Readonly<{ kind: "none" }>
-  | Readonly<{ kind: "pinned"; pid: number; startTicks: string }>
+  | Readonly<{ kind: "pinned"; pid: number; startTicks: string; argvDigest: string; nsPid: string | null }>
   | Readonly<{ kind: "gone"; pid: number }>
   | Readonly<{ kind: "foreign"; pid: number; reason: string; argv0: string | null }>
   | Readonly<{ kind: "unreadable"; pid: number }>;
 
 const quoteIfNeeded = (value: string): string => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`);
 
+const restoreArgv = (threadId: string, cwd: string | null, socketPath: string): readonly string[] =>
+  ["codex", "resume", threadId, "--remote", `unix://${socketPath}`, ...(cwd ? ["-C", cwd] : []), "-c", "check_for_update_on_startup=false"];
+
 const restoreHint = (threadId: string, cwd: string | null, socketPath: string): string =>
-  `thread/unarchive, then: codex resume ${threadId} --remote unix://${socketPath}${cwd ? ` -C ${quoteIfNeeded(cwd)}` : ""} -c check_for_update_on_startup=false`;
+  `thread/unarchive, then: ${restoreArgv(threadId, cwd, socketPath).map(quoteIfNeeded).join(" ")}`;
 
 type ParsedThread = Readonly<{ statusType: string | null; parentThreadId: string | null; cwd: string | null; threadSource: string | null }>;
 
@@ -256,6 +286,7 @@ export const parseThreadResult = (result: Record<string, unknown>): ParsedThread
     ? (status as Record<string, unknown>).type as string
     : null;
   if (!("cwd" in source) && !("status" in source)) return "response carries neither cwd nor status";
+  if (source.parentThreadId !== undefined && source.parentThreadId !== null && (typeof source.parentThreadId !== "string" || source.parentThreadId.length === 0)) return "malformed parentThreadId";
   return {
     statusType,
     parentThreadId: typeof source.parentThreadId === "string" ? source.parentThreadId : null,
@@ -278,6 +309,7 @@ export const parseLoadedListResult = (
     else return "data entry is neither a thread id nor {id}";
   }
   const rawCursor = result.nextCursor ?? result.next_cursor ?? result.cursor;
+  if (rawCursor !== undefined && rawCursor !== null && typeof rawCursor !== "string") return "malformed pagination cursor";
   const cursor = typeof rawCursor === "string" && rawCursor !== "" ? rawCursor : null;
   // Complete only when the page was short, or an explicit cursor is exhausted:
   // a full page without cursor info never proves the listing ended.
@@ -298,6 +330,13 @@ const daemonErrorCode = (error: unknown): string => {
   return mode.startsWith("daemon_") ? mode : `daemon_${mode}`;
 };
 
+// ActivationStore.attach persists RuntimeIdentity plus its lease-owner token.
+const storedBindingSchema = runtimeBindingSchema.extend({
+  client: z.enum(["codex", "pi", "opencode"]), token: z.string().min(1),
+}).strict();
+// restoreRuntimeMailbox persists precisely these two fields (no invented version).
+const mappingSchema = z.object({ agent: z.string().min(1), working_directory: z.string() }).strict();
+
 // ---------------------------------------------------------------- core run
 
 export type RetireOptions = Readonly<{
@@ -311,6 +350,7 @@ export type RetireOptions = Readonly<{
 }>;
 
 export const runRetireThread = async (options: RetireOptions, deps: RetireDeps): Promise<RetireOutcome> => {
+  if (!Number.isSafeInteger(options.verifyTimeoutMs) || options.verifyTimeoutMs <= 0 || options.verifyTimeoutMs > MAX_TIMEOUT_MS) throw new Error("invalid verification budget");
   const mailbox = options.expectNoMailbox ? null : options.expectedMailbox;
   const events: RetireEvent[] = [];
   const emit = (event: RetireEvent): void => {
@@ -319,10 +359,67 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
   };
   const stamp = (): string => new Date(deps.clock()).toISOString();
   const envError = (code: string, error: unknown): EnvironmentError =>
-    new EnvironmentError(code, `${code}: ${messageOf(error)}`);
+    new EnvironmentError(code, `${code}: observation failed${error instanceof EnvironmentError ? ` (${error.code})` : ""}`);
 
   const outcome = (exitCode: number, outcomeName: string, code: string | null = null, problem: string | null = null): RetireOutcome =>
     ({ exitCode, outcome: outcomeName, code, problem, events });
+
+  const monotonic = deps.monotonic ?? (() => performance.now());
+  let deadline = monotonic() + PREFLIGHT_TIMEOUT_MS;
+  const observe = async <T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    const remaining = deadline - monotonic();
+    if (remaining <= 0) throw new EnvironmentError("deadline_exceeded", "observation deadline exceeded");
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancellation: Promise<void> | undefined;
+    const pending = operation(controller.signal);
+    try {
+      return await Promise.race([pending, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          // Save cleanup before aborting: a rejected command may win the race,
+          // but finally still waits for transport shutdown and task settlement.
+          cancellation = Promise.resolve().then(async () => {
+            controller.abort();
+            await deps.cancel?.();
+            if (deps.cancel) await Promise.allSettled([pending]);
+          });
+          void cancellation.then(
+            () => reject(new EnvironmentError("deadline_exceeded", "observation deadline exceeded")),
+            () => reject(new EnvironmentError("deadline_exceeded", "observation deadline exceeded")),
+          );
+        }, Math.ceil(remaining));
+      })]);
+    } finally { clearTimeout(timer); await cancellation; }
+  };
+  const snapshot = async () => {
+    try { return await observe((signal) => deps.snapshot(signal)); }
+    catch (error) { throw envError(daemonErrorCode(error), error); }
+  };
+  const pinProcess = (pid: number) => observe((signal) => deps.pinProcess(pid, signal));
+  const request = async (method: string, params: Record<string, unknown>, kind: RpcKind) => {
+    await snapshot();
+    const result = await observe((signal) => deps.rpc.request(method, params, kind, signal));
+    await snapshot();
+    return result;
+  };
+  const store: RetireStore = {
+    time: () => observe(() => deps.store.time()),
+    scan: (...args) => observe(() => deps.store.scan(...args)),
+    get: (...args) => observe(() => deps.store.get(...args)),
+    zcount: (...args) => observe(() => deps.store.zcount(...args)),
+    llen: (...args) => observe(() => deps.store.llen(...args)),
+    exists: (...args) => observe(() => deps.store.exists(...args)),
+    hget: (...args) => observe(() => deps.store.hget(...args)),
+  };
+  const claimCount = async (name: string): Promise<number> => {
+    const time = await store.time();
+    if (time.length !== 2 || !/^\d+$/.test(time[0]!) || !/^\d+$/.test(time[1]!) || Number(time[1]) >= 1_000_000) throw new Error("invalid Redis TIME");
+    const now = Number(time[0]) * 1_000 + Math.floor(Number(time[1]) / 1_000);
+    if (!Number.isSafeInteger(now) || now < 0) throw new Error("invalid Redis TIME");
+    const count = await store.zcount(CLAIM_KEYS.index(name), String(now), "+inf");
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error("invalid claim count");
+    return count;
+  };
 
   // ---- phase A: discovery, evidence, guards (nothing mutates here) ----
   let daemon: DaemonRef;
@@ -338,19 +435,22 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
 
   try {
     try {
-      daemon = await deps.discover();
+      daemon = await observe((signal) => deps.discover(signal));
     } catch (error) {
       throw envError(daemonErrorCode(error), error);
     }
     const readThread = async (threadId: string): Promise<ParsedThread> => {
       let result: Record<string, unknown>;
       try {
-        result = await deps.rpc.request("thread/read", { threadId, includeTurns: false }, "read");
+        result = await request("thread/read", { threadId, includeTurns: false }, "read");
       } catch (error) {
+        if (error instanceof EnvironmentError) throw error;
         throw envError("rpc_error", error);
       }
       const parsed = parseThreadResult(result);
       if (typeof parsed === "string") throw envError("unexpected_response", new Error(`thread/read for ${threadId}: ${parsed}`));
+      const source = result.thread !== null && typeof result.thread === "object" ? result.thread as Record<string, unknown> : result;
+      if (source.id !== threadId) throw envError("unexpected_response", new Error("thread/read identity disagrees"));
       return parsed;
     };
 
@@ -361,118 +461,93 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
       parentStatus = parent.statusType ?? "unknown";
     }
 
-    // Runtime bindings: bounded read-only SCAN; any unreadable value fails
-    // closed (it could be the binding that names this thread).
-    const matches: string[] = [];
-    let cursor = "0";
-    let examined = 0;
-    do {
-      let page: readonly [string, readonly string[]];
-      try {
-        page = await deps.store.scan(cursor, BINDING_PATTERN, SCAN_COUNT);
-      } catch (error) {
-        throw envError("redis_error", error);
-      }
-      cursor = page[0];
-      examined += page[1].length;
-      if (examined > BINDING_SCAN_BUDGET) {
-        throw envError("binding_scan_exceeded", new Error(`runtime-binding scan exceeded ${BINDING_SCAN_BUDGET} keys; refusing to guess`));
-      }
-      for (const key of page[1]) {
-        let raw: string | null;
-        try {
-          raw = await deps.store.get(key);
-        } catch (error) {
-          throw envError("redis_error", error);
-        }
-        if (raw === null) continue;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          throw envError("binding_unreadable", new Error(`runtime binding ${key} holds malformed JSON`));
-        }
-        const runtimeId = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>).runtime_id : undefined;
-        if (typeof runtimeId !== "string") {
-          throw envError("binding_unreadable", new Error(`runtime binding ${key} carries no runtime_id string`));
-        }
-        if (runtimeId === options.threadId && key.startsWith(BINDING_PREFIX)) matches.push(key.slice(BINDING_PREFIX.length));
-      }
-    } while (cursor !== "0");
-    if (matches.length > 1) throw new Refused([`more than one mailbox is bound to this thread (${matches.join(", ")}); duplicate evidence refuses`]);
-    boundMailbox = matches[0] ?? null;
-
-    // Durable runtime-mailbox mapping.
-    const mappingKey = SESSION_KEYS.runtimeMailbox("codex", options.threadId);
-    let mappingRaw: string | null;
-    try {
-      mappingRaw = await deps.store.get(mappingKey);
-    } catch (error) {
-      throw envError("redis_error", error);
-    }
-    if (mappingRaw === null) {
-      mappedMailbox = null;
-    } else {
-      let mappingParsed: unknown;
-      try {
-        mappingParsed = JSON.parse(mappingRaw);
-      } catch {
-        throw envError("mapping_unreadable", new Error(`runtime mailbox mapping for this thread holds malformed JSON`));
-      }
-      const agent = mappingParsed !== null && typeof mappingParsed === "object" ? (mappingParsed as Record<string, unknown>).agent : undefined;
-      if (typeof agent !== "string") throw envError("mapping_unreadable", new Error("runtime mailbox mapping carries no agent string"));
-      mappedMailbox = agent;
-    }
-
-    const now = String(deps.clock());
-    if (mailbox !== null) {
-      try {
-        unexpiredClaims = await deps.store.zcount(CLAIM_KEYS.index(mailbox), now, "+inf");
-        queued = await deps.store.llen(SESSION_KEYS.queue(mailbox));
-      } catch (error) {
-        throw envError("redis_error", error);
-      }
-      // The registry value names the sidecar pid; unreadable evidence fails closed.
-      let registryRaw: string | null;
-      try {
-        registryRaw = await deps.store.hget(SESSION_KEYS.registry, mailbox);
-      } catch (error) {
-        throw envError("redis_error", error);
-      }
-      if (registryRaw !== null) {
-        let registryParsed: unknown;
-        try {
-          registryParsed = JSON.parse(registryRaw);
-        } catch {
-          throw envError("registry_unreadable", new Error(`registry entry for ${mailbox} holds malformed JSON`));
-        }
-        const pidField = registryParsed !== null && typeof registryParsed === "object" ? (registryParsed as Record<string, unknown>).pid : undefined;
-        if (pidField === undefined) {
-          sidecarPid = null;
-        } else if (typeof pidField === "number" && Number.isInteger(pidField) && pidField > 0) {
-          sidecarPid = pidField;
-        } else {
-          throw envError("registry_unreadable", new Error(`registry entry for ${mailbox} carries an unusable pid`));
-        }
-        if (sidecarPid !== null) {
-          try {
-            const pin = await deps.pinProcess(sidecarPid);
-            if (pin === null) sidecar = { kind: "gone", pid: sidecarPid };
-            else if (pin.argv !== null && isGptqueueSessionSidecarArgv(pin.argv)) {
-              if (pin.ppid === daemon.pid) sidecar = { kind: "pinned", pid: sidecarPid, startTicks: pin.startTicks };
-              else sidecar = { kind: "foreign", pid: sidecarPid, reason: "sidecar of another daemon (parent pid differs)", argv0: pin.argv[0] ?? null };
-            } else {
-              sidecar = { kind: "foreign", pid: sidecarPid, reason: "pid runs a non-sidecar process", argv0: pin.argv?.[0] ?? null };
-            }
-          } catch (error) {
-            throw envError("sidecar_proc_unreadable", error);
+    const ownership = async () => {
+      const matches = new Map<string, z.infer<typeof storedBindingSchema>>();
+      let cursor = "0", examined = 0, calls = 0;
+      do {
+        if (++calls > BINDING_SCAN_CALL_BUDGET) throw envError("binding_scan_exceeded", new Error("runtime-binding SCAN call budget exceeded"));
+        let page: readonly [string, readonly string[]];
+        try { page = await store.scan(cursor, BINDING_PATTERN, SCAN_COUNT); }
+        catch (error) { throw envError("redis_error", error); }
+        if (!Array.isArray(page) || typeof page[0] !== "string" || !/^\d+$/.test(page[0]) || !Array.isArray(page[1])) throw envError("binding_unreadable", new Error("invalid SCAN page"));
+        cursor = page[0];
+        examined += page[1].length;
+        if (examined > BINDING_SCAN_BUDGET) throw envError("binding_scan_exceeded", new Error("runtime-binding key budget exceeded"));
+        for (const key of page[1]) {
+          if (typeof key !== "string" || !key.startsWith(BINDING_PREFIX) || key.length === BINDING_PREFIX.length) throw envError("binding_unreadable", new Error("invalid binding key"));
+          let raw: string | null;
+          try { raw = await store.get(key); } catch (error) { throw envError("redis_error", error); }
+          // Disappearance during enumeration is incomplete evidence, never emptiness.
+          let parsed: z.infer<typeof storedBindingSchema>;
+          try { parsed = storedBindingSchema.parse(JSON.parse(raw ?? "null")); }
+          catch { throw envError("binding_unreadable", new Error("runtime binding has invalid stored shape")); }
+          if (parsed.runtime_id === options.threadId) {
+            if (parsed.client !== "codex") throw new Refused(["matching runtime binding belongs to another client"]);
+            const name = key.slice(BINDING_PREFIX.length);
+            const prior = matches.get(name);
+            if (prior && JSON.stringify(prior) !== JSON.stringify(parsed)) throw new Refused(["binding owner changed during enumeration"]);
+            matches.set(name, parsed);
           }
         }
+      } while (cursor !== "0");
+      if (matches.size > 1) throw new Refused([`more than one mailbox is bound to this thread (${[...matches.keys()].join(", ")}); duplicate evidence refuses`]);
+      const binding = [...matches.entries()][0] ?? null;
+      let raw: string | null;
+      try { raw = await store.get(SESSION_KEYS.runtimeMailbox("codex", options.threadId)); }
+      catch (error) { throw envError("redis_error", error); }
+      let mapping: z.infer<typeof mappingSchema> | null = null;
+      if (raw !== null) {
+        try { mapping = mappingSchema.parse(JSON.parse(raw)); }
+        catch { throw envError("mapping_unreadable", new Error("runtime mailbox mapping has invalid stored shape")); }
       }
+      if (binding && mapping && resolve(binding[1].working_directory) !== resolve(mapping.working_directory)) throw new Refused(["binding and mapping working directories disagree"]);
+      let pin: SidecarEvidence = { kind: "none" };
+      let registryOwner: Record<string, unknown> | null = null;
+      if (mailbox !== null) {
+        let registryRaw: string | null;
+        try { registryRaw = await store.hget(SESSION_KEYS.registry, mailbox); }
+        catch (error) { throw envError("redis_error", error); }
+        let registry: Record<string, unknown> | null;
+        try {
+          const parsed: unknown = JSON.parse(registryRaw ?? "null");
+          if (parsed !== null && (typeof parsed !== "object" || Array.isArray(parsed))) throw new Error("invalid registry");
+          registry = parsed as Record<string, unknown> | null;
+        } catch { throw envError("registry_unreadable", new Error("registry entry has invalid JSON")); }
+        const pid = registry?.pid;
+        if (pid === undefined) return { binding, mapping, pin, registryOwner };
+        if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) throw envError("registry_unreadable", new Error("registry entry has no usable pid"));
+        const metadata = registry?.metadata;
+        if (registry?.name !== undefined && registry.name !== mailbox) throw new Refused(["registry mailbox identity disagrees"]);
+        if (metadata !== undefined && (metadata === null || typeof metadata !== "object" || Array.isArray(metadata))) throw envError("registry_unreadable", new Error("invalid registry metadata"));
+        const meta = (metadata ?? {}) as Record<string, unknown>;
+        for (const field of ["uuid", "client", "working_directory"]) {
+          if (meta[field] !== undefined && typeof meta[field] !== "string") throw envError("registry_unreadable", new Error("invalid registry owner metadata"));
+        }
+        if (meta.client !== undefined && meta.client !== "codex") throw new Refused(["registry owner is not a Codex client"]);
+        registryOwner = { name: registry?.name ?? null, pid, uuid: meta.uuid ?? null, client: meta.client ?? null, working_directory: meta.working_directory ?? null };
+        let process: ProcPinRef | null;
+        try { process = await pinProcess(pid); } catch (error) { throw envError("sidecar_proc_unreadable", error); }
+        if (process === null) pin = { kind: "gone", pid };
+        else if (process.argv && isGptqueueSessionSidecarArgv(process.argv) && process.ppid === daemon.pid) pin = { kind: "pinned", pid, startTicks: process.startTicks, argvDigest: createHash("sha256").update(JSON.stringify(process.argv)).digest("hex"), nsPid: process.nsPid ?? null };
+        else pin = { kind: "foreign", pid, reason: "not the selected daemon's Codex sidecar", argv0: null };
+      }
+      return { binding, mapping, pin, registryOwner };
+    };
+    const evidence = await ownership();
+    boundMailbox = evidence.binding?.[0] ?? null;
+    mappedMailbox = evidence.mapping?.agent ?? null;
+    sidecar = evidence.pin;
+    sidecarPid = sidecar.kind === "none" ? null : sidecar.pid;
+    if (mailbox !== null) {
+      try {
+        unexpiredClaims = await claimCount(mailbox);
+        queued = await store.llen(SESSION_KEYS.queue(mailbox));
+        if (!Number.isSafeInteger(queued) || queued < 0) throw new Error("invalid queue length");
+      } catch (error) { throw envError("redis_error", error); }
     }
 
     try {
-      before = await deps.snapshot();
+      before = await snapshot();
     } catch (error) {
       throw envError(daemonErrorCode(error), error);
     }
@@ -493,6 +568,7 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
         note: "the thread is not loaded; nothing to do (no archive request is sent)",
         codex_sidecars_total: before.sidecars.length, daemon_children: before.children.length,
         restore: restoreHint(options.threadId, thread.cwd, options.socketPath),
+        restore_argv: restoreArgv(options.threadId, thread.cwd, options.socketPath),
       });
       return outcome(0, "already_unloaded");
     }
@@ -506,9 +582,10 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
       if (boundMailbox !== null) problems.push(`a mailbox is bound to this thread (${boundMailbox}); pass it instead of --expect-no-mailbox`);
       if (mappedMailbox !== null) problems.push(`the thread's mailbox mapping names ${mappedMailbox}; pass it instead of --expect-no-mailbox`);
     } else {
-      if (boundMailbox !== null && boundMailbox !== mailbox) problems.push(`the mailbox bound to this thread is ${boundMailbox}, not ${mailbox}`);
-      if (mappedMailbox !== null && mappedMailbox !== mailbox) problems.push(`the thread's durable mailbox mapping names ${mappedMailbox}, not ${mailbox}`);
+      if (boundMailbox !== mailbox) problems.push(`the mailbox bound to this thread is ${boundMailbox}, not ${mailbox}`);
+      if (mappedMailbox !== mailbox) problems.push(`the thread's durable mailbox mapping names ${mappedMailbox}, not ${mailbox}`);
       if (boundMailbox === null && mappedMailbox === null) problems.push(`no mailbox evidence ties this thread to ${mailbox} (no runtime binding, no durable mapping); refusing to guess`);
+      if (sidecar.kind !== "pinned") problems.push("mailbox sidecar was not positively pinned before archive");
       if (unexpiredClaims > 0) problems.push(`${mailbox} holds ${unexpiredClaims} unexpired claim(s); have the agent acknowledge them first`);
       if (queued > 0 && !options.allowPendingMail) problems.push(`${mailbox} has ${queued} queued message(s); drain them or pass --allow-pending-mail`);
     }
@@ -525,23 +602,27 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
     // observational window is as small as the protocol allows.
     const reread = await readThread(options.threadId);
     const rereadParent = reread.parentThreadId !== null ? (await readThread(reread.parentThreadId)).statusType ?? "unknown" : null;
+    const fresh = await ownership();
+    const ownershipChanged = JSON.stringify(fresh) !== JSON.stringify(evidence);
     let rereadClaims = 0;
     let rereadQueued = 0;
     if (mailbox !== null) {
-      const nowAgain = String(deps.clock());
       try {
-        rereadClaims = await deps.store.zcount(CLAIM_KEYS.index(mailbox), nowAgain, "+inf");
-        rereadQueued = await deps.store.llen(SESSION_KEYS.queue(mailbox));
+        rereadClaims = await claimCount(mailbox);
+        rereadQueued = await store.llen(SESSION_KEYS.queue(mailbox));
+        if (!Number.isSafeInteger(rereadQueued) || rereadQueued < 0) throw new Error("invalid queue length");
       } catch (error) {
         throw envError("redis_error", error);
       }
     }
     try {
-      await deps.snapshot();
+      await snapshot();
     } catch (error) {
       throw envError(daemonErrorCode(error), error);
     }
     const reproblems: string[] = [];
+    if (ownershipChanged) reproblems.push("binding, mapping or sidecar ownership changed before archive");
+    if (reread.parentThreadId !== thread.parentThreadId) reproblems.push("thread parent changed before archive");
     if (reread.statusType !== "idle") reproblems.push(`thread status changed to ${reread.statusType ?? "unknown"} before the archive`);
     if (reread.parentThreadId !== null && rereadParent !== "idle") reproblems.push(`parent thread ${reread.parentThreadId} changed to ${rereadParent ?? "unknown"} before the archive`);
     if (mailbox !== null && rereadClaims > 0) reproblems.push(`${mailbox} now holds ${rereadClaims} unexpired claim(s)`);
@@ -564,19 +645,20 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
   // ---- phase B: the single archive request + bounded verification ----
   // From here on, no error is ever reported as "nothing happened": the
   // archive request was sent, so the worst-case outcome is unknown (exit 1).
+  deadline = monotonic() + ARCHIVE_TIMEOUT_MS;
   let archiveAcknowledged = false;
   let archiveError: string | null = null;
   try {
-    const result = await deps.rpc.request("thread/archive", { threadId: options.threadId }, "archive");
+    const result = await request("thread/archive", { threadId: options.threadId }, "archive");
     archiveAcknowledged = !("error" in result) || result.error === undefined;
-    if (!archiveAcknowledged) archiveError = `archive response carried an error: ${JSON.stringify(result.error)}`;
-  } catch (error) {
-    archiveError = messageOf(error);
+    if (!archiveAcknowledged) archiveError = "archive response carried an error";
+  } catch {
+    archiveError = "archive request did not produce a trusted acknowledgement";
   }
   emit({ at: stamp(), step: "archived", outcome: archiveAcknowledged ? "ok" : "unknown", ...(archiveError === null ? {} : { error: archiveError }) });
 
   const interval = Math.max(50, Math.min(500, Math.floor(options.verifyTimeoutMs / 10)));
-  const deadline = deps.clock() + options.verifyTimeoutMs;
+  deadline = monotonic() + options.verifyTimeoutMs;
   let unloaded: boolean | "unknown" = "unknown";
   let heartbeat: boolean | "unknown" | null = mailbox !== null ? "unknown" : null;
   let sidecarExited: boolean | "unknown" | null = mailbox !== null ? "unknown" : null;
@@ -588,7 +670,7 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
     for (let pageIndex = 0; pageIndex < LOADED_MAX_PAGES; pageIndex += 1) {
       let result: Record<string, unknown>;
       try {
-        result = await deps.rpc.request("thread/loaded/list", { limit: LOADED_PAGE_LIMIT, ...(cursor === null ? {} : { cursor }) }, "read");
+        result = await request("thread/loaded/list", { limit: LOADED_PAGE_LIMIT, ...(cursor === null ? {} : { cursor }) }, "read");
       } catch {
         return "unknown";
       }
@@ -610,25 +692,16 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
       case "none":
         return null; // no pid was named; heartbeat disappearance is the live signal
       case "gone":
-        return true; // the named process no longer exists
-      case "foreign": {
-        // The registry pid is not a live sidecar of this daemon; re-check in
-        // case a new sidecar generation adopted the very same pid.
-        try {
-          const pin = await deps.pinProcess(sidecar.pid);
-          if (pin !== null && pin.argv !== null && isGptqueueSessionSidecarArgv(pin.argv) && pin.ppid === daemon.pid) return false;
-        } catch {
-          return "unknown";
-        }
-        return true;
-      }
+      case "foreign":
+        return "unknown";
       case "pinned": {
         try {
-          const pin = await deps.pinProcess(sidecar.pid);
+          const pin = await pinProcess(sidecar.pid);
           if (pin === null) return true; // positively pinned earlier, now gone
+          if (sidecar.nsPid !== null && pin.nsPid !== sidecar.nsPid) return "unknown";
           if (pin.startTicks !== sidecar.startTicks) return true; // the pinned process ended; the pid was reused
           if (pin.argv !== null && isGptqueueSessionSidecarArgv(pin.argv)) return false; // still the pinned sidecar
-          return true; // same start but no longer a sidecar: stale evidence, the sidecar is gone
+          return "unknown"; // identity changed without provable process exit
         } catch {
           return "unknown";
         }
@@ -639,10 +712,12 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
   };
 
   for (;;) {
+    if (monotonic() >= deadline) break;
     unloaded = await loadedContains();
     if (mailbox !== null) {
       try {
-        heartbeat = (await deps.store.exists(SESSION_KEYS.heartbeat(mailbox))) === 1;
+        const count = await store.exists(SESSION_KEYS.heartbeat(mailbox));
+        heartbeat = count === 0 ? false : count === 1 ? true : "unknown";
       } catch {
         heartbeat = "unknown";
       }
@@ -650,16 +725,16 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
       if (sidecarExited === "unknown") sidecarNote = "sidecar identity unreadable during verification; exit not provable";
     }
     try {
-      after = await deps.snapshot();
+      after = await snapshot();
     } catch (error) {
       after = null;
       sidecarNote = sidecarNote ?? `daemon identity check failed during verification: ${messageOf(error)}`;
     }
     const ok = unloaded === false &&
       (mailbox === null || (heartbeat === false && sidecarExited === true));
-    if (ok) break;
-    if (deps.clock() >= deadline) break;
-    await deps.sleep(interval);
+    if (ok && after !== null) break;
+    if (monotonic() >= deadline) break;
+    await deps.sleep(Math.min(interval, Math.max(0, deadline - monotonic())));
   }
 
   // Exit evidence only when the after-snapshot exists: a daemon that vanished
@@ -682,6 +757,7 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
     daemon_children_before: before.children.length, daemon_children_after: after?.children.length ?? null,
     daemon: { pid: daemon.pid, basis: daemon.basis },
     restore: restoreHint(options.threadId, thread.cwd, options.socketPath),
+        restore_argv: restoreArgv(options.threadId, thread.cwd, options.socketPath),
   });
   return outcome(verified && archiveAcknowledged ? 0 : 1, outcomeName, verified && archiveAcknowledged ? null : archiveAcknowledged ? "verify_failed" : "archive_outcome_unknown", null);
 };
@@ -690,6 +766,7 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
 
 /** ioredis adapter for the read-only store surface the guards use. */
 export const storeOf = (redis: Redis): RetireStore => ({
+  time: async () => (await redis.time()).map(String),
   scan: async (cursor, pattern, count) => {
     const [next, keys] = await redis.scan(cursor, "MATCH", pattern, "COUNT", String(count)) as unknown as [string, string[]];
     return [next, keys];
@@ -701,7 +778,7 @@ export const storeOf = (redis: Redis): RetireStore => ({
   hget: (key, field) => redis.hget(key, field),
 });
 
-const RPC_TIMEOUTS: Readonly<Record<RpcKind, number>> = { read: 20_000, archive: 60_000 };
+
 
 /**
  * The thin CLI shell the bin/ dispatcher calls: wires the real Redis socket
@@ -727,23 +804,35 @@ export const retireThreadMain = async (argv: readonly string[]): Promise<number>
     maxRetriesPerRequest: 0,
     enableOfflineQueue: false,
     connectTimeout: 2_000,
+    commandTimeout: PREFLIGHT_TIMEOUT_MS,
     retryStrategy: () => null,
   });
   redis.on("error", () => undefined); // surfaced as exit-4 redis_error by the core
-  const client = new CodexSocketClient(socketPath, 120_000);
+  const client = new CodexSocketClient(socketPath, PREFLIGHT_TIMEOUT_MS);
+  let generation: number | null = null;
   const deps: RetireDeps = {
     store: storeOf(redis),
-    rpc: { request: (method, params, kind) => client.request(method, params, AbortSignal.timeout(RPC_TIMEOUTS[kind])) },
-    discover: async () => {
-      identity = await discoverCodexDaemon({ socketPath, procRoot });
+    rpc: { request: async (method, params, _kind, signal = AbortSignal.timeout(PREFLIGHT_TIMEOUT_MS)) => {
+      if (identity === null) throw new Error("daemon not pinned");
+      // Initial connection only; every subsequent observation and action is fenced.
+      if (generation === null) generation = await client.connectGeneration(signal);
+      await assertDaemonIdentity(identity, { procRoot, signal });
+      const result = await client.requestOnGeneration(method, params, signal, generation);
+      await assertDaemonIdentity(identity, { procRoot, signal });
+      return result;
+    } },
+    discover: async (signal) => {
+      identity = await discoverCodexDaemon({ socketPath, procRoot, signal });
       return identity;
     },
-    snapshot: async () => {
+    snapshot: async (signal) => {
       if (identity === null) throw new Error("daemon not discovered yet");
-      const snapshot = await snapshotDaemon(identity, { procRoot });
+      const snapshot = await snapshotDaemon(identity, { procRoot, signal });
       return { daemon: snapshot.identity, children: snapshot.children, sidecars: snapshot.sidecars };
     },
-    pinProcess: (pid) => readProcessPin(procRoot, pid),
+    pinProcess: (pid, signal) => readProcessPin(procRoot, pid, signal),
+    cancel: async () => { redis.disconnect(); await client.close(); },
+    monotonic: () => performance.now(),
     clock: () => Date.now(),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     onEvent: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),

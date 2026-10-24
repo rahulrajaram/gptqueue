@@ -6,7 +6,12 @@
  * test Redis (real SCAN pagination, real zset claim scoring) through the same
  * storeOf adapter the CLI uses.
  */
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { createServer, type Socket } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Redis } from "ioredis";
 import { CLAIM_KEYS, SESSION_KEYS } from "../src/core/keys.js";
 import {
@@ -19,6 +24,7 @@ import {
   type ChildRef,
   type ProcPinRef,
   type RetireEvent,
+  type RetireDeps,
   type RetireOptions,
   type RetireOutcome,
   type RetireRpc,
@@ -87,6 +93,7 @@ const fakeStore = (seed: Readonly<{
   };
   return {
     strings, hashes, zsets, lists, failures, zcountHook,
+    async time() { await guard("time"); return ["1700000000", "0"]; },
     async scan(cursor, pattern, count) {
       await guard("scan");
       const regex = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
@@ -129,7 +136,7 @@ const MAPPING_KEY = SESSION_KEYS.runtimeMailbox("codex", "t1");
 
 const happyStore = (): ReturnType<typeof fakeStore> => fakeStore({
   strings: {
-    "gptq:runtime-binding:mb1": JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e1", working_directory: "/w" }),
+    "gptq:runtime-binding:mb1": JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e1", token: "owner1", working_directory: "/w" }),
     [MAPPING_KEY]: JSON.stringify({ agent: "mb1", working_directory: "/w" }),
   },
   hashes: { "gptq:registry": { mb1: JSON.stringify({ name: "mb1", role: "codex shell", registered_at: "2026-10-01T00:00:00Z", pid: 8100 }) } },
@@ -151,6 +158,7 @@ const makeFixture = (
   options: Partial<RetireOptions>,
   rpcScripts: Record<string, readonly RpcOutcome[]>,
   store: FakeStore = happyStore(),
+  overrides: Partial<RetireDeps> = {},
 ): Fixture => {
   const rpc = scriptRpc(rpcScripts);
   const events: RetireEvent[] = [];
@@ -170,6 +178,7 @@ const makeFixture = (
   };
   const deps = {
     store: {
+      time: () => activeStore.time(),
       scan: (...args: Parameters<RetireStore["scan"]>) => activeStore.scan(...args),
       get: (...args: Parameters<RetireStore["get"]>) => activeStore.get(...args),
       zcount: (...args: Parameters<RetireStore["zcount"]>) => activeStore.zcount(...args),
@@ -188,9 +197,11 @@ const makeFixture = (
       if (pin instanceof Error) throw pin;
       return pin ?? null;
     },
+    monotonic: () => nowMs,
     clock: () => nowMs,
     sleep: async (ms: number) => { nowMs += ms; },
     onEvent: (event: RetireEvent) => events.push(event),
+    ...overrides,
   };
   return {
     rpc, store, events, pins, discoverError, snapshotErrors,
@@ -229,7 +240,7 @@ describe("retire-thread argument parsing", () => {
     expect(parseRetireThreadArgs(["t1", "mb1", "--redis-url", "redis://u", "--nope"])).toBe("Unknown option --nope");
     expect(parseRetireThreadArgs(["t1", "mb1", "--redis-url", "redis://u", "--redis-url", "redis://v"])).toBe("Duplicate option --redis-url");
     expect(parseRetireThreadArgs(["t1", "mb1", "--redis-url", "redis://u", "--dry-run", "--dry-run"])).toBe("Duplicate flag --dry-run");
-    expect(parseRetireThreadArgs(["t1", "mb1", "--redis-url", "redis://u", "--verify-timeout-ms", "0"])).toBe("--verify-timeout-ms must be a positive integer of milliseconds");
+    expect(parseRetireThreadArgs(["t1", "mb1", "--redis-url", "redis://u", "--verify-timeout-ms", "0"])).toBe("--verify-timeout-ms must be an integer from 1 to 300000 milliseconds");
     expect(parseRetireThreadArgs(["t1", "mb1", "x", "--redis-url", "redis://u"])).toBe("Unexpected argument x");
     expect(parseRetireThreadArgs(["t1", "mb1", "--redis-url"])).toBe("Option --redis-url requires a value");
   });
@@ -327,7 +338,7 @@ describe("retire-thread guards (injected fakes)", () => {
     // A different mailbox is bound.
     const other = happyStore();
     other.strings.delete("gptq:runtime-binding:mb1");
-    other.strings.set("gptq:runtime-binding:other", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", working_directory: "/w" }));
+    other.strings.set("gptq:runtime-binding:other", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", token: "owner1", working_directory: "/w" }));
     const boundOther = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, other);
     expect((await boundOther.run()).exitCode).toBe(3);
     expect(boundOther.events[1]!.problems).toContain("the mailbox bound to this thread is other, not mb1");
@@ -345,7 +356,7 @@ describe("retire-thread guards (injected fakes)", () => {
     none.strings.delete(MAPPING_KEY);
     const noneFixture = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, none);
     expect((await noneFixture.run()).exitCode).toBe(3);
-    expect(problemsOf(noneFixture.events[1])[0]).toContain("no mailbox evidence ties this thread to mb1");
+    expect(problemsOf(noneFixture.events[1]).some(problem => problem.includes("no mailbox evidence ties this thread to mb1"))).toBe(true);
     for (const fixture of [boundOther, mappedFixture, noneFixture]) expect(archiveCalls(fixture)).toBe(0);
   });
 
@@ -409,7 +420,7 @@ describe("retire-thread guards (injected fakes)", () => {
 
   it("duplicate or malformed binding/mapping/registry evidence refuses or fails closed, never guesses", async () => {
     const duplicate = happyStore();
-    duplicate.strings.set("gptq:runtime-binding:mb2", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", working_directory: "/w" }));
+    duplicate.strings.set("gptq:runtime-binding:mb2", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", token: "owner1", working_directory: "/w" }));
     const duplicateFixture = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, duplicate);
     const duplicateResult = await duplicateFixture.run();
     expect(duplicateResult.exitCode).toBe(3);
@@ -446,7 +457,7 @@ describe("retire-thread guards (injected fakes)", () => {
   });
 
   it("any Redis read error fails closed with exit 4 before any archive", async () => {
-    for (const command of ["scan", "get", "zcount", "llen", "hget"]) {
+    for (const command of ["scan", "get", "time", "zcount", "llen", "hget"]) {
       const store = happyStore();
       store.failures.set(command, new Error(`injected ${command} failure`));
       const fixture = makeFixture({}, { "thread/read": times(2, ok(idleThread("t1"))), "thread/archive": [ok({})] }, store);
@@ -528,7 +539,7 @@ describe("retire-thread guards (injected fakes)", () => {
     expect(result.outcome).toBe("outcome_unknown");
     expect(archiveCalls(fixture)).toBe(1);
     const archived = fixture.events.find((event) => event.step === "archived")!;
-    expect(archived).toMatchObject({ outcome: "unknown", error: "connection reset mid-archive" });
+    expect(archived).toMatchObject({ outcome: "unknown", error: "archive request did not produce a trusted acknowledgement" });
   });
 
   it("an error field in the archive response is ambiguous: outcome unknown, one request", async () => {
@@ -572,31 +583,12 @@ describe("retire-thread guards (injected fakes)", () => {
     expect(verify.note).toContain("unreadable");
   });
 
-  it("a reused sidecar pid (foreign process) is never trusted as the sidecar", async () => {
-    // At check time the registry pid names a live non-sidecar process.
-    const store = happyStore();
-    const fixture = makeFixture({}, {
-      "thread/read": times(2, ok(idleThread("t1"))),
-      "thread/archive": [{ run: () => { fixture.setPostArchive(true); return {}; } }],
-      "thread/loaded/list": [ok({ data: [] })],
-    }, store);
-    fixture.pins.set(8100, { pid: 8100, startTicks: "900", ppid: 4242, argv: ["python3", "unrelated.py"] });
-    const result = await fixture.run();
-    expect(fixture.events[0]!.sidecar_evidence).toBe("foreign");
-    // Unloaded + heartbeat gone still verify: the registry pid is not a live sidecar of the daemon.
-    expect(result.exitCode).toBe(0);
-    expect(fixture.events[2]!.sidecar_exited).toBe(true);
-
-    // A reused pid that is again a sidecar of the same daemon (new generation) is alive.
-    const again = makeFixture({ verifyTimeoutMs: 120 }, {
-      "thread/read": times(2, ok(idleThread("t1"))),
-      "thread/archive": [{ run: () => { again.pins.set(8100, { pid: 8100, startTicks: "950", ppid: 4242, argv: SIDE_PIN.argv! }); return {}; } }],
-      "thread/loaded/list": [ok({ data: [] })],
-    }, happyStore());
-    again.pins.set(8100, { pid: 8100, startTicks: "900", ppid: 4242, argv: ["python3", "unrelated.py"] });
-    const againResult = await again.run();
-    expect(againResult.exitCode).toBe(1);
-    expect(again.events[again.events.length - 1]!.sidecar_exited).toBe(false);
+  it.each([null, { pid: 8100, startTicks: "900", ppid: 4242, argv: ["python3", "unrelated.py"] }])("refuses an unpinned sidecar before archive: %j", async (pin) => {
+    const fixture = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] });
+    fixture.pins.set(8100, pin);
+    expect((await fixture.run()).exitCode).toBe(3);
+    expect(archiveCalls(fixture)).toBe(0);
+    expect(fixture.events.some(event => event.sidecar_exited === true)).toBe(false);
   });
 
   it("loaded-list pagination: follows cursors and never assumes the first 500 entries are complete", async () => {
@@ -623,13 +615,198 @@ describe("retire-thread guards (injected fakes)", () => {
   });
 });
 
+describe("P004 source-review safety regressions", () => {
+  it("R7 finite preflight budget cancels and settles a nonreplying scan before any archive", async () => {
+    vi.useFakeTimers();
+    let cancelScan: (() => void) | undefined; let settled = false;
+    const store = happyStore();
+    const f = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, store, {
+      monotonic: () => 0,
+      cancel: async () => { cancelScan?.(); },
+    });
+    f.setStore({ ...store, scan: async () => {
+      try { return await new Promise<readonly [string, readonly string[]]>((_, reject) => { cancelScan = () => reject(new Error("cancelled")); }); }
+      finally { settled = true; }
+    } });
+    try {
+      const pending = f.run(); await vi.advanceTimersByTimeAsync(0); expect(cancelScan).toBeDefined();
+      await vi.advanceTimersByTimeAsync(20_001);
+      expect((await pending).exitCode).toBe(4); expect(settled).toBe(true); expect(archiveCalls(f)).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+  it("R7 verification cancels a stalled store observation without retaining a pending task", async () => {
+    let release: (() => void) | undefined; let settled = false;
+    const store = happyStore();
+    const f = makeFixture({ verifyTimeoutMs: 35 }, { "thread/read": times(2, ok(idleThread("t1"))), "thread/archive": [ok({})], "thread/loaded/list": [ok({ data: [] })] }, store, {
+      monotonic: () => performance.now(), cancel: async () => { release?.(); },
+    });
+    f.setStore({ ...store, exists: async () => {
+      try { return await new Promise<number>((_, reject) => { release = () => reject(new Error("cancelled")); }); }
+      finally { settled = true; }
+    } });
+    const start = performance.now(); expect((await f.run()).exitCode).toBe(1);
+    expect(performance.now() - start).toBeLessThan(400); expect(settled).toBe(true); expect(archiveCalls(f)).toBe(1);
+  });
+  it.each([1, 2])("R9 refusal of Redis TIME at observation %d fails closed", async observation => {
+    const store = happyStore(); let reads = 0;
+    const f = makeFixture({}, { "thread/read": times(2, ok(idleThread("t1"))) }, store);
+    f.setStore({ ...store, time: async () => { if (++reads === observation) throw new Error("NOPERM TIME"); return ["1700000000", "0"]; } });
+    expect((await f.run()).exitCode).toBe(4); expect(archiveCalls(f)).toBe(0);
+  });
+
+  it("R7 one verification deadline bounds slow pagination and settles cancellation", async () => {
+    const store = happyStore(); let pages = 0, settled = 0;
+    const f = makeFixture({ verifyTimeoutMs: 65 }, {}, store, {
+      monotonic: () => performance.now(), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      cancel: async () => undefined,
+      rpc: { request: async (method, _params, _kind, signal) => {
+        if (method === "thread/read") return idleThread("t1");
+        if (method === "thread/archive") { f.pins.set(8100, null); f.setPostArchive(true); return {}; }
+        pages++;
+        try { await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(done, 25);
+          function abort() { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(new Error("aborted")); }
+          function done() { signal?.removeEventListener("abort", abort); resolve(); }
+          signal?.addEventListener("abort", abort, { once: true });
+        }); return { data: [], nextCursor: `p${pages}` }; }
+        finally { settled++; }
+      } },
+    });
+    const start = performance.now(); const result = await f.run();
+    expect(result.exitCode).toBe(1); expect(performance.now() - start).toBeLessThan(400);
+    expect(pages).toBeGreaterThan(1); expect(pages).toBeLessThan(5); expect(settled).toBe(pages);
+    const count = pages; await new Promise(resolve => setTimeout(resolve, 40)); expect(pages).toBe(count);
+  });
+
+  it("R7 nonreplying Redis verification is cancelled and its command settles within the shared deadline", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gptq-nonreply-")); const path = join(root, "sock");
+    const peers = new Set<Socket>();
+    const server = createServer(socket => {
+      peers.add(socket); socket.on("close", () => peers.delete(socket));
+      socket.on("data", data => { if (!data.toString().includes("exists")) socket.write("+OK\r\n".repeat(data.toString().match(/\*\d+\r\n/g)?.length ?? 1)); });
+    });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
+    const redis = new Redis(path, { enableReadyCheck: false, maxRetriesPerRequest: 0, retryStrategy: () => null, commandTimeout: 500 }); redis.on("error", () => undefined);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("silent Redis fixture ready timeout")), 1000);
+        redis.once("ready", () => { clearTimeout(timer); resolve(); }); redis.once("error", error => { clearTimeout(timer); reject(error); });
+      });
+      const store = happyStore(); let commandSettled = false;
+      const f = makeFixture({ verifyTimeoutMs: 40 }, { "thread/read": times(2, ok(idleThread("t1"))), "thread/archive": [ok({})], "thread/loaded/list": [ok({ data: [] })] }, store, {
+        monotonic: () => performance.now(), sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+        cancel: async () => { redis.disconnect(); },
+      });
+      f.setStore({ ...store, exists: async key => { try { return await redis.exists(key); } finally { commandSettled = true; } } });
+      const start = performance.now(); expect((await f.run()).exitCode).toBe(1);
+      expect(performance.now() - start).toBeLessThan(400); expect(commandSettled).toBe(true); expect(archiveCalls(f)).toBe(1);
+      expect(redis.status).toBe("end");
+    } finally { redis.disconnect(); for (const peer of peers) peer.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("R12 restore shell text preserves every variable argv element literally", async () => {
+    const threadId = "t $HOME `printf bad` ' space";
+    const socketPath = "/s $HOME `printf bad` ' space.sock";
+    const cwd = "/w $HOME `printf bad` ' space";
+    const f = makeFixture({ threadId, socketPath }, { "thread/read": [ok(idleThread(threadId, { cwd, status: { type: "notLoaded" } }))] });
+    expect((await f.run()).outcome).toBe("already_unloaded");
+    const restore = f.events.find(event => event.step === "already_unloaded")!.restore as string;
+    const shell = restore.slice(restore.indexOf("codex resume"));
+    const argv = execFileSync("/bin/sh", ["-c", `set -- ${shell}; printf '%s\n' "$@"`]).toString().trimEnd().split("\n");
+    expect(argv).toEqual(["codex", "resume", threadId, "--remote", `unix://${socketPath}`, "-C", cwd, "-c", "check_for_update_on_startup=false"]);
+    expect(archiveCalls(f)).toBe(0);
+  });
+
+  it.each(["gptq:runtime-binding:mb1", MAPPING_KEY])("R1 requires both records: missing %s", async (key) => {
+    const store = happyStore(); store.strings.delete(key);
+    const f = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, store);
+    expect((await f.run()).exitCode).toBe(3); expect(archiveCalls(f)).toBe(0);
+  });
+
+  it.each(["binding", "mapping", "epoch", "token", "sidecar", "sidecarArgv", "registryOwner", "parent", "noMailbox"])('R2 refuses fresh ownership changes: %s', async (change) => {
+    const store = happyStore();
+    if (change === "noMailbox") { store.strings.delete(MAPPING_KEY); store.strings.delete("gptq:runtime-binding:mb1"); }
+    const f = makeFixture(change === "noMailbox" ? { expectNoMailbox: true, expectedMailbox: null } : {}, {
+      "thread/read": [ok(idleThread("t1")), { run: () => {
+        if (change === "binding") store.strings.delete("gptq:runtime-binding:mb1");
+        if (change === "mapping") store.strings.delete(MAPPING_KEY);
+        if (["epoch", "token", "noMailbox"].includes(change)) store.strings.set("gptq:runtime-binding:mb1", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: change === "epoch" ? "new" : "e1", token: "new", working_directory: "/w" }));
+        if (change === "registryOwner") store.hashes.get("gptq:registry")!.set("mb1", JSON.stringify({ name: "mb1", pid: 8100, metadata: { client: "codex", uuid: "replacement" } }));
+        if (change === "sidecarArgv") f.pins.set(8100, { ...SIDE_PIN, argv: [...SIDE_PIN.argv!, "--extra"] });
+        if (change === "sidecar") f.pins.set(8100, { ...SIDE_PIN, startTicks: "new" });
+        return idleThread("t1", change === "parent" ? { parentThreadId: "p1" } : {});
+      } }, ok(idleThread("p1"))],
+      "thread/archive": [ok({})],
+    }, store);
+    expect((await f.run()).exitCode).toBe(3); expect(archiveCalls(f)).toBe(0);
+  });
+
+  it("R2 permits harmless registry heartbeat timestamps to advance", async () => {
+    const store = happyStore();
+    const f = makeFixture({}, { "thread/read": [ok(idleThread("t1")), { run: () => {
+      store.hashes.get("gptq:registry")!.set("mb1", JSON.stringify({ ...JSON.parse(store.hashes.get("gptq:registry")!.get("mb1")!), last_seen: "later" }));
+      return idleThread("t1");
+    } }], "thread/archive": [{ run: () => { f.pins.set(8100, null); f.setPostArchive(true); return {}; } }], "thread/loaded/list": [ok({ data: [] })] }, store);
+    expect((await f.run()).exitCode).toBe(0);
+  });
+
+  it.each(["redis://", "rediss://", "redis:///0", "localhost:6379", "redis://user:secret@", "//run/redis.sock", "/run/redis.sock?db=16", "redis://host?path=/other.sock", "redis://host#other"])('R6 rejects default-dependent endpoints: %s', url => {
+    const result = parseRetireThreadArgs(["t1", "--expect-no-mailbox", "--redis-url", url]);
+    expect(typeof result).toBe("string"); expect(String(result)).not.toContain("secret");
+  });
+  it.each(["/run/redis.sock?db=15", "redis://host:6379/1", "rediss://user:password@host:6380/0"])('R6 accepts explicit native endpoints: %s', url => {
+    expect(typeof parseRetireThreadArgs(["t1", "--expect-no-mailbox", "--redis-url", url])).toBe("object");
+  });
+  it.each(["9".repeat(400), "Infinity", "300001"])('R7 rejects unbounded budgets: %s', timeout => {
+    expect(typeof parseRetireThreadArgs(["t1", "--expect-no-mailbox", "--redis-url", "redis://host", "--verify-timeout-ms", timeout])).toBe("string");
+  });
+
+  it("R8 bounds SCAN calls even when all MATCH pages are empty", async () => {
+    const store = happyStore(); let calls = 0;
+    const f = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, store);
+    f.setStore({ ...store, scan: async () => [String(++calls), []] });
+    expect((await f.run()).code).toBe("binding_scan_exceeded"); expect(calls).toBe(100); expect(archiveCalls(f)).toBe(0);
+  });
+
+  it.each([1, 2])("R9 uses Redis TIME despite an ahead-of-server local clock (observation %d)", async (observation) => {
+    const store = happyStore(); let timesRead = 0;
+    const f = makeFixture({}, { "thread/read": times(2, ok(idleThread("t1"))) }, store);
+    f.setStore({ ...store, time: async () => {
+      if (++timesRead === observation) store.zsets.set(CLAIM_KEYS.index("mb1"), [{ member: "live", score: 1001 }]);
+      return ["1", "0"];
+    } });
+    expect((await f.run()).exitCode).toBe(3); expect(archiveCalls(f)).toBe(0);
+  });
+  it.each([["oops", "0"], ["1", "1000000"], ["Infinity", "0"]])("R9 invalid server TIME fails closed: %j", async (seconds, micros) => {
+    const store = happyStore(); const f = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, store);
+    f.setStore({ ...store, time: async () => [seconds!, micros!] });
+    expect((await f.run()).exitCode).toBe(4); expect(archiveCalls(f)).toBe(0);
+  });
+
+  it.each([{ runtime_id: "t1" }, { client: "pi", runtime_id: "t1", epoch: "e", token: "secret-token", working_directory: "/w" }, { client: "codex", runtime_id: "t1", epoch: "e", working_directory: "/w", surprise: true }])("R10 rejects invalid or foreign stored bindings", async (binding) => {
+    const store = happyStore(); store.strings.set("gptq:runtime-binding:mb1", JSON.stringify(binding));
+    const f = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, store);
+    expect([3,4]).toContain((await f.run()).exitCode); expect(archiveCalls(f)).toBe(0); expect(JSON.stringify(f.events)).not.toContain("secret-token");
+  });
+  it.each([5, {}, [], ""])('R10 malformed parent never becomes a root', async parentThreadId => {
+    const f = makeFixture({}, { "thread/read": [ok(idleThread("t1", { parentThreadId }))] });
+    expect((await f.run()).code).toBe("unexpected_response"); expect(archiveCalls(f)).toBe(0);
+  });
+  it("R10 rejects a mapping containing only agent", async () => {
+    const store = happyStore(); store.strings.set(MAPPING_KEY, JSON.stringify({ agent: "mb1" }));
+    const f = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, store);
+    expect((await f.run()).code).toBe("mapping_unreadable"); expect(archiveCalls(f)).toBe(0);
+  });
+});
+
 // ---------------------------------------------------------------- real Redis
 
 describe("retire-thread guards (private test Redis via storeOf)", () => {
-  const TEST_REDIS_URL = testRedisUrl();
+  let TEST_REDIS_URL: string;
   let redis: Redis;
 
   beforeEach(async () => {
+    TEST_REDIS_URL = testRedisUrl();
     redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
     await flushTestKeys(redis, TEST_REDIS_URL);
   });
@@ -642,11 +819,11 @@ describe("retire-thread guards (private test Redis via storeOf)", () => {
   it("dry-run passes over real Redis state, with real SCAN pagination", async () => {
     // 1200 unrelated bindings force three COUNT-batched pages before mb1's.
     for (let index = 0; index < 1200; index += 1) {
-      await redis.set(`gptq:runtime-binding:bulk-${index}`, JSON.stringify({ client: "codex", runtime_id: `bulk-${index}`, epoch: "e", working_directory: "/w" }));
+      await redis.set(`gptq:runtime-binding:bulk-${index}`, JSON.stringify({ client: "codex", runtime_id: `bulk-${index}`, epoch: "e", token: "owner1", working_directory: "/w" }));
     }
-    await redis.set("gptq:runtime-binding:mb1", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", working_directory: "/w" }));
+    await redis.set("gptq:runtime-binding:mb1", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", token: "owner1", working_directory: "/w" }));
     await redis.set(MAPPING_KEY, JSON.stringify({ agent: "mb1", working_directory: "/w" }));
-    await redis.hset("gptq:registry", "mb1", JSON.stringify({ name: "mb1", registered_at: "2026-10-01T00:00:00Z", pid: 424242 }));
+    await redis.hset("gptq:registry", "mb1", JSON.stringify({ name: "mb1", registered_at: "2026-10-01T00:00:00Z", pid: 8100 }));
     await redis.zadd(CLAIM_KEYS.index("mb1"), "1699999940000", "expired-claim"); // before the fixture clock epoch
 
     const fixture = makeFixture({ dryRun: true }, { "thread/read": [ok(idleThread("t1"))] });
@@ -658,9 +835,11 @@ describe("retire-thread guards (private test Redis via storeOf)", () => {
   });
 
   it("an unexpired real claim refuses", async () => {
-    await redis.set("gptq:runtime-binding:mb1", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", working_directory: "/w" }));
+    await redis.set("gptq:runtime-binding:mb1", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", token: "owner1", working_directory: "/w" }));
     await redis.set(MAPPING_KEY, JSON.stringify({ agent: "mb1", working_directory: "/w" }));
-    await redis.zadd(CLAIM_KEYS.index("mb1"), "1700000060000", "live-claim"); // after the fixture clock epoch
+    await redis.hset("gptq:registry", "mb1", JSON.stringify({ name: "mb1", pid: 8100 }));
+    const [seconds, micros] = await redis.time();
+    await redis.zadd(CLAIM_KEYS.index("mb1"), String(Number(seconds) * 1000 + Math.floor(Number(micros) / 1000) + 60_000), "live-claim");
     const fixture = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] });
     fixture.setStore(storeOf(redis));
     const result = await fixture.run();
@@ -670,7 +849,7 @@ describe("retire-thread guards (private test Redis via storeOf)", () => {
 
   it("a malformed binding anywhere in the real keyspace fails closed", async () => {
     await redis.set("gptq:runtime-binding:broken", "{oops");
-    await redis.set("gptq:runtime-binding:mb1", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", working_directory: "/w" }));
+    await redis.set("gptq:runtime-binding:mb1", JSON.stringify({ client: "codex", runtime_id: "t1", epoch: "e", token: "owner1", working_directory: "/w" }));
     const fixture = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] });
     fixture.setStore(storeOf(redis));
     const result = await fixture.run();

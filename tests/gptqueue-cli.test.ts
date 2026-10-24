@@ -66,7 +66,7 @@ describe("gptqueue dispatcher CLI", () => {
       expect(result.status).toBe(4);
       const problem = JSON.parse(result.stderr.trim().split("\n").pop()!);
       expect(problem).toMatchObject({ error: "daemon_socket_not_listed" });
-      expect(problem.message).toContain(missingSocket);
+      expect(problem.message).toBe("daemon_socket_not_listed: observation failed");
       // Nothing was emitted beyond the failed check: no archived event.
       expect(result.stdout).not.toContain("archived");
     } finally {

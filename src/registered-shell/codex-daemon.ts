@@ -17,16 +17,21 @@
  * The --listen value is NOT required to spell out the selected socket path:
  * the field daemon may listen on a bare `unix://` (its CODEX_HOME default).
  * When the socket owner is proven by fd ownership, that ownership alone
- * selects the daemon. The argv-scan fallback is used only when owner
- * resolution finds no owner at all, and it must prove the exact endpoint
- * correlation itself (--listen unix://<selected path>); ambiguity or absence
- * is a loud refusal, never an arbitrary pick. There is deliberately no
- * fallback from ambiguity: a socket held by two pids or an owner that is not
- * a Codex app-server is global evidence of a broken environment, not a hint
- * to guess.
+ * selects the daemon. Missing or unreadable ownership refuses; argv alone
+ * cannot prove which live socket a process owns. Multiple matching inodes or
+ * owners refuse even when aliases refer to the same filesystem path.
+ *
+ * Ownership discovery supports same-UID daemons only. Every visible process
+ * must have readable UID metadata. Within that UID, complete readable argv
+ * admits only eligible Codex app-server candidates to descriptor inspection.
+ * Known noncandidates and fully foreign-UID processes are outside the fd
+ * ownership domain. Unknown UID/argv or eligible-candidate fd evidence refuses.
+ * This is a cooperative operational boundary, not a hostile same-UID/root proof.
+ * Child snapshots still classify every visible process by parent, regardless
+ * of UID, and refuse incomplete evidence rather than inventing zero counts.
  */
-import { readdir, readFile, readlink } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, readFile, readlink, realpath } from "node:fs/promises";
+import { join, resolve, dirname } from "node:path";
 
 export type DiscoveryMode =
   | "proc_unreadable"
@@ -60,9 +65,10 @@ export type DaemonIdentity = Readonly<{
   /** /proc/<pid>/ns/pid link target (e.g. "pid:[4026531836]") or null when unreadable. */
   nsPid: string | null;
   argv: readonly string[];
-  /** How selection was proven: the socket's fd owner, or an argv naming the exact endpoint. */
-  basis: "socket-owner" | "argv-scan";
+  /** Selection is proven by the bound socket's fd owner. */
+  basis: "socket-owner";
   socketPath: string;
+  socketInode: string;
 }>;
 
 /** A pinned process: pid + start time (+ argv/ppid when readable). */
@@ -91,14 +97,16 @@ export const basename = (path: string): string => {
 };
 
 /** argv tokens of a process, or null when the process is gone. Throws when present but unreadable. */
-export const readProcessArgv = async (procRoot: string, pid: number): Promise<string[] | null> => {
+export const readProcessArgv = async (procRoot: string, pid: number, signal?: AbortSignal): Promise<string[] | null> => {
+  signal?.throwIfAborted();
   let raw: Buffer;
   try {
-    raw = await readFile(join(procRoot, String(pid), "cmdline"));
+    raw = await readFile(join(procRoot, String(pid), "cmdline"), { signal });
   } catch (error) {
     if (isMissing(error)) return null;
     throw error;
   }
+  if (raw.length > 0 && raw[raw.length - 1] !== 0) throw new Error(`incomplete process ${pid} argv`);
   const tokens = raw.toString("utf8").split("\0");
   while (tokens.length > 0 && tokens[tokens.length - 1] === "") tokens.pop();
   return tokens;
@@ -108,10 +116,12 @@ export const readProcessArgv = async (procRoot: string, pid: number): Promise<st
 export const readProcessStat = async (
   procRoot: string,
   pid: number,
+  signal?: AbortSignal,
 ): Promise<Readonly<{ ppid: number; startTicks: string }> | null> => {
+  signal?.throwIfAborted();
   let raw: string;
   try {
-    raw = (await readFile(join(procRoot, String(pid), "stat"))).toString("utf8");
+    raw = (await readFile(join(procRoot, String(pid), "stat"), { signal })).toString("utf8");
   } catch (error) {
     if (isMissing(error)) return null;
     throw error;
@@ -127,10 +137,14 @@ export const readProcessStat = async (
   return { ppid, startTicks };
 };
 
-export const readNsPid = async (procRoot: string, pid: number): Promise<string | null> => {
+export const readNsPid = async (procRoot: string, pid: number, signal?: AbortSignal): Promise<string | null> => {
+  signal?.throwIfAborted();
   try {
-    return await readlink(join(procRoot, String(pid), "ns", "pid"));
+    const ns = await readlink(join(procRoot, String(pid), "ns", "pid"));
+    signal?.throwIfAborted();
+    return ns;
   } catch {
+    signal?.throwIfAborted();
     return null;
   }
 };
@@ -140,65 +154,147 @@ export const readNsPid = async (procRoot: string, pid: number): Promise<string |
  * with that pid exists. A present-but-unreadable process throws: "identity
  * unknown" must never be mistaken for "process gone".
  */
-export const readProcessPin = async (procRoot: string, pid: number): Promise<ProcPin | null> => {
-  const stat = await readProcessStat(procRoot, pid);
-  const argv = await readProcessArgv(procRoot, pid);
-  if (stat === null || argv === null) return null;
-  return { pid, startTicks: stat.startTicks, ppid: stat.ppid, argv, nsPid: await readNsPid(procRoot, pid) };
+export const readProcessPin = async (procRoot: string, pid: number, signal?: AbortSignal): Promise<ProcPin | null> => {
+  const stat = await readProcessStat(procRoot, pid, signal);
+  if (stat === null) return null;
+  const argv = await readProcessArgv(procRoot, pid, signal);
+  if (argv === null) {
+    if (await readProcessStat(procRoot, pid, signal) === null) return null;
+    throw new Error(`process ${pid} has no readable cmdline`);
+  }
+  const after = await readProcessStat(procRoot, pid, signal);
+  if (after === null) return null;
+  if (after.startTicks !== stat.startTicks || after.ppid !== stat.ppid) throw new Error(`process ${pid} changed during pinning`);
+  return { pid, startTicks: stat.startTicks, ppid: stat.ppid, argv, nsPid: await readNsPid(procRoot, pid, signal) };
 };
 
-const listPids = async (procRoot: string): Promise<number[]> => {
+const listPids = async (procRoot: string, signal?: AbortSignal): Promise<number[]> => {
+  signal?.throwIfAborted();
   let names: string[];
   try {
     names = await readdir(procRoot);
+    signal?.throwIfAborted();
   } catch (error) {
     throw new DiscoveryError("proc_unreadable", `cannot enumerate ${procRoot}: ${messageOf(error)}`);
   }
   return names.filter((name) => /^\d+$/.test(name)).map(Number);
 };
 
+/** Resolve aliases, including a symlinked parent of a disappeared socket. */
+const canonicalSocketPath = async (path: string, signal?: AbortSignal): Promise<string> => {
+  signal?.throwIfAborted();
+  try { const canonical = await realpath(path); signal?.throwIfAborted(); return canonical; }
+  catch (error) {
+    if (!isMissing(error)) throw error;
+    const parent = dirname(path);
+    if (parent === path) return resolve(path);
+    return join(await canonicalSocketPath(parent, signal), basename(path));
+  }
+};
+
 /**
- * The socketfs inodes bound to exactly `socketPath` in /proc/net/unix
- * (bound/listening sockets carry their path; connected client sockets do not).
+ * Listening AF_UNIX stream inodes for `socketPath` in /proc/net/unix.
+ * Accepted connections may carry the very same pathname; only SOCK_STREAM
+ * with Linux __SO_ACCEPTCON (1 << 16, performed a listen) selects a listener.
  */
-export const unixSocketInodes = async (procRoot: string, socketPath: string): Promise<readonly string[]> => {
+export const unixSocketInodes = async (procRoot: string, socketPath: string, signal?: AbortSignal): Promise<readonly string[]> => {
   let text: string;
   try {
-    text = (await readFile(join(procRoot, "net", "unix"))).toString("utf8");
+    text = (await readFile(join(procRoot, "net", "unix"), { signal })).toString("utf8");
   } catch (error) {
     throw new DiscoveryError("proc_unreadable", `cannot read ${procRoot}/net/unix: ${messageOf(error)}`);
   }
+  const selected = await canonicalSocketPath(socketPath, signal);
   const inodes = new Set<string>();
   for (const line of text.split("\n").slice(1)) {
-    const fields = line.trim().split(/\s+/);
-    if (fields.length < 8) continue;
-    if (fields.slice(7).join(" ") !== socketPath) continue;
-    const inode = fields[6]!;
-    if (/^\d+$/.test(inode)) inodes.add(inode);
+    // Num RefCount Protocol Flags Type St Inode Path. Preserve Path whitespace.
+    const match = /^(?:\S+\s+){3}(\S+)\s+(\S+)\s+(\S+)\s+(\S+) (.*)$/.exec(line.trimStart());
+    if (!match) {
+      if ([socketPath, selected].some(path => line.endsWith(` ${path}`))) {
+        throw new DiscoveryError("proc_unreadable", "malformed selected Unix socket row");
+      }
+      continue;
+    }
+    const boundPath = match[5]!;
+    // The selected spelling was validated above. Other rows are only aliases
+    // when successfully resolved; unrelated protected/stale paths are not
+    // prerequisites for observing this socket.
+    if (boundPath !== socketPath && boundPath !== selected) {
+      try {
+        if (await realpath(boundPath) !== selected) continue;
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (["ENOENT", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) continue;
+        throw error;
+      }
+    }
+    const [, flagsRaw, typeRaw, stateRaw, inode] = match;
+    if (!/^[0-9a-fA-F]{1,8}$/.test(flagsRaw!) || !/^[0-9a-fA-F]{1,4}$/.test(typeRaw!) || !/^[0-9a-fA-F]{1,2}$/.test(stateRaw!)) {
+      throw new DiscoveryError("proc_unreadable", "malformed selected Unix socket metadata");
+    }
+    const listening = (Number.parseInt(flagsRaw!, 16) & 0x10000) !== 0;
+    if (Number.parseInt(typeRaw!, 16) !== 1 || !listening) continue;
+    if (Number.parseInt(stateRaw!, 16) !== 1 || !/^[1-9]\d*$/.test(inode!)) {
+      throw new DiscoveryError("proc_unreadable", "invalid selected Unix stream listener state or inode");
+    }
+    inodes.add(inode!);
   }
   return [...inodes];
 };
 
-/** Pids holding an fd to socket:[<inode>]. Unreadable fd tables are skipped per pid, never fatal here. */
-const socketOwnerPids = async (procRoot: string, inode: string): Promise<number[]> => {
+/**
+ * Admit only processes whose real/effective/saved/fs UIDs all match the
+ * caller. Unknown credentials cannot be silently classified as foreign.
+ */
+const sameUidProcess = async (procRoot: string, pid: number, signal?: AbortSignal): Promise<boolean | null> => {
+  let status: string;
+  try { status = await readFile(join(procRoot, String(pid), "status"), { encoding: "utf8", signal }); }
+  catch (error) {
+    if (isMissing(error) && await readProcessStat(procRoot, pid, signal) === null) return null;
+    throw error;
+  }
+  const fields = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$/m.exec(status)?.slice(1).map(Number);
+  if (!fields || fields.some(uid => !Number.isSafeInteger(uid) || uid < 0)) throw new Error(`unreadable UID domain for process ${pid}`);
+  const callerUid = process.getuid?.();
+  if (callerUid === undefined) throw new Error("same-UID daemon discovery requires Linux UID evidence");
+  if (fields.every(uid => uid === callerUid)) return true;
+  if (fields.every(uid => uid !== callerUid)) return false;
+  throw new Error(`ambiguous mixed UID domain for process ${pid}`);
+};
+
+/** Eligible same-UID Codex candidates positively holding the listening inode. */
+const socketOwnerPids = async (procRoot: string, inode: string, signal?: AbortSignal): Promise<number[]> => {
   const wanted = `socket:[${inode}]`;
   const owners: number[] = [];
-  for (const pid of await listPids(procRoot)) {
+  for (const pid of await listPids(procRoot, signal)) {
+    signal?.throwIfAborted();
+    if (await sameUidProcess(procRoot, pid, signal) !== true) continue;
+    // Classify the complete argv before touching descriptor tables of unrelated
+    // same-user services. Unknown evidence cannot prove a noncandidate.
+    const argv = await readProcessArgv(procRoot, pid, signal);
+    if (argv === null) {
+      if (await readProcessStat(procRoot, pid, signal) === null) continue;
+      throw new Error(`cannot classify live process ${pid}: missing argv`);
+    }
+    if (argv.length === 0 || !argv[0]) throw new Error(`cannot classify process ${pid}: empty argv`);
+    if (!isCodexAppServerArgv(argv)) continue;
     const fdDir = join(procRoot, String(pid), "fd");
     let names: string[];
     try {
       names = await readdir(fdDir);
-    } catch {
-      continue; // vanished, or not ours to read: absence of evidence, not proof
+    } catch (error) {
+      if (isMissing(error) && await readProcessStat(procRoot, pid, signal) === null) continue;
+      throw error;
     }
     for (const name of names) {
+      signal?.throwIfAborted();
       try {
         if ((await readlink(join(fdDir, name))) === wanted) {
           owners.push(pid);
           break;
         }
-      } catch {
-        /* fd replaced mid-scan */
+      } catch (error) {
+        if (!isMissing(error)) throw error;
       }
     }
   }
@@ -245,16 +341,17 @@ export const isGptqueueSessionSidecarArgv = (argv: readonly string[]): boolean =
  * Order of evidence: exact socket path in /proc/net/unix -> inode -> the one
  * process whose fd table holds it -> token-wise argv confirmation (the --listen
  * value may be a bare `unix://`; fd ownership already proves the endpoint).
- * Only when no owner can be found at all does an argv scan run, and it must
- * name the exact `unix://<socketPath>` endpoint; zero or several matches are
- * loud refusals. Ambiguous or non-Codex owners are refused outright.
+ * Missing, ambiguous or unreadable ownership refuses; argv alone cannot
+ * establish ownership of the selected bound endpoint.
  */
 export const discoverCodexDaemon = async (
-  options: Readonly<{ socketPath: string; procRoot?: string }>,
+  options: Readonly<{ socketPath: string; procRoot?: string; signal?: AbortSignal }>,
 ): Promise<DaemonIdentity> => {
   const procRoot = options.procRoot ?? "/proc";
+  const signal = options.signal;
+  signal?.throwIfAborted();
   const socketPath = options.socketPath;
-  const inodes = await unixSocketInodes(procRoot, socketPath);
+  const inodes = await unixSocketInodes(procRoot, socketPath, signal);
   if (inodes.length === 0) {
     throw new DiscoveryError(
       "socket_not_listed",
@@ -268,7 +365,7 @@ export const discoverCodexDaemon = async (
   const inode = inodes[0]!;
   let owners: number[];
   try {
-    owners = await socketOwnerPids(procRoot, inode);
+    owners = await socketOwnerPids(procRoot, inode, signal);
   } catch (error) {
     throw new DiscoveryError("proc_unreadable", `cannot scan ${procRoot} fd tables: ${messageOf(error)}`);
   }
@@ -280,14 +377,14 @@ export const discoverCodexDaemon = async (
     const pid = owners[0]!;
     let argv: string[] | null;
     try {
-      argv = await readProcessArgv(procRoot, pid);
+      argv = await readProcessArgv(procRoot, pid, signal);
     } catch (error) {
       throw new DiscoveryError("owner_argv_unreadable", `cannot read ${procRoot}/${pid}/cmdline: ${messageOf(error)}`, { pid });
     }
     let stat: Readonly<{ ppid: number; startTicks: string }> | null = null;
     if (argv !== null) {
       try {
-        stat = await readProcessStat(procRoot, pid);
+        stat = await readProcessStat(procRoot, pid, signal);
       } catch (error) {
         throw new DiscoveryError("proc_unreadable", `cannot read ${procRoot}/${pid}/stat: ${messageOf(error)}`, { pid });
       }
@@ -300,52 +397,12 @@ export const discoverCodexDaemon = async (
           { pid, argv0: argv[0] ?? null },
         );
       }
-      identity = { pid, startTicks: stat.startTicks, nsPid: await readNsPid(procRoot, pid), argv, basis: "socket-owner", socketPath };
+      identity = { pid, startTicks: stat.startTicks, nsPid: await readNsPid(procRoot, pid, signal), argv, basis: "socket-owner", socketPath, socketInode: inode };
     }
-    // argv or stat vanished between the fd scan and the read: fall through to
-    // the argv scan below rather than reporting a dead owner as selection.
+    // A vanished owner is incomplete evidence and refuses below.
   }
   if (identity) return identity;
-  // Fallback (owner resolution found nothing): an argv scan may select the
-  // daemon ONLY by naming this exact endpoint. A bare `unix://` listen value
-  // cannot be correlated with the selected path, so it is not a candidate.
-  const candidates: number[] = [];
-  for (const pid of await listPids(procRoot)) {
-    let argv: string[] | null;
-    try {
-      argv = await readProcessArgv(procRoot, pid);
-    } catch {
-      continue; // unreadable argv cannot prove anything about this pid
-    }
-    if (argv === null) continue;
-    if (!isCodexAppServerArgv(argv) || !listensOnSocket(argv, socketPath)) continue;
-    try {
-      if ((await readProcessStat(procRoot, pid)) === null) continue;
-    } catch {
-      continue;
-    }
-    candidates.push(pid);
-  }
-  if (candidates.length === 0) {
-    throw new DiscoveryError(
-      "daemon_not_found",
-      `no codex app-server --managed-daemon is provably listening on ${socketPath}: the socket inode has no owner and no argv names this exact endpoint`,
-      { socketPath },
-    );
-  }
-  if (candidates.length > 1) {
-    throw new DiscoveryError("ambiguous_daemon", `${candidates.length} codex app-server daemons name ${socketPath}: pids ${candidates.join(", ")}`, { socketPath, pids: candidates });
-  }
-  const pid = candidates[0]!;
-  let stat: Readonly<{ ppid: number; startTicks: string }>;
-  let argv: string[];
-  try {
-    argv = (await readProcessArgv(procRoot, pid))!;
-    stat = (await readProcessStat(procRoot, pid))!;
-  } catch (error) {
-    throw new DiscoveryError("proc_unreadable", `cannot pin daemon pid ${pid}: ${messageOf(error)}`, { pid });
-  }
-  return { pid, startTicks: stat.startTicks, nsPid: await readNsPid(procRoot, pid), argv, basis: "argv-scan", socketPath };
+  throw new DiscoveryError("no_owner", `no readable owner proves the selected socket ${socketPath}`, { socketPath });
 };
 
 /**
@@ -355,12 +412,14 @@ export const discoverCodexDaemon = async (
  */
 export const assertDaemonIdentity = async (
   identity: DaemonIdentity,
-  options: Readonly<{ procRoot?: string }> = {},
+  options: Readonly<{ procRoot?: string; signal?: AbortSignal }> = {},
 ): Promise<void> => {
   const procRoot = options.procRoot ?? "/proc";
+  const signal = options.signal;
+  signal?.throwIfAborted();
   let stat: Readonly<{ ppid: number; startTicks: string }> | null;
   try {
-    stat = await readProcessStat(procRoot, identity.pid);
+    stat = await readProcessStat(procRoot, identity.pid, signal);
   } catch (error) {
     throw new DiscoveryError("proc_unreadable", `cannot re-read ${procRoot}/${identity.pid}/stat: ${messageOf(error)}`, { pid: identity.pid });
   }
@@ -370,39 +429,53 @@ export const assertDaemonIdentity = async (
   if (stat.startTicks !== identity.startTicks) {
     throw new DiscoveryError("daemon_replaced", `daemon pid ${identity.pid} now names a different process (start ticks ${identity.startTicks} -> ${stat.startTicks})`, { pid: identity.pid, before: identity.startTicks, after: stat.startTicks });
   }
+  const current = await discoverCodexDaemon({ socketPath: identity.socketPath, procRoot, signal });
+  if (current.pid !== identity.pid || current.startTicks !== identity.startTicks ||
+      current.socketInode !== identity.socketInode ||
+      (identity.nsPid !== null && current.nsPid !== identity.nsPid)) {
+    throw new DiscoveryError("daemon_replaced", "selected endpoint owner, inode or namespace changed", { pid: identity.pid });
+  }
 };
 
 /**
  * Snapshot the pinned daemon's children and gptqueue Codex sidecars
- * (token-wise argv classification). Per-pid read failures of a vanished or
- * racy child skip that pid; identity is re-verified first.
+ * (token-wise argv classification). ENOENT races may skip a vanished pid;
+ * inaccessible/malformed stat or unreadable known-child argv refuses.
  */
 export const snapshotDaemon = async (
   identity: DaemonIdentity,
-  options: Readonly<{ procRoot?: string }> = {},
+  options: Readonly<{ procRoot?: string; signal?: AbortSignal }> = {},
 ): Promise<DaemonSnapshot> => {
   const procRoot = options.procRoot ?? "/proc";
-  await assertDaemonIdentity(identity, { procRoot });
+  const signal = options.signal;
+  signal?.throwIfAborted();
+  await assertDaemonIdentity(identity, { procRoot, signal });
   const children: ProcPin[] = [];
   const sidecars: ProcPin[] = [];
-  for (const pid of await listPids(procRoot)) {
+  for (const pid of await listPids(procRoot, signal)) {
+    signal?.throwIfAborted();
     if (pid === identity.pid) continue;
     let stat: Readonly<{ ppid: number; startTicks: string }> | null;
     try {
-      stat = await readProcessStat(procRoot, pid);
-    } catch {
-      continue; // unreadable stat for one pid cannot prove a parent relation
+      stat = await readProcessStat(procRoot, pid, signal);
+    } catch (error) {
+      throw new DiscoveryError("proc_unreadable", `cannot classify process ${pid}: ${messageOf(error)}`);
     }
     if (stat === null || stat.ppid !== identity.pid) continue;
     let argv: string[] | null;
     try {
-      argv = await readProcessArgv(procRoot, pid);
-    } catch {
-      argv = null; // still a child; classified as a sidecar only when argv proves it
+      argv = await readProcessArgv(procRoot, pid, signal);
+    } catch (error) {
+      throw new DiscoveryError("proc_unreadable", `cannot classify daemon child ${pid}: ${messageOf(error)}`);
+    }
+    if (argv === null || argv.length === 0) {
+      if (await readProcessStat(procRoot, pid, signal) === null) continue;
+      throw new DiscoveryError("proc_unreadable", `daemon child ${pid} has no readable cmdline`);
     }
     const child: ProcPin = { pid, startTicks: stat.startTicks, ppid: stat.ppid, argv, nsPid: null };
     children.push(child);
     if (argv !== null && isGptqueueSessionSidecarArgv(argv)) sidecars.push(child);
   }
+  await assertDaemonIdentity(identity, { procRoot, signal });
   return { identity, children, sidecars };
 };

@@ -25,6 +25,7 @@ const makeBoundaryServer = async (mode: "fragment" | "ping" | "close-on-request"
  const root = await mkdtemp(join(tmpdir(), "gptq-sock-boundary-"));
  const path = join(root, "sock");
  let connectionCount = 0;
+ const requests: string[] = [];
  let pongPayload: Buffer | undefined;
  let pongMasked = false;
  let pongResolve: (() => void) | undefined;
@@ -57,6 +58,7 @@ const makeBoundaryServer = async (mode: "fragment" | "ping" | "close-on-request"
     if (opcode === 10) { pongPayload = payload; pongMasked = masked; pongResolve?.(); continue; }
     if (opcode !== 1) continue;
     const message = JSON.parse(payload.toString()) as { id?: number; method?: string };
+    requests.push(message.method ?? "");
     if (message.method === "initialized") continue;
     if (message.method !== "initialize") {
      if (mode === "close-on-request" && connection === 1) { socket.end(); continue; }
@@ -72,7 +74,7 @@ const makeBoundaryServer = async (mode: "fragment" | "ping" | "close-on-request"
   });
  });
  await new Promise<void>(resolve => srv.listen(path, resolve));
- return { root, path, srv, pongObserved, get connectionCount() { return connectionCount; }, get pongPayload() { return pongPayload; }, get pongMasked() { return pongMasked; } };
+ return { root, path, srv, requests, pongObserved, get connectionCount() { return connectionCount; }, get pongPayload() { return pongPayload; }, get pongMasked() { return pongMasked; } };
 };
 const boundedSignal = () => AbortSignal.timeout(1_000);
 const awaitPong = async (observed: Promise<void>): Promise<void> => {
@@ -120,6 +122,38 @@ describe("Codex socket",()=>{
    expect(x.pongPayload).toEqual(Buffer.from("gptqueue-ping"));
    expect(x.pongMasked).toBe(true);
   } finally { await c.close(); await closeServer(x.srv); await rm(x.root, { recursive: true, force: true }); }
+ });
+ it("R5 fenced archive never reconnects to a replacement and rejects stale generations before writing", async () => {
+  const x = await makeBoundaryServer("close-on-request"); const c = new CodexSocketClient(x.path, 500);
+  try {
+   const generation = await c.connectGeneration(boundedSignal());
+   await expect(c.requestOnGeneration("thread/read", {}, boundedSignal(), generation)).rejects.toThrow(/closed|disconnected/i);
+   await expect(c.requestOnGeneration("thread/archive", {}, boundedSignal(), generation)).rejects.toThrow(/generation/i);
+   expect(x.connectionCount).toBe(1); expect(x.requests).not.toContain("thread/archive");
+   // Other callers keep their default reconnect behavior; the old fence stays invalid.
+   await c.request("thread/read", {}, boundedSignal());
+   expect(c.connectionGeneration).toBe(2);
+   await expect(c.requestOnGeneration("thread/archive", {}, boundedSignal(), generation)).rejects.toThrow(/generation/i);
+   expect(x.requests).not.toContain("thread/archive");
+   await c.close();
+   await expect(c.requestOnGeneration("thread/archive", {}, boundedSignal(), 2)).rejects.toThrow(/generation/i);
+   expect(x.connectionCount).toBe(2);
+  } finally { await c.close(); await closeServer(x.srv); await rm(x.root, { recursive: true, force: true }); }
+ });
+ it("R7 closing an unresponsive handshake settles the opening task without later sends", async () => {
+  const root = await mkdtemp(join(tmpdir(), "gptq-silent-socket-")); const path = join(root, "sock");
+  const peers = new Set<import("node:net").Socket>(); let connections = 0;
+  const server = createServer(socket => { connections++; peers.add(socket); socket.on("close", () => peers.delete(socket)); });
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
+  const client = new CodexSocketClient(path, 500);
+  try {
+   const started = performance.now();
+   await expect(client.connectGeneration(AbortSignal.timeout(30))).rejects.toThrow(/disconnect|closed/i);
+   await client.close();
+   expect(performance.now() - started).toBeLessThan(400);
+   await expect(client.requestOnGeneration("thread/archive", {}, boundedSignal(), 1)).rejects.toThrow();
+   expect(connections).toBe(1);
+  } finally { await client.close(); for (const peer of peers) peer.destroy(); await closeServer(server); await rm(root, { recursive: true, force: true }); }
  });
  it("rejects a pending request on close and reconnects for the next request", async () => {
   const x = await makeBoundaryServer("close-on-request"); const c = new CodexSocketClient(x.path, 500);

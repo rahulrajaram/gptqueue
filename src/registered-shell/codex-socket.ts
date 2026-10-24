@@ -197,9 +197,28 @@ export class CodexSocketClient {
     return this.sendRequest(method, params, signal);
   }
 
+  /** Explicit initial connection, followed by requests fenced to this generation. */
+  async connectGeneration(signal: AbortSignal): Promise<number> {
+    signal.throwIfAborted();
+    const abort = () => { void this.close(); };
+    signal.addEventListener("abort", abort, { once: true });
+    try { await this.ready(); signal.throwIfAborted(); return this.generation; }
+    finally { signal.removeEventListener("abort", abort); }
+  }
+
+  /** Admission and write have no intervening await; this call NEVER reconnects. */
+  requestOnGeneration(method: string, params: Record<string, unknown>, signal: AbortSignal, generation: number): Promise<Record<string, unknown>> {
+    signal.throwIfAborted();
+    if (this.closed || !this.socket || this.socket.destroyed || !this.socket.writable || this.opening || generation !== this.generation || generation === 0) {
+      return Promise.reject(new Error("Codex connection generation unavailable"));
+    }
+    return this.sendRequest(method, params, signal);
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     this.listeners.clear();
     this.fail(new Error("Codex client closed"));
+    await this.opening?.catch(() => undefined);
   }
 }
