@@ -11,6 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SESSION_KEYS } from "../src/core/keys.js";
 import { startRegisteredShell, shellAgentName, parseRegisteredShellArgs } from "../src/registered-shell/server.js";
+import { parseRegisteredShellOptions } from "../src/registered-shell/args.js";
 
 const URL15 = testRedisUrl();
 const active: Array<any> = [];
@@ -30,6 +31,31 @@ describe("registered shell boundaries", () => {
     expect(() => parseRegisteredShellArgs(["--client", "codex"])).toThrow(/redis-url/u);
     expect(() => parseRegisteredShellArgs(["--client", "nope", "--redis-url", "redis://127.0.0.1:6379/15"])).toThrow(/codex or pi/u);
     expect(() => parseRegisteredShellArgs(["--client", "codex", "--redis-url", "https://user:secret@example.test/15"])).toThrow(/Invalid Redis URL/u);
+  });
+
+  it.each([
+    { args: ["--client", "codex", "--client", "pi", "--redis-url", "redis://x"], error: "Duplicate registered-shell option" },
+    { args: ["--client", "codex", "--redis-url", "redis://x", "--client", "codex"], error: "Duplicate registered-shell option" },
+    { args: ["--client", "codex", "--redis-url", "redis://x", "--client"], error: "Expected --client and --redis-url option/value pairs" },
+    { args: ["--client", "codex", "--redis-url", "redis://x", "--redis-url", "redis://x"], error: "Duplicate registered-shell option" },
+    { args: ["--client", "codex"], error: "--redis-url is required and must be explicit" },
+    { args: ["--client", "codex", "--redis-url"], error: "Expected --client and --redis-url option/value pairs" },
+    { args: ["--client", "codex", "--redis-url", "redis://x", "--unknown", "value"], error: "Expected --client and --redis-url option/value pairs" },
+    { args: ["--client=codex", "--redis-url", "redis://x"], error: "Expected --client and --redis-url option/value pairs" },
+    { args: ["--client", "codex", "--redis-url=redis://x"], error: "Expected --client and --redis-url option/value pairs" },
+  ])("native argument validation preserves rejection: $args", ({ args, error }) => {
+    expect(() => parseRegisteredShellOptions(args)).toThrow(error);
+    expect(() => parseRegisteredShellArgs(args)).toThrow(error);
+  });
+
+  it.each(["codex", "pi"] as const)("native argument validation preserves %s results and cwd", client => {
+    for (const redisUrl of ["redis://x", "rediss://user:synthetic@host:6380/0", "/run/redis.sock?db=15"]) {
+      const args = ["--redis-url", redisUrl, "--client", client];
+      const parsed = parseRegisteredShellArgs(args);
+      expect(parsed).toEqual({ client, redisUrl, cwd: process.cwd() });
+      expect(Object.isFrozen(parsed)).toBe(true);
+      expect(parseRegisteredShellOptions(args)).toEqual({ client, redisUrl });
+    }
   });
 
   it("generates full unique identities from arbitrary cwd and ignores inherited identity", () => {

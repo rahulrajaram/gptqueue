@@ -32,6 +32,7 @@
  */
 import { readdir, readFile, readlink, realpath } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
+import { parseRegisteredShellOptions } from "./args.js";
 
 export type DiscoveryMode =
   | "proc_unreadable"
@@ -84,7 +85,7 @@ export type DaemonSnapshot = Readonly<{
   identity: DaemonIdentity;
   /** Every live child of the daemon (ppid == daemon pid), pinned by pid + start ticks. */
   children: readonly ProcPin[];
-  /** Children whose argv token-wise names gptqueue-session --client codex. */
+  /** Children in a native gptqueue-session launch position with valid Codex options. */
   sidecars: readonly ProcPin[];
 }>;
 
@@ -330,8 +331,8 @@ export const listensOnSocket = (argv: readonly string[], socketPath: string): bo
  * itself (direct execution), or the script argument of the project's native
  * Node launch (`node <sidecar> --client codex ...` — the form bin/gptqueue-session
  * is spawned in by pi-extension.ts, the Codex/MCP registration and worker
- * mode). `--client codex` is parsed from the selected command's own
- * arguments only: matching tokens carried among an unrelated executable's
+ * mode). The selected command's full arguments must pass the same pure
+ * option parser as native startup and select Codex. Tokens in an unrelated executable's
  * or script's arguments (python3 /tmp/other.py /opt/gptqueue/bin/gptqueue-session
  * --client codex, node /tmp/other.js ...) never qualify.
  */
@@ -341,8 +342,8 @@ export const isGptqueueSessionSidecarArgv = (argv: readonly string[]): boolean =
     : basename(argv[0]!) === "node" && argv.length > 1 && basename(argv[1]!) === "gptqueue-session" ? argv.slice(2)
     : null;
   if (args === null) return false;
-  const index = args.indexOf("--client");
-  return index >= 0 && args[index + 1] === "codex";
+  try { return parseRegisteredShellOptions(args).client === "codex"; }
+  catch { return false; }
 };
 
 /**

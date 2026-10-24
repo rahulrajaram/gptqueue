@@ -179,18 +179,56 @@ describe("codex daemon discovery (synthetic /proc)", () => {
 
   it("sidecar classification is positional: executable or native node script position only", () => {
     // Positive real forms: direct executable and the project's native Node launch.
-    const sidecar = ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis:///x.sock"];
+    const sidecar = ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "/run/redis.sock?db=15"];
     expect(isGptqueueSessionSidecarArgv(sidecar)).toBe(true);
-    expect(isGptqueueSessionSidecarArgv(["/opt/gptqueue/bin/gptqueue-session", "--client", "codex"])).toBe(true);
-    expect(isGptqueueSessionSidecarArgv(["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "pi"])).toBe(false);
+    expect(isGptqueueSessionSidecarArgv(["/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis://x"])).toBe(true);
+    expect(isGptqueueSessionSidecarArgv(["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "pi", "--redis-url", "redis://x"])).toBe(false);
     expect(isGptqueueSessionSidecarArgv(["sh", "-c", "gptqueue-session --client codex"])).toBe(false);
     // P004-SOL-FINAL-1: an unrelated executable or script carrying the sidecar
     // filename and --client codex as separate argument tokens never qualifies.
-    expect(isGptqueueSessionSidecarArgv(["python3", "/tmp/other.py", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"])).toBe(false);
-    expect(isGptqueueSessionSidecarArgv(["node", "/tmp/other.js", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"])).toBe(false);
+    expect(isGptqueueSessionSidecarArgv(["python3", "/tmp/other.py", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis://x"])).toBe(false);
+    expect(isGptqueueSessionSidecarArgv(["node", "/tmp/other.js", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis://x"])).toBe(false);
     // --client must come from the selected command's own arguments, not another
     // command's tokens (the interpreter's own flags, or a script's arguments).
     expect(isGptqueueSessionSidecarArgv(["node", "/opt/gptqueue/bin/gptqueue-session", "--client"])).toBe(false);
+  });
+
+  it.each([
+    { label: "conflicting client", args: ["--client", "codex", "--client", "pi", "--redis-url", "redis://x"] },
+    { label: "identical client", args: ["--client", "codex", "--redis-url", "redis://x", "--client", "codex"] },
+    { label: "incomplete duplicate client", args: ["--client", "codex", "--redis-url", "redis://x", "--client"] },
+    { label: "duplicate Redis", args: ["--client", "codex", "--redis-url", "redis://x", "--redis-url", "redis://x"] },
+    { label: "missing Redis", args: ["--client", "codex"] },
+    { label: "incomplete Redis", args: ["--client", "codex", "--redis-url"] },
+    { label: "unknown option", args: ["--client", "codex", "--redis-url", "redis://x", "--unknown", "value"] },
+    { label: "equals client", args: ["--client=codex", "--redis-url", "redis://x"] },
+    { label: "equals Redis", args: ["--client", "codex", "--redis-url=redis://x"] },
+    { label: "wrong client", args: ["--client", "pi", "--redis-url", "redis://x"] },
+    { label: "invalid Redis", args: ["--client", "codex", "--redis-url", "redis:///x.sock"] },
+  ])("native option rejection excludes sidecars but retains children: $label", async ({ args }) => {
+    const nodeArgv = ["node", "/opt/gptqueue/bin/gptqueue-session", ...args];
+    const directArgv = ["/opt/gptqueue/bin/gptqueue-session", ...args];
+    expect(isGptqueueSessionSidecarArgv(nodeArgv)).toBe(false);
+    expect(isGptqueueSessionSidecarArgv(directArgv)).toBe(false);
+    const { root, socketPath } = await makeProcTree({
+      sockets: [{ path: "/run/codex.sock", inode: 10 }],
+      procs: {
+        4242: { argv: daemonArgv("/run/codex.sock"), fds: ["socket:[10]"] },
+        100: { argv: nodeArgv, ppid: 4242 },
+        101: { argv: directArgv, ppid: 4242 },
+      },
+    });
+    const identity = await discoverCodexDaemon({ socketPath: socketPath(), procRoot: root });
+    const snapshot = await snapshotDaemon(identity, { procRoot: root });
+    expect(snapshot.children.map(child => child.pid).sort()).toEqual([100, 101]);
+    expect(snapshot.sidecars).toEqual([]);
+  });
+
+  it.each(["redis://x", "rediss://user:synthetic@host:6380/0", "/run/redis.sock?db=15"])("native valid endpoint retains both launch forms: %s", redisUrl => {
+    // Either option order is valid; the parser owns the complete schema.
+    const args = ["--redis-url", redisUrl, "--client", "codex"];
+    expect(isGptqueueSessionSidecarArgv(["gptqueue-session", ...args])).toBe(true);
+    expect(isGptqueueSessionSidecarArgv(["/usr/bin/node", "/opt/gptqueue/bin/gptqueue-session", ...args])).toBe(true);
   });
 
   it("refuses ambiguity loudly: two owners, two same-path inodes, unproven argv candidates", async () => {
@@ -286,11 +324,11 @@ describe("codex daemon discovery (synthetic /proc)", () => {
       procs: {
         4242: { argv: daemonArgv("/run/codex.sock"), ppid: 1, startTicks: "777", fds: ["socket:[10]"] },
         100: { argv: ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis://x"], ppid: 4242, startTicks: "800" },
-        101: { argv: ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "pi"], ppid: 4242, startTicks: "801" },
+        101: { argv: ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "pi", "--redis-url", "redis://x"], ppid: 4242, startTicks: "801" },
         102: { argv: ["codex", "exec", "--sandbox"], ppid: 4242, startTicks: "802" },
-        103: { argv: ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"], ppid: 999, startTicks: "803" },
-        104: { argv: ["python3", "/tmp/other.py", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"], ppid: 4242, startTicks: "804" },
-        105: { argv: ["node", "/tmp/other.js", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"], ppid: 4242, startTicks: "805" },
+        103: { argv: ["node", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis://x"], ppid: 999, startTicks: "803" },
+        104: { argv: ["python3", "/tmp/other.py", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis://x"], ppid: 4242, startTicks: "804" },
+        105: { argv: ["node", "/tmp/other.js", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis://x"], ppid: 4242, startTicks: "805" },
       },
     };
     const { root, socketPath } = await makeProcTree(spec);

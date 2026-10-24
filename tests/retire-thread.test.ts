@@ -596,8 +596,8 @@ describe("retire-thread guards (injected fakes)", () => {
   // arguments is NOT positively pinned; the sidecar-identity refusal fires
   // before any archive request.
   it.each([
-    { label: "python3 decoy", argv: ["python3", "/tmp/other.py", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"] },
-    { label: "node decoy", argv: ["node", "/tmp/other.js", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex"] },
+    { label: "python3 decoy", argv: ["python3", "/tmp/other.py", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis://x"] },
+    { label: "node decoy", argv: ["node", "/tmp/other.js", "/opt/gptqueue/bin/gptqueue-session", "--client", "codex", "--redis-url", "redis://x"] },
   ])("a registry-named decoy argv never pins the sidecar: $label", async ({ argv }) => {
     const fixture = makeFixture({}, {
       "thread/read": times(2, ok(idleThread("t1"))),
@@ -609,6 +609,33 @@ describe("retire-thread guards (injected fakes)", () => {
     expect(result.outcome).toBe("refused");
     expect(problemsOf(fixture.events[1])).toContain("mailbox sidecar was not positively pinned before archive");
     expect(archiveCalls(fixture)).toBe(0);
+  });
+
+  it.each([
+    { label: "conflicting client", args: ["--client", "codex", "--client", "pi", "--redis-url", "redis://x"] },
+    { label: "identical client", args: ["--client", "codex", "--redis-url", "redis://x", "--client", "codex"] },
+    { label: "incomplete duplicate client", args: ["--client", "codex", "--redis-url", "redis://x", "--client"] },
+    { label: "duplicate Redis", args: ["--client", "codex", "--redis-url", "redis://x", "--redis-url", "redis://x"] },
+    { label: "missing Redis", args: ["--client", "codex"] },
+    { label: "incomplete Redis", args: ["--client", "codex", "--redis-url"] },
+    { label: "unknown option", args: ["--client", "codex", "--redis-url", "redis://x", "--unknown", "value"] },
+    { label: "equals client", args: ["--client=codex", "--redis-url", "redis://x"] },
+    { label: "equals Redis", args: ["--client", "codex", "--redis-url=redis://x"] },
+    { label: "wrong client", args: ["--client", "pi", "--redis-url", "redis://x"] },
+    { label: "invalid Redis", args: ["--client", "codex", "--redis-url", "redis:///x.sock"] },
+  ])("registry-named rejected native options refuse before archive: $label", async ({ args }) => {
+    for (const command of [["node", "/opt/gptqueue/bin/gptqueue-session"], ["/opt/gptqueue/bin/gptqueue-session"]]) {
+      const fixture = makeFixture({}, {
+        "thread/read": times(2, ok(idleThread("t1"))),
+        "thread/archive": [{ run: () => { throw new Error("archive must not be reached"); } }],
+      });
+      fixture.pins.set(8100, { ...SIDE_PIN, argv: [...command, ...args] });
+      const result = await fixture.run();
+      expect(result.exitCode).toBe(3);
+      expect(result.outcome).toBe("refused");
+      expect(problemsOf(fixture.events[1])).toContain("mailbox sidecar was not positively pinned before archive");
+      expect(archiveCalls(fixture)).toBe(0);
+    }
   });
 
   it("loaded-list pagination: follows cursors and never assumes the first 500 entries are complete", async () => {
