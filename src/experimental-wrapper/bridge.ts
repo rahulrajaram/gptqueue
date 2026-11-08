@@ -118,9 +118,22 @@ const registerBoundTools = (
     WRITABLE,
     async (params) =>
       safeToolCall(async () => {
-        // A provisional mailbox with outbound correlations cannot be silently renamed on bind.
-        await redisClient.adapterConnection.set(SESSION_KEYS.outboundActivity(redisClient.requireRegistered()), "1", "EX", 86_400);
-        const result = await sendMessage(redisClient, boundSendMessageSchema.parse(params));
+        // Normalize first: the fence decision uses the validated message type,
+        // so malformed input is rejected before any marker is touched.
+        const message = boundSendMessageSchema.parse(params);
+        if (message.type === "task") {
+          // A provisional mailbox with outbound correlations cannot be silently renamed on bind.
+          await redisClient.adapterConnection.set(SESSION_KEYS.outboundActivity(redisClient.requireRegistered()), "1", "EX", 86_400);
+        } else {
+          // Bounded, non-waking audit of the fence exemption: stage and code
+          // only, never body or session material.
+          await new InboxEvents(redisClient.adapterConnection).trace(redisClient.requireRegistered(), {
+            stage: "outbound_fence_skipped",
+            timestamp: new Date().toISOString(),
+            code: `message_type=${message.type}`,
+          });
+        }
+        const result = await sendMessage(redisClient, message);
         const payload = result.structuredContent as Record<string, unknown> | undefined;
         await traceReplySent(new InboxEvents(redisClient.adapterConnection), redisClient.requireRegistered(), payload, params);
         return result;

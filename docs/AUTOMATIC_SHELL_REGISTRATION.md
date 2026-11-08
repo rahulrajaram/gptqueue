@@ -434,6 +434,46 @@ Exit codes:
 - 2: a connection or other error. After `--apply yes` the outcome is then
   unknown, so run the dry run again before retrying.
 
+### Pre-update and recovery procedure for a refused mailbox
+
+Before restarting or updating a runtime whose mailbox has work in flight:
+
+1. Record the exact owner state: `get_runtime_status` for the runtime UUID and
+   current mailbox, plus the metadata-only IDs of queued and claimed messages
+   (IDs and counts, never contents).
+2. Stop taking new claims for that mailbox; let in-flight claims run or expire
+   through the normal protocol.
+3. Reply to and acknowledge only FINISHED work. Never acknowledge an incomplete
+   task just to drain the mailbox before a restart.
+
+After the restart, inspect `get_runtime_status` before triggering any check
+replies: a legacy client may still fence replies. If the replacement connection
+is refused adoption (`dispatcher: "off"`, `readiness: "awaiting_adoption"`), an
+operator can repoint the mapping after the guards are disclosed and confirmed
+holding:
+
+```sh
+node scripts/gptqueue-doctor.mjs remap-runtime-mailbox \
+  --redis-url redis://127.0.0.1:6379/0 --client codex \
+  --runtime-id EXACT_OWNER_RUNTIME_UUID --from MAPPED_MAILBOX --to CURRENT_MAILBOX
+```
+
+Run the dry run first, then repeat with `--apply yes` only with explicit
+operator approval; the atomic apply and its `operator_remap` audit event are the
+receipt. The remap makes CURRENT canonical but moves no old messages, claims or
+reply correlations: old work remains at OLD, and normal expiry recovery is OLD.
+Ask original senders to supersede or resend to the current address. Do not
+acknowledge another owner's tasks, reuse credentials, or edit Redis keys by
+hand.
+
+Confirm afterwards that the binding names the exact runtime UUID, that the
+dispatcher is on (`dispatcher: "on"`), and that the API reports
+`activation_ready: true` — not a readiness value of `ready`. Record whether the
+canary arrived while the runtime was idle or during an active turn: active
+turns can consume mail too, so consumption during an active turn does not prove
+an idle automatic wake. Note the non-task exemption only prevents the 24-hour
+reply fence; it does not release unexpired claims.
+
 ### Registration audit: proving who registered
 
 Every committed registration of a new session (any runtime: the Claude MCP server, registered
@@ -502,3 +542,21 @@ an audit-emitting release throughout it.
 
 Exit codes: 0 success, 2 invalid arguments, 4 Redis unavailable (or the query failed).
 `bin/gptqueue-doctor registrations --help` prints the same summary.
+
+## Outbound fence scoping (bound wrapper `send_message`)
+
+The bound experimental wrapper keeps a 24-hour pre-send outbound fence
+(`gptq:outbound-activity:<agent>`, set before `send_message` runs) so a mailbox
+with outbound correlations is never silently renamed during identity recovery.
+
+Only a normalized **task** send creates that fence. The message is validated and
+normalized before the marker is touched, so malformed input is rejected without
+writing anything. A send that omits `type` defaults to `task`, so it is
+normalized as a task and sets the fence like any other task send. An explicit
+`result`, `error`, `status` or `ping` send never sets the fence and never clears
+or refreshes an existing one. Each exempt send writes one
+bounded, non-waking trace entry (`stage: outbound_fence_skipped`,
+`code: message_type=<type>`) to the agent's inbox trace stream; the entry
+carries no message body or session material and is capped by the trace stream's
+existing MAXLEN. Failed or ambiguous task sends keep the fence (conservative);
+all ownership, adoption, claim and admission guards are unchanged.

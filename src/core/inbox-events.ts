@@ -3,7 +3,7 @@ import type { QueueMessage } from "./types.js";
 import { SESSION_KEYS } from "./keys.js";
 
 export type InboxEventType = QueueMessage["type"];
-export type InboxTraceStage = "activation_requested" | "activation_deferred" | "turn_started" | "activation_queued" | "activation_failed" | "activation_rearmed" | "task_claimed" | "task_acknowledged" | "message_acknowledged" | "reply_sent" | "runtime_bound" | "runtime_unbound";
+export type InboxTraceStage = "activation_requested" | "activation_deferred" | "turn_started" | "activation_queued" | "activation_failed" | "activation_rearmed" | "task_claimed" | "task_acknowledged" | "message_acknowledged" | "reply_sent" | "outbound_fence_skipped" | "runtime_bound" | "runtime_unbound";
 export type InboxTraceFields = Readonly<{ stage: InboxTraceStage; timestamp: string; message_id?: string; in_reply_to?: string; claim_id?: string; operation_id?: string; runtime_id?: string; turn_id?: string; code?: string }>;
 const stream = SESSION_KEYS.inboxEvents;
 const traceStream = SESSION_KEYS.inboxTrace;
