@@ -1391,7 +1391,7 @@ describe("list_my_claims (f-2979)", () => {
     const second = expectOk(await store.claim({ actor_id: actor, session_id: session, max_batch: 3, ttl_seconds: 300, now: T0 }));
     const all = await store.activeClaimsFor({ actor_id: actor, session_id: session, now: T0 });
     // Index order is by expiry score then member id, not claim order; assert as a set.
-    expect([...all.map((claim) => claim.claim_id)].sort()).toEqual([first.claim!.claim_id, second.claim!.claim_id].sort());
+    expect(all.map((claim) => claim.claim_id).sort()).toEqual([first.claim!.claim_id, second.claim!.claim_id].sort());
     expect(all.map((claim) => claim.tasks.length)).toEqual([1, 1]);
     // Wrong session sees nothing; past expiry sees nothing.
     expect(await store.activeClaimsFor({ actor_id: actor, session_id: "other", now: T0 })).toEqual([]);
