@@ -669,9 +669,12 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
   /** Redis server TIME in epoch ms, the expiry clock under ClaimClock "redis". Fail closed on an unexpected reply shape. */
   private async redisServerTimeMs(): Promise<number> {
     const reply = await this.redis.time();
-    const nowMs = Number(reply?.[0]) * 1_000 + Math.floor(Number(reply?.[1]) / 1_000);
-    if (!Array.isArray(reply) || reply.length < 2 || !Number.isFinite(nowMs)) {
+    if (!Array.isArray(reply) || reply.length < 2) {
       throw new Error(`unexpected Redis TIME reply: ${JSON.stringify(reply)}`);
+    }
+    const nowMs = Number(reply[0]) * 1_000 + Math.floor(Number(reply[1]) / 1_000);
+    if (!Number.isFinite(nowMs)) {
+      throw new Error(`non-numeric Redis TIME reply: ${JSON.stringify(reply)}`);
     }
     return nowMs;
   }
