@@ -37,6 +37,7 @@ import { acknowledgeMessagesSchema, acknowledgeMessages } from "../mcp-server/to
 import { renewClaimSchema, renewClaim } from "../mcp-server/tools/renew-claim.js";
 import { dlqStatusSchema, dlqStatus } from "../mcp-server/tools/dlq-status.js";
 import { dlqRequeueSchema, dlqRequeue } from "../mcp-server/tools/dlq-requeue.js";
+import { listMyClaimsSchema, listMyClaims } from "../mcp-server/tools/list-my-claims.js";
 import { stableToolError } from "../mcp-server/tool-result.js";
 import { InboxEvents } from "../core/inbox-events.js";
 import { traceAcknowledged, traceClaimed, traceMessagesAcknowledged, traceReplySent } from "../mcp-server/tool-trace.js";
@@ -245,5 +246,13 @@ export function registerTools(server: McpServer, redisClient: RedisClient): void
     dlqRequeueSchema.shape,
     WRITABLE,
     async (params) => safeToolCall(() => dlqRequeue(redisClient, dlqRequeueSchema.parse(params)))
+  );
+
+  server.tool(
+    "list_my_claims",
+    "[safety: readonly] List the calling session's own outstanding (non-expired) claims with claim_id, lease timing and task count — the recovery surface after compaction, so a lost claim_id can still be renewed, replied to and acknowledged. No task payloads are returned.",
+    listMyClaimsSchema.shape,
+    READ_ONLY,
+    async (params) => safeToolCall(() => listMyClaims(redisClient, listMyClaimsSchema.parse(params)))
   );
 }

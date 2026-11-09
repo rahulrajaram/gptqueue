@@ -8,6 +8,7 @@ import { AgentDiagnostics } from "../core/agent-diagnostics.js";
 import { SESSION_KEYS } from "../core/keys.js";
 import { discoveryPagingShape } from "../core/agent-discovery.js";
 import { dlqStatus, dlqStatusSchema } from "../mcp-server/tools/dlq-status.js";
+import { listMyClaims, listMyClaimsSchema } from "../mcp-server/tools/list-my-claims.js";
 
 /** Machine-readable MCP annotations mirroring the prose [safety: ...] prefixes. */
 const READ_ONLY = { readOnlyHint: true } as const;
@@ -26,6 +27,7 @@ export const agentDetailsSchema = z.object({ agent: z.string().min(1).max(500).o
 export const deliveryStatusSchema = agentDetailsSchema.extend({ message_id: z.string().min(1).max(200) }).strict();
 /** Caller-bound: the bound mailbox only, never a session_id or target agent. */
 export const boundDlqStatusSchema = dlqStatusSchema.omit({ session_id: true }).strict();
+export const boundListMyClaimsSchema = listMyClaimsSchema.omit({ session_id: true }).strict();
 
 /** Additive tools: original messaging/discovery schemas retain their contracts. */
 export const registerDiagnosticTools = (server: McpServer, client: RedisClient, runtime: RuntimeTools): void => {
@@ -73,6 +75,13 @@ export const registerDiagnosticTools = (server: McpServer, client: RedisClient, 
     inputSchema: boundDlqStatusSchema, annotations: READ_ONLY,
   }, async (params) => {
     try { return await dlqStatus(client, boundDlqStatusSchema.parse(params)); }
+    catch (error) { return stableToolError(error); }
+  });
+  server.registerTool("list_my_claims", {
+    description: "[safety: readonly] List this connection's own outstanding (non-expired) claims with claim_id, lease timing and task count — the recovery surface after compaction, so a lost claim_id can still be renewed, replied to and acknowledged. No task payloads are returned.",
+    inputSchema: boundListMyClaimsSchema, annotations: READ_ONLY,
+  }, async (params) => {
+    try { return await listMyClaims(client, boundListMyClaimsSchema.parse(params)); }
     catch (error) { return stableToolError(error); }
   });
 };

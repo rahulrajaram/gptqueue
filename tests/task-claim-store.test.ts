@@ -1362,3 +1362,54 @@ describe("dead-letter queue (tranche 2)", () => {
   });
 });
 
+
+// f-2979: list_my_claims recovery surface.
+describe("list_my_claims (f-2979)", () => {
+  let redis: Redis;
+  let store: TaskClaimStore;
+  let client: RedisClient;
+  const actor = "claims-list-act";
+  const session = "session-runtime";
+  const callerAgent = "list-claims-sender";
+
+  beforeEach(async () => {
+    redis = new Redis(TEST_REDIS_URL, { maxRetriesPerRequest: 3 });
+    await flushTestKeys(redis);
+    store = new TaskClaimStore(redis, { clock: "caller" });
+    client = new RedisClient(null, TEST_REDIS_URL);
+  });
+  afterEach(async () => {
+    await flushTestKeys(redis);
+    await client.forceDisconnect();
+    await redis.quit();
+  });
+
+  it("activeClaimsFor returns every non-expired owned claim in index order", async () => {
+    await pushTasks(redis, actor, ["a"]);
+    const first = expectOk(await store.claim({ actor_id: actor, session_id: session, max_batch: 3, ttl_seconds: 300, now: T0 }));
+    await pushTasks(redis, actor, ["b"]);
+    const second = expectOk(await store.claim({ actor_id: actor, session_id: session, max_batch: 3, ttl_seconds: 300, now: T0 }));
+    const all = await store.activeClaimsFor({ actor_id: actor, session_id: session, now: T0 });
+    // Index order is by expiry score then member id, not claim order; assert as a set.
+    expect([...all.map((claim) => claim.claim_id)].sort()).toEqual([first.claim!.claim_id, second.claim!.claim_id].sort());
+    expect(all.map((claim) => claim.tasks.length)).toEqual([1, 1]);
+    // Wrong session sees nothing; past expiry sees nothing.
+    expect(await store.activeClaimsFor({ actor_id: actor, session_id: "other", now: T0 })).toEqual([]);
+    const later = new Date(Date.parse(T0) + 3_600_000).toISOString();
+    expect(await store.activeClaimsFor({ actor_id: actor, session_id: session, now: later })).toEqual([]);
+  });
+
+  it("lists the bound session's own claim ids with lease timing and no payloads", async () => {
+    const reg = await client.register("publisher", callerAgent, "sends");
+    const sid = sessionOf(reg);
+    await pushTasks(redis, callerAgent, ["task-payload-1"]);
+    await claimTasks(client, claimTasksSchema.parse({ session_id: sid, max_batch: 1, ttl_seconds: 300 }));
+    const { listMyClaims, listMyClaimsSchema } = await import("../src/mcp-server/tools/list-my-claims.js");
+    const result = await listMyClaims(client, listMyClaimsSchema.parse({ session_id: sid }));
+    const payload = result.structuredContent as { count: number; claims: Array<{ claim_id: string; expires_at: string; task_count: number }> };
+    expect(payload.count).toBe(1);
+    expect(payload.claims[0]!.task_count).toBe(1);
+    expect(payload.claims[0]!.claim_id).toBeTruthy();
+    expect(JSON.stringify(payload)).not.toContain("task-payload-1");
+  });
+});

@@ -615,10 +615,20 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
    * intentionally separate from `get`'s typed store_corrupt path.
    */
   async activeClaimFor(input: ActiveClaimInput): Promise<TaskClaim | null> {
+    return (await this.activeClaimsFor(input))[0] ?? null;
+  }
+
+  /**
+   * Every non-expired outstanding claim for an actor owned by the given
+   * session, in index order. Same HGETALL-free read and silent corrupt-skip
+   * policy as activeClaimFor; used by the list_my_claims recovery tool.
+   */
+  async activeClaimsFor(input: ActiveClaimInput): Promise<TaskClaim[]> {
     const members = await this.redis.zrange(CLAIM_KEYS.index(input.actor_id), 0, -1);
-    if (members.length === 0) return null;
+    if (members.length === 0) return [];
     const raws = await this.redis.hmget(CLAIM_KEYS.claims, ...members);
     const nowMs = Date.parse(input.now);
+    const claims: TaskClaim[] = [];
     for (const raw of raws) {
       if (raw === null) continue;
       const claim = this.parseTaskClaim(raw);
@@ -627,9 +637,9 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
       if (claim.session_id !== input.session_id) continue;
       const expiresMs = Date.parse(claim.expires_at);
       if (Number.isNaN(expiresMs) || nowMs >= expiresMs) continue;
-      return claim;
+      claims.push(claim);
     }
-    return null;
+    return claims;
   }
 
   /** Read one claim by id (null when absent), with a typed store_corrupt path. */

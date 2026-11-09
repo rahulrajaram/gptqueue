@@ -19,7 +19,7 @@ export const OPTIONAL_RUNTIME_TOOL_NAMES = Object.freeze(["acknowledge_messages"
 
 /** Read-mostly diagnostics; useful but optional. */
 export const DIAGNOSTIC_TOOL_NAMES = Object.freeze([
-  "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile", "dlq_status",
+  "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile", "dlq_status", "list_my_claims",
 ] as const);
 
 /** Every registered-shell tool, runtime first. */

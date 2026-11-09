@@ -23,6 +23,7 @@ import { boundReceiveMessageSchema } from "../experimental-wrapper/bridge.js";
 import {
   agentDetailsSchema,
   boundDlqStatusSchema,
+  boundListMyClaimsSchema,
   deliveryStatusSchema,
   findAgentsSchema,
 } from "./diagnostic-tools.js";
@@ -261,6 +262,10 @@ Object.freeze({
   gptqueue_dlq_requeue: forwarded(
     "gptqueue_dlq_requeue", "dlq_requeue",
     "[safety: writable] Restore one of this bound session's own dead-lettered messages to its inbox with a fresh recovery budget.", boundSchema(dlqRequeueSchema),
+  ),
+  gptqueue_list_my_claims: forwarded(
+    "gptqueue_list_my_claims", "list_my_claims",
+    "[safety: readonly] List this bound session's own outstanding claims (claim_id, lease timing, task count) to recover a claim after compaction.", boundListMyClaimsSchema,
   ),
 });
 
