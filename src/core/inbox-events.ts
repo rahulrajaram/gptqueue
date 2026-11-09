@@ -62,6 +62,19 @@ export const replyOwners = async (redis: Pick<Redis, "mget">, agent: string, mes
   return Object.freeze(keys.map((_, index) => ownerAt.get(index) ?? null));
 };
 
+/**
+ * Whole-queue wake eligibility: the dispatcher's rule (wakesRecipient)
+ * over every queue entry, not just a --list slice. A --wakes-only watcher
+ * wakes only when this is positive (status mail never counts).
+ */
+export const wakeScan = async (redis: Pick<Redis, "lrange" | "mget">, agent: string): Promise<Readonly<{ unclaimed: number; wakeEligible: number }>> => {
+  const raw = await redis.lrange(SESSION_KEYS.queue(agent), 0, -1);
+  const messages = raw.flatMap(parseQueueEntry).flatMap((message) => message === null ? [] : [message]);
+  const owners = await replyOwners(redis, agent, messages);
+  const wakeEligible = messages.filter((message, index) => wakesRecipient(agent, message, owners[index] ?? null)).length;
+  return Object.freeze({ unclaimed: raw.length, wakeEligible });
+};
+
 export class InboxEvents {
   constructor(private readonly redis: Redis) {}
 

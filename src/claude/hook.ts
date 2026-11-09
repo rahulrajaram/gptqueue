@@ -198,9 +198,9 @@ export const renderAsk = (decision: AskDecision): string | null => {
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 
-/** Name-free: the watcher resolves this session's registered name itself from the session record. */
+/** Name-free: the watcher resolves this session's registered name itself from the session record. --wakes-only: only mail that would wake the session (a task, or a result/error answering its own request) exits the watcher; status mail batches. */
 export const watchCommandFor = (binDir: string, claudeSessionId: string): string =>
-  `${shellQuote(join(binDir, "gptqueue-inbox-peek"))} --watch --session ${shellQuote(claudeSessionId)}`;
+  `${shellQuote(join(binDir, "gptqueue-inbox-peek"))} --watch --wakes-only --session ${shellQuote(claudeSessionId)}`;
 
 type RawHookJson = { session_id?: unknown; cwd?: unknown; stop_hook_active?: unknown; tool_name?: unknown };
 

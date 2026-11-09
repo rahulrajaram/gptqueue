@@ -6,8 +6,11 @@
  *       list the unclaimed messages (queue order, at most K, default 50, max
  *       500) and the open claims, marking the mail that would wake the
  *       recipient (the dispatcher's own rule); see inbox-list.ts.
- *   gptqueue-inbox-peek --watch [--name N] [--session ID] [--timeout S] [--block-ms MS]
- *       wait until the inbox is non-empty, print one JSON line, exit 0.
+ *   gptqueue-inbox-peek --watch [--name N] [--session ID] [--timeout S] [--block-ms MS] [--wakes-only]
+ *       wait until the inbox is non-empty (or, with --wakes-only, until mail
+ *       would wake the recipient: a task, or a result/error answering this
+ *       agent's own outstanding request — the same rule --list marks with
+ *       "wakes"), print one JSON line, exit 0.
  *       Without --name it resolves this session's registered name from the
  *       session record, waiting up to GPTQ_CLAUDE_RECORD_WAIT_MS (default 40000).
  *       Exit 3 on timeout (0 = none), 4 when Redis stays unreachable (session mode only;
@@ -33,6 +36,7 @@
 import { Redis } from "ioredis";
 import { rmSync } from "node:fs";
 import { CLAIM_KEYS, SESSION_KEYS } from "../core/keys.js";
+import { wakeScan } from "../core/inbox-events.js";
 import { formatListing, LIST_LIMIT, listInbox } from "./inbox-list.js";
 import { confirmLegacyLiveness, isConfirmed, probeClient, probeInbox, recordWaitMs, resolveIdentity, waitForIdentity, type Identity } from "./inbox-probe.js";
 import { resolveAgentName } from "./agent-name.js";
@@ -45,8 +49,11 @@ const USAGE = `Non-consuming gptqueue inbox check; never pops a message.
       and open claims. "wakes" marks mail that would wake the recipient: a
       task, or a result/error answering its own outstanding request.
       Status mail never wakes. --list cannot be combined with --watch.
-  gptqueue-inbox-peek --watch [--name N] [--session ID] [--interval S] [--timeout S]
-      wait until the inbox is non-empty, print one JSON line, exit 0.
+  gptqueue-inbox-peek --watch [--name N] [--session ID] [--interval S] [--timeout S] [--wakes-only]
+      wait until the inbox is non-empty (with --wakes-only: until mail would
+      wake the recipient — a task, or a result/error answering this agent's
+      own outstanding request; status mail stays unclaimed and is batched at
+      the next real wake), print one JSON line, exit 0.
       Exit 3 on timeout (0 = no timeout), 2 on bad arguments, 6 when this
       session's Claude process is gone.
       With --session, start it only with the session's background-task
@@ -57,10 +64,10 @@ const USAGE = `Non-consuming gptqueue inbox check; never pops a message.
   --dir D selects the inbox derived from D, ignoring this session's record.
 `;
 
-type PeekArgs = Readonly<{ intervalSec: number; name: string | null; dir: string | null; watch: boolean; json: boolean; session: string | null; timeoutSec: number; blockMs: number; list: boolean; limit: number }>;
+type PeekArgs = Readonly<{ intervalSec: number; name: string | null; dir: string | null; watch: boolean; json: boolean; session: string | null; timeoutSec: number; blockMs: number; list: boolean; limit: number; wakesOnly: boolean }>;
 
 export const parsePeekArgs = (argv: readonly string[]): PeekArgs | string => {
-  const out = { intervalSec: 30, name: null as string | null, dir: null as string | null, watch: false, json: false, session: null as string | null, timeoutSec: 0, blockMs: 5000, list: false, limit: null as number | null };
+  const out = { intervalSec: 30, name: null as string | null, dir: null as string | null, watch: false, json: false, session: null as string | null, timeoutSec: 0, blockMs: 5000, list: false, limit: null as number | null, wakesOnly: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => { const v = argv[++i]; if (v === undefined) throw new Error(`${arg} needs a value`); return v; };
@@ -75,6 +82,7 @@ export const parsePeekArgs = (argv: readonly string[]): PeekArgs | string => {
         case "--block-ms": out.blockMs = Number(value()); break;
         case "--interval": out.intervalSec = Number(value()); break; // legacy outage retry cadence; the watch itself is event-driven
         case "--list": out.list = true; break;
+        case "--wakes-only": out.wakesOnly = true; break;
         case "--limit": { const v = value(); out.limit = /^\d+$/.test(v) ? Number(v) : NaN; break; }
         case "-h": case "--help": return "help";
         default: return `unknown argument: ${String(arg)}`;
@@ -83,6 +91,8 @@ export const parsePeekArgs = (argv: readonly string[]): PeekArgs | string => {
   }
   if (!Number.isFinite(out.intervalSec) || out.intervalSec <= 0 || !Number.isFinite(out.timeoutSec) || out.timeoutSec < 0 || !Number.isFinite(out.blockMs) || out.blockMs < 10) return "invalid --timeout or --block-ms";
   if (out.list && out.watch) return "--list cannot be combined with --watch";
+  if (out.wakesOnly && !out.watch) return "--wakes-only needs --watch";
+  if (out.wakesOnly && out.list) return "--wakes-only cannot be combined with --list";
   if (out.limit !== null && !out.list) return "--limit needs --list";
   const limit = out.limit ?? LIST_LIMIT.default;
   if (!Number.isInteger(limit) || limit < 1 || limit > LIST_LIMIT.max) return `invalid --limit: a positive integer up to ${LIST_LIMIT.max}`;
@@ -116,7 +126,7 @@ return { redis.call('LLEN', KEYS[1]), redis.call('ZCOUNT', KEYS[2], '-inf', '(' 
 `;
 
 export type WatchOutcome =
-  | Readonly<{ kind: "mail"; pending: number; expired: number }>
+  | Readonly<{ kind: "mail"; pending: number; expired: number; wakeEligible: number }>
   | Readonly<{ kind: "orphaned" }>
   /** The watcher's launcher is no longer its parent (started with & or disown). */
   | Readonly<{ kind: "detached" }>
@@ -124,7 +134,7 @@ export type WatchOutcome =
   | Readonly<{ kind: "unavailable"; message: string }>;
 
 /** Wait for unclaimed mail. Non-consuming: only XREVRANGE, LLEN and XREAD. */
-export const watchInbox = async (url: string, agent: string, opts: Readonly<{ timeoutSec: number; blockMs: number; signal?: AbortSignal; giveUpAfterMs: number | null; retryMs: number; ownerAlive?: () => boolean; launcherAttached?: () => boolean }>): Promise<WatchOutcome> => {
+export const watchInbox = async (url: string, agent: string, opts: Readonly<{ timeoutSec: number; blockMs: number; wakesOnly?: boolean; signal?: AbortSignal; giveUpAfterMs: number | null; retryMs: number; ownerAlive?: () => boolean; launcherAttached?: () => boolean }>): Promise<WatchOutcome> => {
   const deadline = opts.timeoutSec > 0 ? Date.now() + opts.timeoutSec * 1000 : Infinity;
   const redis = new Redis(url, { maxRetriesPerRequest: 1, connectTimeout: 2000, retryStrategy: (n) => Math.min(n * 200, 1000) });
   redis.on("error", () => undefined);
@@ -141,7 +151,16 @@ export const watchInbox = async (url: string, agent: string, opts: Readonly<{ ti
         // Lua call, so a message is either counted or wakes the XREAD.
         after ??= await latestId(redis, agent);
         const [pending, expired] = await redis.eval(WATCH_SCRIPT, 2, SESSION_KEYS.queue(agent), CLAIM_KEYS.index(agent)) as [number, number];
-        if (pending > 0 || expired > 0) return { kind: "mail", pending, expired };
+        // --wakes-only narrows "mail" to what would wake the recipient (the
+        // --list rule, over the whole queue): status mail stays unclaimed and
+        // is batched at the next real wake. An expired claim still wakes
+        // (COR-F3): nothing else recovers a replaced session's expired claims
+        // while this session is idle, so ignoring them would strand the task.
+        if (pending > 0 || expired > 0) {
+          if (!opts.wakesOnly || expired > 0) return { kind: "mail", pending, expired, wakeEligible: pending };
+          const scan = await wakeScan(redis, agent);
+          if (scan.wakeEligible > 0) return { kind: "mail", pending: scan.unclaimed, expired, wakeEligible: scan.wakeEligible };
+        }
         const remaining = deadline - Date.now();
         if (remaining <= 0) return { kind: "timeout" };
         const result = await redis.xread("BLOCK", Math.max(1, Math.min(opts.blockMs, remaining)), "STREAMS", SESSION_KEYS.inboxEvents(agent), after) as [string, [string, string[]][]][] | null;
@@ -223,6 +242,7 @@ export const runPeek = async (argv: readonly string[], env: NodeJS.ProcessEnv = 
     writeWatcherPid(path, {
       pid: process.pid, start: readProcess(process.pid)?.start ?? "", agent: identity.agent, claude_pid: owner?.pid ?? null, claude_start: owner?.start ?? null,
       launcher_pid: launcher?.pid ?? null, launcher_start: launcher?.start ?? null,
+      ...(args.wakesOnly ? { mode: "wakes-only" as const } : {}),
     });
     pidPath = path;
   }
@@ -231,9 +251,9 @@ export const runPeek = async (argv: readonly string[], env: NodeJS.ProcessEnv = 
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
   try {
-    const outcome = await watchInbox(url, identity.agent, { timeoutSec: args.timeoutSec, blockMs: args.blockMs, signal: controller.signal, ...outagePolicy({ name: explicitName, intervalSec: args.intervalSec }), ...(owner ? { ownerAlive: () => processAlive(owner.pid, owner.start) } : {}), ...(launcher !== null ? { launcherAttached: () => launcherIsParent(process.pid, launcher) } : {}) });
+    const outcome = await watchInbox(url, identity.agent, { timeoutSec: args.timeoutSec, blockMs: args.blockMs, ...(args.wakesOnly ? { wakesOnly: true } : {}), signal: controller.signal, ...outagePolicy({ name: explicitName, intervalSec: args.intervalSec }), ...(owner ? { ownerAlive: () => processAlive(owner.pid, owner.start) } : {}), ...(launcher !== null ? { launcherAttached: () => launcherIsParent(process.pid, launcher) } : {}) });
     switch (outcome.kind) {
-      case "mail": process.stdout.write(`${JSON.stringify({ agent: identity.agent, pending: outcome.pending, ...(outcome.expired > 0 ? { expired_claims: outcome.expired } : {}), at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z") })}\n`); return 0;
+      case "mail": process.stdout.write(`${JSON.stringify({ agent: identity.agent, pending: outcome.pending, ...(outcome.wakeEligible !== outcome.pending ? { wake_eligible: outcome.wakeEligible } : {}), ...(outcome.expired > 0 ? { expired_claims: outcome.expired } : {}), at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z") })}\n`); return 0;
       case "orphaned": process.stdout.write(`${JSON.stringify({ agent: identity.agent, error: "claude_process_gone", message: `Claude process ${owner?.pid ?? "?"} that this watcher serves has exited` })}\n`); return 6;
       case "detached": process.stdout.write(orphanedLine(identity.agent)); return 7;
       case "timeout": process.stdout.write(`${JSON.stringify({ agent: identity.agent, pending: 0, timeout: true })}\n`); return 3;

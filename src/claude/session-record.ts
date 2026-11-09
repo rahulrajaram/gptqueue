@@ -232,6 +232,8 @@ export const watcherPidPath = (dir: string, claudeSessionId: string): string =>
 export type WatcherPid = Readonly<{
   pid: number; start: string; agent: string; claude_pid: number | null; claude_start: string | null;
   launcher_pid?: number | null; launcher_start?: string | null;
+  /** "wakes-only" when the watcher runs --wakes-only; absent for the naive watcher. Mode never affects the Stop gate: both count as running. */
+  mode?: string;
 }>;
 
 export const readWatcherPid = (path: string): WatcherPid | null => {
@@ -244,6 +246,7 @@ export const readWatcherPid = (path: string): WatcherPid | null => {
       claude_start: typeof parsed.claude_start === "string" ? parsed.claude_start : null,
       launcher_pid: typeof parsed.launcher_pid === "number" ? parsed.launcher_pid : null,
       launcher_start: typeof parsed.launcher_start === "string" ? parsed.launcher_start : null,
+      mode: typeof parsed.mode === "string" ? parsed.mode : undefined,
     });
   } catch { return null; }
 };

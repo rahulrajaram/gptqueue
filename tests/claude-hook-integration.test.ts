@@ -127,7 +127,7 @@ describe("Claude hook against Redis", { timeout: 300_000 }, () => {
     const pidfile = watcherPidPath(runtime, sid);
 
     const noWatcher = await hook("stop", { session_id: sid });
-    expect(JSON.parse(noWatcher.stdout).reason).toMatch(/no background inbox watcher[\s\S]*gptqueue-inbox-peek' --watch --session '[^']+' Then stop\.$/);
+    expect(JSON.parse(noWatcher.stdout).reason).toMatch(/no background inbox watcher[\s\S]*gptqueue-inbox-peek' --watch --wakes-only --session '[^']+' Then stop\.$/);
 
     const child = spawn(join(BIN, "gptqueue-inbox-peek"), ["--watch", "--name", me.name, "--session", sid], { env, stdio: ["ignore", "pipe", "pipe"] });
     children.push(child);

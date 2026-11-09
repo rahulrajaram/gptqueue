@@ -70,7 +70,7 @@ describe("ID-2/WK-1: SessionStart and the watcher before the MCP record exists",
     const text = JSON.parse(out.stdout).hookSpecificOutput.additionalContext as string;
     expect(text).toMatch(/UNCONFIRMED/);
     expect(text).not.toMatch(/unclaimed/);
-    expect(text).toMatch(/gptqueue-inbox-peek' --watch --session '[^']+'$/);
+    expect(text).toMatch(/gptqueue-inbox-peek' --watch --wakes-only --session '[^']+'$/);
     expect(text).not.toContain("--name");
   });
 
