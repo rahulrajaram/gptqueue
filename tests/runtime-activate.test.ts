@@ -301,11 +301,13 @@ describe("activateWithReadiness", () => {
     const effects = makeEffects([{ statusCode: null, body: "refused" }]);
     const realFetch = effects.fetchHealth;
     effects.fetchHealth = async (...a) => { const r = await realFetch(...a); rmSync(join(prefix, "current")); return r; };
-    const { now } = fakeClock(1_000);
+    const { now } = fakeClock(100);
     const result = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now, sleep: noSleep, deadlineMs: 500 });
     expect(result.error).toBe("readiness_deadline");
     expect(result.concurrent).toBeUndefined(); // a cleared pointer has no owner to defer to
-    expect(result.rollback).toMatchObject({ current: "old", previous: "new", restart: { ok: true }, pointerClearedDuringReadiness: true });
+    expect(result.readiness.attempts).toBeGreaterThan(0); // the clear happened during a real probe
+    expect(result.rollback).toMatchObject({ current: "old", restart: { ok: true }, pointerClearedDuringReadiness: true });
+    expect(result.rollback.previous).toBeUndefined(); // the cleared pointer cannot become previous
     expect(rr.status(prefix).current).toBe("old");
   });
 });
