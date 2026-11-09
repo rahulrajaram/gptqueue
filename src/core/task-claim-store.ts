@@ -666,10 +666,14 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
     return this.clock === "caller" ? Date.parse(now) : "";
   }
 
-  /** Redis server TIME in epoch ms, the expiry clock under ClaimClock "redis". */
+  /** Redis server TIME in epoch ms, the expiry clock under ClaimClock "redis". Fail closed on an unexpected reply shape. */
   private async redisServerTimeMs(): Promise<number> {
-    const [seconds = 0, microseconds = 0] = await this.redis.time();
-    return seconds * 1_000 + Math.floor(microseconds / 1_000);
+    const reply = await this.redis.time();
+    const nowMs = Number(reply?.[0]) * 1_000 + Math.floor(Number(reply?.[1]) / 1_000);
+    if (!Array.isArray(reply) || reply.length < 2 || !Number.isFinite(nowMs)) {
+      throw new Error(`unexpected Redis TIME reply: ${JSON.stringify(reply)}`);
+    }
+    return nowMs;
   }
 
   /** Parse and deeply freeze a stored claim; null when malformed. */
