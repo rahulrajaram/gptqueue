@@ -180,6 +180,20 @@ export async function activateWithReadiness(options) {
     // journal starts before the failed attempt to capture that attempt itself
     // and is labeled as such — never presented as the new release's own log.
     const journal = { ...effects.journal(service, startWall.toISOString()), window: "pre_restart_attempt" };
+    // A concurrent activation that moved the pointer while our restart was
+    // failing owns it now; rolling back would displace its release. (Check-
+    // then-act is best-effort without a prefix lock, as on the readiness path.)
+    const failCurrent = status(prefix).current;
+    if (failCurrent !== id && failCurrent !== undefined) {
+      return Object.freeze({
+        activation,
+        restart: { ok: false, error: error.message },
+        readiness: { ok: false, attempts: 0, lastReason: "restart_failed", elapsedMs: now() - startAtMs },
+        journal,
+        concurrent: { expected: id, actual: failCurrent },
+        error: "concurrent_pointer_change",
+      });
+    }
     const rolledBack = rollbackAndRestart(prefix, service, effects);
     return Object.freeze({ activation, restart: { ok: false, error: error.message }, readiness: { ok: false, attempts: 0, lastReason: "restart_failed", elapsedMs: now() - startAtMs }, journal, rollback: rolledBack, error: "restart_failed" });
   }

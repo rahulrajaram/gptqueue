@@ -3,7 +3,7 @@
 //
 //   install-runtime.mjs install  [--prefix DIR] [--source DIR] [--allow-dirty] [--init-bound-ms N] [--hook-bound-ms N] [--no-activate]
 //   install-runtime.mjs activate --id ID [--prefix DIR] [--expect-current ID] [--service UNIT] [--health-url URL]
-//                                [--deadline-ms N] [--interval-ms N] [--journal-out FILE] [--json]
+//                                [--deadline-ms N] [--interval-ms N] [--journal-out FILE]
 //   install-runtime.mjs status   [--prefix DIR] [--json]
 //   install-runtime.mjs rollback [--prefix DIR]
 //   install-runtime.mjs prune    --keep N [--prefix DIR]
@@ -74,13 +74,19 @@ async function main(command) {
       });
       // result (and journal) is frozen; report the write without mutating it.
       let reported = result;
-      if (values["journal-out"] !== undefined && result.journal?.text !== undefined) {
-        try {
-          writeFileSync(values["journal-out"], result.journal.text);
-          reported = { ...result, journal: { ...result.journal, writtenTo: values["journal-out"] } };
-        } catch (error) {
-          // A failed evidence write must not mask the activation outcome.
-          reported = { ...result, journalWriteError: String(error?.message ?? error) };
+      if (values["journal-out"] !== undefined) {
+        if (result.journal?.text !== undefined) {
+          try {
+            writeFileSync(values["journal-out"], result.journal.text);
+            reported = { ...result, journal: { ...result.journal, writtenTo: values["journal-out"] } };
+          } catch (error) {
+            // A failed evidence write must not mask the activation outcome.
+            reported = { ...result, journalWriteError: String(error?.message ?? error) };
+          }
+        } else {
+          // The journal read itself failed; record that the requested evidence
+          // write was skipped instead of silently omitting it.
+          reported = { ...result, journalWriteSkipped: result.journal?.ok === false ? "journal read failed" : "no journal text" };
         }
       }
       if (result.error !== undefined) {

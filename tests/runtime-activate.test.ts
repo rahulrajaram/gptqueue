@@ -277,6 +277,18 @@ describe("activateWithReadiness", () => {
     expect(result.journal.ok).toBe(true);
     expect(result.rollback).toMatchObject({ failed: true, error: expect.stringContaining("no_previous") });
   });
+  it("flags a concurrent mover (never rolls back over it) when our restart itself fails", async () => {
+    const prefix = newPrefix();
+    plantRelease(prefix, "old"); plantRelease(prefix, "new"); plantRelease(prefix, "other");
+    rr.activate(prefix, "old");
+    const effects = makeEffects([]);
+    effects.restart = () => { rr.activate(prefix, "other"); throw new Error("restart exploded"); };
+    const result = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now: () => 0, sleep: noSleep });
+    expect(result.error).toBe("concurrent_pointer_change");
+    expect(result.concurrent).toEqual({ expected: "new", actual: "other" });
+    expect(result.rollback).toBeUndefined();
+    expect(rr.status(prefix).current).toBe("other");
+  });
   it("rollback restart failure still reports the pointer rollback", async () => {
     const prefix = newPrefix();
     plantRelease(prefix, "old"); plantRelease(prefix, "new");
