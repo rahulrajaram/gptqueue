@@ -4,7 +4,7 @@
 // bad, late and unreachable health; rollback with journal capture; pointer
 // preconditions; and never inferring the new release's health from the old
 // release's logs (the journal window starts at the new restart).
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -293,6 +293,20 @@ describe("activateWithReadiness", () => {
     expect(result.concurrent).toEqual({ expected: "new", actual: "other" });
     expect(result.rollback).toBeUndefined(); // the concurrent actor owns the pointer
     expect(rr.status(prefix).current).toBe("other");
+  });
+  it("rolls back when the pointer is cleared (not moved) during a failed readiness wait", async () => {
+    const prefix = newPrefix();
+    plantRelease(prefix, "old"); plantRelease(prefix, "new");
+    rr.activate(prefix, "old");
+    const effects = makeEffects([{ statusCode: null, body: "refused" }]);
+    const realFetch = effects.fetchHealth;
+    effects.fetchHealth = async (...a) => { const r = await realFetch(...a); rmSync(join(prefix, "current")); return r; };
+    const { now } = fakeClock(1_000);
+    const result = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now, sleep: noSleep, deadlineMs: 500 });
+    expect(result.error).toBe("readiness_deadline");
+    expect(result.concurrent).toBeUndefined(); // a cleared pointer has no owner to defer to
+    expect(result.rollback).toMatchObject({ current: "old", previous: "new", restart: { ok: true } });
+    expect(rr.status(prefix).current).toBe("old");
   });
 });
 

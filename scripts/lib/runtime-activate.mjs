@@ -186,15 +186,19 @@ export async function activateWithReadiness(options) {
   // checkout on the same port) is auditable from the record alone.
   const provenance = effects.unitFacts(service);
   if (!readiness.ok) {
-    // A concurrent activation may have moved the pointer while we polled; it
-    // owns the pointer now, so never roll back over it.
-    if (status(prefix).current !== id) {
+    const failCurrent = status(prefix).current;
+    // A concurrent activation that MOVED the pointer to a new id owns it now,
+    // so never roll back over it.
+    if (failCurrent !== id && failCurrent !== undefined) {
       return Object.freeze({
         activation, restart, readiness, journal, provenance,
-        concurrent: { expected: id, actual: status(prefix).current },
+        concurrent: { expected: id, actual: failCurrent },
         error: "concurrent_pointer_change",
       });
     }
+    // A pointer that was CLEARED has no owner: our activation is still the
+    // last write, so the previous release must be restored instead of
+    // leaving the dead new release serving with no pointer at all.
     const rolledBack = rollbackAndRestart(prefix, service, effects);
     return Object.freeze({ activation, restart, readiness, journal, provenance, rollback: rolledBack, error: "readiness_deadline" });
   }
