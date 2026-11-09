@@ -84,8 +84,18 @@ export const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve,
 export const systemEffects = Object.freeze({
   restart: (service) => {
     const r = spawnSync("systemctl", ["--user", "restart", service], { encoding: "utf8" });
-    if (r.status !== 0 || r.error) throw new ReleaseError("restart_failed", `systemctl --user restart ${service} failed: ${r.error?.message ?? String(r.stderr ?? "").trim()}`);
+    if (r.status !== 0 || r.error) {
+      const detail = r.error?.message ?? String(r.stderr ?? "").trim();
+      throw new ReleaseError("restart_failed", `systemctl --user restart ${service} failed: ${detail}${detail.includes("DBUS_SESSION_BUS_ADDRESS") || detail.includes("XDG_RUNTIME_DIR") ? " (export XDG_RUNTIME_DIR=/run/user/<uid>, optionally DBUS_SESSION_BUS_ADDRESS, or run from a login shell)" : ""}`);
+    }
     return { restartedAt: new Date().toISOString() };
+  },
+  /** Fail BEFORE any pointer move when the user bus is unreachable. */
+  preflight: () => {
+    if (!process.env.XDG_RUNTIME_DIR) {
+      throw new ReleaseError("bad_environment", "cannot reach the systemd user bus: XDG_RUNTIME_DIR is not set (export it, e.g. /run/user/<uid>, before activating)");
+    }
+    return { ok: true };
   },
   journal: (service, sinceIso) => {
     const r = spawnSync("journalctl", ["--user", "-u", service, "--since", sinceIso, "--no-pager", "-o", "short-iso"], { encoding: "utf8" });
@@ -135,6 +145,9 @@ export async function activateWithReadiness(options) {
   if (!before.releases.some((r) => r.id === id)) {
     throw new ReleaseError("bad_argument", `release ${id} is not present under ${prefix}`);
   }
+  // Environment preflight BEFORE any pointer move: a bare shell without the
+  // user-bus env would otherwise swap the pointer and only fail at restart.
+  effects.preflight?.();
   const activation = activate(prefix, id);
   if (!activation.changed) {
     // No pointer change: no restart, no rollback authority. Still probe health

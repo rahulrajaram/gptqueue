@@ -39,6 +39,7 @@ const makeEffects = (healthScript: Array<{ statusCode: number | null; body: stri
     restart: (service: string) => { calls.restarts.push(service); return { restartedAt: `T${calls.restarts.length}` }; },
     journal: (service: string, since: string) => { calls.journals.push({ service, since }); return { ok: true, text: journalText }; },
     unitFacts: () => ({ ok: true, text: "ExecStart=/node <data-dir>/gptqueue/current/dist/transports/http.js" }),
+    preflight: () => ({ ok: true }),
     fetchHealth: async () => { calls.healthProbes += 1; return healthScript[Math.min(healthScript.length - 1, calls.healthProbes - 1)]; },
   };
 };
@@ -203,6 +204,17 @@ describe("activateWithReadiness", () => {
     expect(result.error).toBe("already_current_unhealthy");
     expect(result.readiness.ok).toBe(false);
     expect(result.rollback).toBeUndefined(); // nothing was activated; no rollback authority
+  });
+  it("environment preflight failure aborts before any pointer move", async () => {
+    const prefix = newPrefix();
+    plantRelease(prefix, "old"); plantRelease(prefix, "new");
+    rr.activate(prefix, "old");
+    const effects = makeEffects(goodScript);
+    effects.preflight = () => { throw new (rr.ReleaseError ?? Error)("bad_environment", "XDG_RUNTIME_DIR is not set"); };
+    await expect(ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects }))
+      .rejects.toThrow(/XDG_RUNTIME_DIR/);
+    expect(rr.status(prefix).current).toBe("old"); // pointer untouched
+    expect(effects.calls.restarts).toEqual([]);
   });
   it("restart failure rolls back and reports restart_failed without probing", async () => {
     const prefix = newPrefix();
