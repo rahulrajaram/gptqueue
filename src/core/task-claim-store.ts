@@ -640,8 +640,8 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
    * session, in index order. Same HGETALL-free read and silent corrupt-skip
    * policy as activeClaimFor; used by the list_my_claims recovery tool.
    * Unlike activeClaimFor this judges expiry against the store's own clock
-   * (Redis server TIME in production) and fails closed on a bad TIME reply;
-   * callers wrap it in a typed tool error.
+   * (Redis server TIME in production), fails closed on a bad TIME reply OR an
+   * unparseable caller-clock `now`, and is wrapped in a typed tool error.
    */
   async activeClaimsFor(input: ActiveClaimInput): Promise<TaskClaim[]> {
     const members = await this.redis.zrange(CLAIM_KEYS.index(input.actor_id), 0, -1);
