@@ -305,7 +305,7 @@ describe("activateWithReadiness", () => {
     const result = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now, sleep: noSleep, deadlineMs: 500 });
     expect(result.error).toBe("readiness_deadline");
     expect(result.concurrent).toBeUndefined(); // a cleared pointer has no owner to defer to
-    expect(result.rollback).toMatchObject({ current: "old", previous: "new", restart: { ok: true } });
+    expect(result.rollback).toMatchObject({ current: "old", previous: "new", restart: { ok: true }, pointerClearedDuringReadiness: true });
     expect(rr.status(prefix).current).toBe("old");
   });
 });

@@ -196,11 +196,17 @@ export async function activateWithReadiness(options) {
         error: "concurrent_pointer_change",
       });
     }
-    // A pointer that was CLEARED has no owner: our activation is still the
-    // last write, so the previous release must be restored instead of
-    // leaving the dead new release serving with no pointer at all.
+    // A pointer that was CLEARED has no owner in this codebase (rollback and
+    // prune never unset current): only an out-of-band actor (manual removal,
+    // disk damage) can clear it, and there is no protocol to defer to. Our
+    // activation is still the last legitimate write, so restore the previous
+    // release instead of leaving the dead new release serving unpointed.
+    const cleared = failCurrent === undefined;
     const rolledBack = rollbackAndRestart(prefix, service, effects);
-    return Object.freeze({ activation, restart, readiness, journal, provenance, rollback: rolledBack, error: "readiness_deadline" });
+    const rolledBackRec = cleared
+      ? Object.freeze({ ...rolledBack, pointerClearedDuringReadiness: true })
+      : rolledBack;
+    return Object.freeze({ activation, restart, readiness, journal, provenance, rollback: rolledBackRec, error: "readiness_deadline" });
   }
   const after = status(prefix);
   if (after.current !== id) {
