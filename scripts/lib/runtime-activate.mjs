@@ -109,7 +109,10 @@ export const systemEffects = Object.freeze({
   },
   fetchHealth: async (url, timeoutMs = 2_000) => {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, 2_000))) });
+      // timeoutMs is already bounded by the caller's remaining deadline; the
+      // 2s default applies only when no bound was passed (a hard cap here
+      // would let a probe block past the declared deadline).
+      const response = await fetch(url, { signal: AbortSignal.timeout(Math.max(1, timeoutMs)) });
       return { statusCode: response.status, body: await response.text() };
     } catch (error) {
       return { statusCode: null, body: String(error?.cause ?? error?.message ?? error) };
