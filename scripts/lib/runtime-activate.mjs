@@ -153,11 +153,14 @@ export async function activateWithReadiness(options) {
     // No pointer change: no restart, no rollback authority. Still probe health
     // so a retry after a crashed activation cannot report success over a dead
     // listener.
+    const probeStartWall = new Date().toISOString();
     const readiness = await pollUntilHealthy({
       probe: () => effects.fetchHealth(healthUrl),
       startAtMs: now(), now, sleep, deadlineMs, intervalMs,
     });
-    const journal = { ...effects.journal(service, new Date().toISOString()), window: "already_current_probe" };
+    // The window starts before the first probe, so any startup line emitted
+    // while the serving release was coming up (or dying) is inside the window.
+    const journal = { ...effects.journal(service, probeStartWall), window: "already_current_probe" };
     return Object.freeze({ activation, readiness, journal, rollback: undefined, ...(readiness.ok ? {} : { error: "already_current_unhealthy" }) });
   }
   const startWall = new Date();
