@@ -2,6 +2,8 @@
 // Install gptqueue's runtime as immutable, verified releases on local disk (RT-1).
 //
 //   install-runtime.mjs install  [--prefix DIR] [--source DIR] [--allow-dirty] [--init-bound-ms N] [--hook-bound-ms N] [--no-activate]
+//   install-runtime.mjs activate --id ID [--prefix DIR] [--expect-current ID] [--service UNIT] [--health-url URL]
+//                                [--deadline-ms N] [--interval-ms N] [--journal-out FILE] [--json]
 //   install-runtime.mjs status   [--prefix DIR] [--json]
 //   install-runtime.mjs rollback [--prefix DIR]
 //   install-runtime.mjs prune    --keep N [--prefix DIR]
@@ -10,7 +12,9 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { writeFileSync } from "node:fs";
 import { privateRedisEnv, startOwnedRedis } from "./lib/owned-redis.mjs";
+import { activateWithReadiness } from "./lib/runtime-activate.mjs";
 import { ReleaseError, install, killVerificationChildren, prune, rollback, status } from "./lib/runtime-release.mjs";
 import { buildPlan, renderPlan } from "./lib/runtime-plan.mjs";
 
@@ -24,6 +28,13 @@ const { positionals, values } = parseArgs({
     "no-activate": { type: "boolean", default: false },
     "init-bound-ms": { type: "string", default: "3000" },
     "hook-bound-ms": { type: "string", default: "3000" },
+    id: { type: "string" },
+    "expect-current": { type: "string" },
+    service: { type: "string", default: "mcp-gptqueue.service" },
+    "health-url": { type: "string", default: "http://127.0.0.1:8101/health" },
+    "deadline-ms": { type: "string", default: "15000" },
+    "interval-ms": { type: "string", default: "250" },
+    "journal-out": { type: "string" },
     keep: { type: "string" },
     home: { type: "string", default: homedir() },
     "from-root": { type: "string" },
@@ -55,6 +66,25 @@ async function main(command) {
         });
       } finally { await redis.close(); }
     }
+    case "activate": {
+      if (values.id === undefined) throw new ReleaseError("bad_argument", "activate needs --id ID");
+      const result = await activateWithReadiness({
+        prefix, id: values.id, expectCurrent: values["expect-current"], service: values.service,
+        healthUrl: values["health-url"], deadlineMs: Number(values["deadline-ms"]), intervalMs: Number(values["interval-ms"]),
+      });
+      // result (and journal) is frozen; report the write without mutating it.
+      const reported = values["journal-out"] !== undefined && result.journal?.text !== undefined
+        ? { ...result, journal: { ...result.journal, writtenTo: values["journal-out"] } }
+        : result;
+      if (values["journal-out"] !== undefined && result.journal?.text !== undefined) {
+        writeFileSync(values["journal-out"], result.journal.text);
+      }
+      if (result.error !== undefined) {
+        console.error(JSON.stringify(result, null, 2));
+        process.exitCode = 1;
+      }
+      return reported;
+    }
     case "status": return status(prefix);
     case "rollback": return rollback(prefix);
     case "prune":
@@ -67,7 +97,7 @@ async function main(command) {
       return values.json ? plan : renderPlan(plan);
     }
     default:
-      throw new ReleaseError("bad_argument", "usage: install-runtime.mjs install|status|rollback|prune|plan [--prefix DIR]");
+      throw new ReleaseError("bad_argument", "usage: install-runtime.mjs install|activate|status|rollback|prune|plan");
   }
 }
 
