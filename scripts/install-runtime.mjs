@@ -86,6 +86,7 @@ async function main(command) {
       if (result.error !== undefined) {
         console.error(JSON.stringify(reported, null, 2));
         process.exitCode = 1;
+        return undefined; // the failure record went to stderr; never also to stdout
       }
       return reported;
     }
@@ -106,7 +107,8 @@ async function main(command) {
 }
 
 try {
-  print(await main(positionals[0]));
+  const out = await main(positionals[0]);
+  if (out !== undefined) print(out);
 } catch (error) {
   const code = error instanceof ReleaseError ? error.code : "internal_error";
   console.error(JSON.stringify({ error: code, message: error.message, ...(error.verify ? { verify: error.verify } : {}) }, null, 2));
