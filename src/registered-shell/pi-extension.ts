@@ -408,12 +408,12 @@ export const createPiExtension = (
       // forced Overwatch to HOLD while correlating them. Children are detected
       // by the parent recorded in the session header at a startup session_start;
       // the user's own new/resume/fork sessions also record a parent but must
-      // keep their mailbox, so only "startup" (a fresh sidechain's first start)
-      // skips. The child's results return through the Agent tool; it needs no
-      // mailbox of its own.
+      // keep their mailbox, so ONLY a "startup" start (a fresh sidechain's
+      // first start) skips. The child's results return through the Agent tool;
+      // it needs no mailbox of its own.
       const reason = (event as { reason?: unknown } | undefined)?.reason;
       const parent = parentSessionIdOf(current);
-      if (parent && reason !== "new" && reason !== "resume" && reason !== "fork") {
+      if (parent && reason === "startup") {
         await close();
         degraded = new PiGptqueueUnavailableError("pi_subagent_child",
           `Agent-tool child session (parent ${parent.slice(0, 8)}) has no GPTQueue mailbox by design; the parent session owns messaging`);
