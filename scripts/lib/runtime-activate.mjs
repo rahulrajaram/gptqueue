@@ -138,6 +138,9 @@ export async function activateWithReadiness(options) {
   } = options;
   if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) throw new ReleaseError("bad_argument", `deadlineMs must be a positive finite number, got ${deadlineMs}`);
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) throw new ReleaseError("bad_argument", `intervalMs must be a positive finite number, got ${intervalMs}`);
+  // Validated BEFORE any pointer move: pollUntilHealthy enforces the same
+  // bound, but only after activation has already swapped the pointer.
+  if (intervalMs >= deadlineMs) throw new ReleaseError("bad_argument", `intervalMs (${intervalMs}) must be smaller than deadlineMs (${deadlineMs})`);
   const before = status(prefix);
   if (expectCurrent !== undefined && before.current !== expectCurrent) {
     throw new ReleaseError("unexpected_current", `current is ${before.current ?? "unset"}, expected ${expectCurrent}; refusing to activate ${id}`);

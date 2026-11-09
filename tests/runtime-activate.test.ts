@@ -230,6 +230,16 @@ describe("activateWithReadiness", () => {
     expect(rr.status(prefix).current).toBe("old");
   });
 
+  it("rejects intervalMs >= deadlineMs before any pointer move", async () => {
+    const prefix = newPrefix();
+    plantRelease(prefix, "old"); plantRelease(prefix, "new");
+    rr.activate(prefix, "old");
+    const effects = makeEffects([{ statusCode: 200, body: '{"status":"ok"}' }]);
+    await expect(ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, deadlineMs: 250, intervalMs: 250 }))
+      .rejects.toMatchObject({ code: "bad_argument" });
+    expect(rr.status(prefix).current).toBe("old"); // pointer untouched
+    expect(effects.calls.restarts).toEqual([]);
+  });
   it("refuses to activate on top of an unexpected current pointer", async () => {
     const prefix = newPrefix();
     plantRelease(prefix, "a"); plantRelease(prefix, "b"); plantRelease(prefix, "new");
