@@ -90,6 +90,16 @@ describe("pollUntilHealthy (bounded loop)", () => {
     });
     expect(r).toMatchObject({ ok: true, attempts: 10 });
   });
+  it("rejects NaN or non-positive deadline/interval instead of looping forever", async () => {
+    const probe = async () => ({ statusCode: 200, body: '{"status":"ok"}' });
+    const { now } = fakeClock(100);
+    await expect(ra.pollUntilHealthy({ ...base, now, startAtMs: now(), probe, deadlineMs: NaN }))
+      .rejects.toMatchObject({ code: "bad_argument" });
+    await expect(ra.pollUntilHealthy({ ...base, now, startAtMs: now(), probe, intervalMs: Number("abc") }))
+      .rejects.toMatchObject({ code: "bad_argument" });
+    await expect(ra.pollUntilHealthy({ ...base, now, startAtMs: now(), probe, deadlineMs: 0 }))
+      .rejects.toMatchObject({ code: "bad_argument" });
+  });
 });
 
 describe("activateWithReadiness", () => {

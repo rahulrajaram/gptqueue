@@ -51,6 +51,8 @@ export function evaluateHealth({ statusCode, body }) {
  * @returns {{ ok: boolean, attempts: number, elapsedMs: number, lastReason: string }}
  */
 export async function pollUntilHealthy({ probe, startAtMs, now = Date.now, sleep = setTimeout, deadlineMs = DEFAULT_DEADLINE_MS, intervalMs = DEFAULT_INTERVAL_MS }) {
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) throw new ReleaseError("bad_argument", `deadlineMs must be a positive finite number, got ${deadlineMs}`);
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) throw new ReleaseError("bad_argument", `intervalMs must be a positive finite number, got ${intervalMs}`);
   let attempts = 0;
   let lastReason = "not_probed";
   for (;;) {
@@ -107,6 +109,8 @@ export async function activateWithReadiness(options) {
     deadlineMs = DEFAULT_DEADLINE_MS, intervalMs = DEFAULT_INTERVAL_MS,
     effects = systemEffects, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   } = options;
+  if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) throw new ReleaseError("bad_argument", `deadlineMs must be a positive finite number, got ${deadlineMs}`);
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) throw new ReleaseError("bad_argument", `intervalMs must be a positive finite number, got ${intervalMs}`);
   const before = status(prefix);
   if (expectCurrent !== undefined && before.current !== expectCurrent) {
     throw new ReleaseError("unexpected_current", `current is ${before.current ?? "unset"}, expected ${expectCurrent}; refusing to activate ${id}`);
