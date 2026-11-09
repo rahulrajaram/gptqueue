@@ -653,6 +653,9 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
     const nowMs = this.clock === "redis"
       ? await this.redisServerTimeMs()
       : Date.parse(input.now);
+    if (!Number.isFinite(nowMs)) {
+      throw new Error(`activeClaimsFor requires a parseable 'now' under clock "caller"; got ${JSON.stringify(input.now)}`);
+    }
     const claims: TaskClaim[] = [];
     for (const raw of raws) {
       if (raw === null) continue;
