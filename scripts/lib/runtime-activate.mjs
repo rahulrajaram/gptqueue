@@ -160,9 +160,10 @@ export async function activateWithReadiness(options) {
     // so a retry after a crashed activation cannot report success over a dead
     // listener.
     const probeStartWall = new Date().toISOString();
+    const probeStartAtMs = now();
     const readiness = await pollUntilHealthy({
-      probe: () => effects.fetchHealth(healthUrl),
-      startAtMs: now(), now, sleep, deadlineMs, intervalMs,
+      probe: () => effects.fetchHealth(healthUrl, Math.max(1, deadlineMs - (now() - probeStartAtMs))),
+      startAtMs: probeStartAtMs, now, sleep, deadlineMs, intervalMs,
     });
     // The window starts before the first probe, so any startup line emitted
     // while the serving release was coming up (or dying) is inside the window.
