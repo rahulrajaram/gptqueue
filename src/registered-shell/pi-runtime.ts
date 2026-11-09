@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import type { RuntimeAdapter, RuntimeBinding } from "./runtime.js";
 
-type Entry = { type?: string; customType?: string; data?: unknown; message?: { role?: string; customType?: unknown; details?: unknown } };
+export type Entry = { type?: string; customType?: string; data?: unknown; message?: { role?: string; customType?: unknown; details?: unknown } };
 /** Optional user-facing surface of Pi's ExtensionContext (docs/extensions.md: ctx.ui). */
 export type PiUi = { notify?(message: string, level?: "info" | "warning" | "error"): void; setStatus?(key: string, text: string | undefined): void };
 export interface PiRuntimeHost {

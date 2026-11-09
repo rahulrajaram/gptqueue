@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createPiExtension, GPTQUEUE_TOOLS, SHELL_TOOLS, type PiAPI, type SessionClient } from "../src/registered-shell/pi-extension.js";
 import { inboxPrompt } from "../src/registered-shell/runtime.js";
 
@@ -319,5 +322,51 @@ describe("registered Pi activation lifecycle", () => {
       expect(names(text)).toEqual([]);
       expect(text).toMatch(/no usable GPTQueue mail tools/u);
     });
+  });
+});
+
+// f-2957: Pi Agent-tool child sessions must not register their own sidecar.
+describe("pi subagent children (f-2957)", () => {
+  const childSessionFile = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), "gptq-f2957-"));
+    const file = join(dir, "child-session.jsonl");
+    writeFileSync(file, `${JSON.stringify({ type: "session", version: 3, id: "child-1", cwd: "/tmp/project",
+      parentSession: "/sessions/parent-abc.jsonl" })}\n`);
+    return file;
+  };
+  const childContext = (file: string) => ({
+    cwd: "/tmp/project",
+    sessionManager: { getSessionId: () => "child-1", getEntries: () => [], getSessionFile: () => file },
+  });
+
+  it("parentSessionIdOf reads parentSession (v3) and parentSessionId (v4) headers, and undefined otherwise", async () => {
+    const { parentSessionIdOf } = await import("../src/registered-shell/pi-extension.js");
+    const dir = mkdtempSync(join(tmpdir(), "gptq-f2957-"));
+    const v3 = join(dir, "v3.jsonl"); writeFileSync(v3, `${JSON.stringify({ parentSession: "/p/parent.jsonl" })}\n`);
+    const v4 = join(dir, "v4.jsonl"); writeFileSync(v4, `${JSON.stringify({ parentSessionId: "01a1c080-0000" })}\n`);
+    const none = join(dir, "none.jsonl"); writeFileSync(none, `${JSON.stringify({ id: "x" })}\n`);
+    expect(parentSessionIdOf(childContext(v3) as never)).toBe("/p/parent.jsonl");
+    expect(parentSessionIdOf(childContext(v4) as never)).toBe("01a1c080-0000");
+    expect(parentSessionIdOf(childContext(none) as never)).toBeUndefined();
+    expect(parentSessionIdOf({ sessionManager: {} } as never)).toBeUndefined();
+  });
+
+  it("a startup session_start with a recorded parent never spawns a sidecar or registers", async () => {
+    const client = makeClient(); const fake = fakePi(); const factory = vi.fn().mockResolvedValue(client);
+    await createPiExtension(factory, 100, { runtimeEnabled: true })(fake.pi);
+    await fake.handlers.get("session_start")({ reason: "startup" }, childContext(childSessionFile()) as never);
+    expect(factory).not.toHaveBeenCalled();
+    expect(fake.pi.registerTool).not.toHaveBeenCalled();
+    const prompt = await fake.handlers.get("before_agent_start")({ systemPrompt: "original" });
+    expect(prompt.systemPrompt).toContain("pi_subagent_child");
+    expect(client.close).not.toHaveBeenCalled(); // nothing was ever opened
+  });
+
+  it("a user new/resume/fork session that records a parent still registers normally", async () => {
+    const client = makeClient(); const fake = fakePi(); const factory = vi.fn().mockResolvedValue(client);
+    await createPiExtension(factory, 100, { runtimeEnabled: true })(fake.pi);
+    await fake.handlers.get("session_start")({ reason: "fork" }, childContext(childSessionFile()) as never);
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect((client.callTool as any).mock.calls.some((call: any[]) => call[0]?.name === "bind_runtime")).toBe(true);
   });
 });

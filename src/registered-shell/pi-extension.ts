@@ -3,8 +3,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { createPiRuntime, type PiRuntimeHost } from "./pi-runtime.js";
+import type { Entry } from "./pi-runtime.js";
 import type { ActivationRequest, ActivationOutcome, RuntimeBinding } from "./runtime.js";
 import { canConsumeMail, inboxPromptFor, mailCapabilities, runtimeBindingSchema } from "./runtime.js";
 import { z } from "zod";
@@ -37,7 +39,14 @@ type ToolDefinition = {
   }>;
 };
 /** Structural boundary: Pi is the host, not a dependency installed by GPTQueue. */
-export type PiContext = ReturnType<PiRuntimeHost["getContext"]>;
+export type PiContext = ReturnType<PiRuntimeHost["getContext"]> & {
+  sessionManager?: {
+    getSessionId?(): string;
+    getEntries?(): readonly Entry[];
+    /** Present on persisted sessions: the JSONL file whose header may name a parent session. */
+    getSessionFile?(): string | undefined;
+  };
+};
 export interface PiAPI {
   registerTool(definition: ToolDefinition): void;
   on(event: "before_agent_start", handler: (event: { systemPrompt: string }) => Promise<{ systemPrompt: string }>): void;
@@ -98,7 +107,9 @@ export const validateCatalog = (catalog: { tools?: CatalogTool[] }, runtimeEnabl
 export type PiGptqueueUnavailableCode =
   "gptqueue_unavailable" | "runtime_binding_refused" | "runtime_binding_failed" | "runtime_unsupported"
   /** GPTQUEUE_WORKER=1 in the Pi process: never connects, never retries. */
-  | "headless_worker";
+  | "headless_worker"
+  /** f-2957: an Agent-tool child session: never spawns a sidecar, never registers. */
+  | "pi_subagent_child";
 export class PiGptqueueUnavailableError extends Error {
   constructor(readonly code: PiGptqueueUnavailableCode, readonly reason: string) {
     super(JSON.stringify({ status: "error", code, message: `GPTQueue is unavailable in this Pi session: ${reason}` }));
@@ -136,6 +147,21 @@ const bindError = (code: string | undefined, text: string): Error => {
     case "REDIS_UNAVAILABLE": return new Error(`GPTQueue Redis unavailable during Pi inbox activation binding${detail}`);
     default: return new BindingFailedError(`Pi inbox activation binding failed (${code ?? "UNKNOWN"})${detail}`);
   }
+};
+
+/**
+ * f-2957: the parent session recorded in a Pi session header, when this
+ * session is an Agent-tool child (or a fork/new-session that named a parent).
+ * Undefined for primary sessions and unreadable/ephemeral sessions.
+ */
+export const parentSessionIdOf = (context: PiContext | undefined): string | undefined => {
+  const file = context?.sessionManager?.getSessionFile?.();
+  if (!file) return undefined;
+  try {
+    const header = JSON.parse(readFileSync(file, "utf8").split("\n", 1)[0] ?? "");
+    const parent = header?.parentSessionId ?? header?.parentSession;
+    return typeof parent === "string" && parent ? parent : undefined;
+  } catch { return undefined; }
 };
 
 export const PI_HEADLESS_WORKER_REASON =
@@ -373,10 +399,26 @@ export const createPiExtension = (
     }
   });
   if (options.runtimeEnabled) {
-    pi.on("session_start", async (_event, current) => {
+    pi.on("session_start", async (event, current) => {
       supersede(); cancelRetry(); retryAttempt = 0; degraded = undefined;
       context = current;
       const mine = generation;
+      // f-2957: a Pi Agent-tool child session must not register its own sidecar
+      // mailbox — that minted a second online identity for the same worktree and
+      // forced Overwatch to HOLD while correlating them. Children are detected
+      // by the parent recorded in the session header at a startup session_start;
+      // the user's own new/resume/fork sessions also record a parent but must
+      // keep their mailbox, so only "startup" (a fresh sidechain's first start)
+      // skips. The child's results return through the Agent tool; it needs no
+      // mailbox of its own.
+      const reason = (event as { reason?: unknown } | undefined)?.reason;
+      const parent = parentSessionIdOf(current);
+      if (parent && reason !== "new" && reason !== "resume" && reason !== "fork") {
+        degraded = new PiGptqueueUnavailableError("pi_subagent_child",
+          `Agent-tool child session (parent ${parent.slice(0, 8)}) has no GPTQueue mailbox by design; the parent session owns messaging`);
+        status("GPTQueue: subagent child session (no mailbox)");
+        return;
+      }
       // A superseded start must not degrade (and close) the newer session's client.
       try { await startRuntime(current); if (mine === generation) recovered(); }
       catch (error) { if (mine === generation) await degrade(error); }
