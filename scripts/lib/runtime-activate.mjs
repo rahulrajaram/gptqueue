@@ -56,11 +56,19 @@ export async function pollUntilHealthy({ probe, startAtMs, now = Date.now, sleep
   let attempts = 0;
   let lastReason = "not_probed";
   for (;;) {
+    // Check the deadline before probing too, so a probe that blocks past the
+    // deadline cannot extend the wait or turn a late verdict into success.
+    if (now() - startAtMs > deadlineMs) {
+      return { ok: false, attempts, elapsedMs: now() - startAtMs, lastReason: lastReason === "ok" ? "late_ok_after_deadline" : lastReason };
+    }
     attempts += 1;
     const observation = await probe();
     const verdict = evaluateHealth(observation);
     lastReason = verdict.reason;
-    if (verdict.ok) return { ok: true, attempts, elapsedMs: now() - startAtMs, lastReason };
+    if (verdict.ok) {
+      const late = now() - startAtMs > deadlineMs;
+      return { ok: !late, attempts, elapsedMs: now() - startAtMs, lastReason: late ? "late_ok_after_deadline" : "ok" };
+    }
     if (now() - startAtMs + intervalMs > deadlineMs) {
       return { ok: false, attempts, elapsedMs: now() - startAtMs, lastReason };
     }
@@ -128,7 +136,10 @@ export async function activateWithReadiness(options) {
   try {
     restart = effects.restart(service);
   } catch (error) {
-    const journal = effects.journal(service, startWall.toISOString());
+    // The restart never happened, so there is no new-release window; the
+    // journal starts before the failed attempt to capture that attempt itself
+    // and is labeled as such — never presented as the new release's own log.
+    const journal = { ...effects.journal(service, startWall.toISOString()), window: "pre_restart_attempt" };
     const rolledBack = rollbackAndRestart(prefix, service, effects);
     return Object.freeze({ activation, restart: { ok: false, error: error.message }, readiness: { ok: false, attempts: 0, lastReason: "restart_failed", elapsedMs: now() - startAtMs }, journal, rollback: rolledBack, error: "restart_failed" });
   }
@@ -139,7 +150,7 @@ export async function activateWithReadiness(options) {
   // The journal window starts at the restart, so every line belongs to the
   // release the pointer named at restart time — the NEW release — never the
   // old one's listener.
-  const journal = effects.journal(service, restart.restartedAt);
+  const journal = { ...effects.journal(service, restart.restartedAt), window: "restart_to_outcome" };
   if (!readiness.ok) {
     const rolledBack = rollbackAndRestart(prefix, service, effects);
     return Object.freeze({ activation, restart, readiness, journal, rollback: rolledBack, error: "readiness_deadline" });
@@ -160,7 +171,14 @@ export async function activateWithReadiness(options) {
 
 /** Roll the pointer back and restart so the previous release serves again. */
 function rollbackAndRestart(prefix, service, effects) {
-  const rolledBack = rollback(prefix);
+  let rolledBack;
+  try {
+    rolledBack = rollback(prefix);
+  } catch (error) {
+    // Report the failed rollback alongside the readiness evidence instead of
+    // throwing it away; the caller still learns why activation failed.
+    return Object.freeze({ failed: true, error: `${error.code}: ${error.message}`, restart: { ok: false, error: `${error.code}: ${error.message}` } });
+  }
   try {
     effects.restart(service);
   } catch (error) {

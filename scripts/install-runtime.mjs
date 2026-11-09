@@ -73,14 +73,18 @@ async function main(command) {
         healthUrl: values["health-url"], deadlineMs: Number(values["deadline-ms"]), intervalMs: Number(values["interval-ms"]),
       });
       // result (and journal) is frozen; report the write without mutating it.
-      const reported = values["journal-out"] !== undefined && result.journal?.text !== undefined
-        ? { ...result, journal: { ...result.journal, writtenTo: values["journal-out"] } }
-        : result;
+      let reported = result;
       if (values["journal-out"] !== undefined && result.journal?.text !== undefined) {
-        writeFileSync(values["journal-out"], result.journal.text);
+        try {
+          writeFileSync(values["journal-out"], result.journal.text);
+          reported = { ...result, journal: { ...result.journal, writtenTo: values["journal-out"] } };
+        } catch (error) {
+          // A failed evidence write must not mask the activation outcome.
+          reported = { ...result, journalWriteError: String(error?.message ?? error) };
+        }
       }
       if (result.error !== undefined) {
-        console.error(JSON.stringify(result, null, 2));
+        console.error(JSON.stringify(reported, null, 2));
         process.exitCode = 1;
       }
       return reported;

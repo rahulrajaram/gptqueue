@@ -90,6 +90,24 @@ describe("pollUntilHealthy (bounded loop)", () => {
     });
     expect(r).toMatchObject({ ok: true, attempts: 10 });
   });
+  it("a healthy verdict that arrives after the deadline fails as late, not ok", async () => {
+    let probed = false;
+    const now = () => (probed ? 3_000 : 0); // the probe itself crosses the deadline
+    const r = await ra.pollUntilHealthy({
+      ...base, now, deadlineMs: 2_000, startAtMs: 0,
+      probe: async () => { probed = true; return { statusCode: 200, body: '{"status":"ok"}' }; },
+    });
+    expect(r).toMatchObject({ ok: false, lastReason: "late_ok_after_deadline", attempts: 1, elapsedMs: 3_000 });
+  });
+  it("a blocking probe that exhausts the deadline terminates on the next pre-check", async () => {
+    const { now } = fakeClock(3_000);
+    let n = 0;
+    const r = await ra.pollUntilHealthy({
+      ...base, now, deadlineMs: 4_000, startAtMs: now(),
+      probe: async () => { n += 1; return { statusCode: null, body: "refused" }; },
+    });
+    expect(r).toMatchObject({ ok: false, attempts: 1, lastReason: "unreachable" });
+  });
   it("rejects NaN or non-positive deadline/interval instead of looping forever", async () => {
     const probe = async () => ({ statusCode: 200, body: '{"status":"ok"}' });
     const { now } = fakeClock(100);
@@ -192,6 +210,18 @@ describe("activateWithReadiness", () => {
     expect(effects.calls.restarts).toEqual([]);
   });
 
+  it("a missing previous pointer during rollback is reported, not thrown, with readiness evidence intact", async () => {
+    const prefix = newPrefix();
+    plantRelease(prefix, "new");
+    // current is unset, so activation sets current without a previous pointer.
+    const effects = makeEffects([{ statusCode: null, body: "refused" }]);
+    const { now } = fakeClock(1_000);
+    const result = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now, sleep: noSleep, deadlineMs: 500 });
+    expect(result.error).toBe("readiness_deadline");
+    expect(result.readiness.ok).toBe(false);
+    expect(result.journal.ok).toBe(true);
+    expect(result.rollback).toMatchObject({ failed: true, error: expect.stringContaining("no_previous") });
+  });
   it("rollback restart failure still reports the pointer rollback", async () => {
     const prefix = newPrefix();
     plantRelease(prefix, "old"); plantRelease(prefix, "new");
