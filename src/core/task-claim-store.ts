@@ -615,13 +615,33 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
    * intentionally separate from `get`'s typed store_corrupt path.
    */
   async activeClaimFor(input: ActiveClaimInput): Promise<TaskClaim | null> {
-    return (await this.activeClaimsFor(input))[0] ?? null;
+    // Hot-path contract preserved from the original implementation: judge
+    // expiry against the CALLER-supplied clock only, and never throw here —
+    // workload derivation treats this as a non-throwing read.
+    const members = await this.redis.zrange(CLAIM_KEYS.index(input.actor_id), 0, -1);
+    if (members.length === 0) return null;
+    const raws = await this.redis.hmget(CLAIM_KEYS.claims, ...members);
+    const nowMs = Date.parse(input.now);
+    for (const raw of raws) {
+      if (raw === null) continue;
+      const claim = this.parseTaskClaim(raw);
+      if (claim === null) continue; // skip corrupt silently on the hot path
+      if (claim.actor_id !== input.actor_id) continue;
+      if (claim.session_id !== input.session_id) continue;
+      const expiresMs = Date.parse(claim.expires_at);
+      if (Number.isNaN(expiresMs) || nowMs >= expiresMs) continue;
+      return claim;
+    }
+    return null;
   }
 
   /**
    * Every non-expired outstanding claim for an actor owned by the given
    * session, in index order. Same HGETALL-free read and silent corrupt-skip
    * policy as activeClaimFor; used by the list_my_claims recovery tool.
+   * Unlike activeClaimFor this judges expiry against the store's own clock
+   * (Redis server TIME in production) and fails closed on a bad TIME reply;
+   * callers wrap it in a typed tool error.
    */
   async activeClaimsFor(input: ActiveClaimInput): Promise<TaskClaim[]> {
     const members = await this.redis.zrange(CLAIM_KEYS.index(input.actor_id), 0, -1);
