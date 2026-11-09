@@ -183,7 +183,7 @@ export interface RenewInput {
 export interface ActiveClaimInput {
   readonly actor_id: string;
   readonly session_id: string;
-  /** ISO timestamp; the adapter layer reads the clock, not the core. */
+  /** ISO timestamp; honored only under clock "caller". Under "redis" the store reads Redis server TIME so a skewed client clock cannot hide live claims. */
   readonly now: string;
 }
 
@@ -627,7 +627,12 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
     const members = await this.redis.zrange(CLAIM_KEYS.index(input.actor_id), 0, -1);
     if (members.length === 0) return [];
     const raws = await this.redis.hmget(CLAIM_KEYS.claims, ...members);
-    const nowMs = Date.parse(input.now);
+    // expires_at is stamped from Redis server TIME under the production clock;
+    // judge expiry against the same clock so a client skewed ahead of the
+    // server cannot silently hide still-live claims.
+    const nowMs = this.clock === "redis"
+      ? await this.redisServerTimeMs()
+      : Date.parse(input.now);
     const claims: TaskClaim[] = [];
     for (const raw of raws) {
       if (raw === null) continue;
@@ -659,6 +664,12 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
   /** The `now` script argument: '' selects Redis server TIME (see ClaimClock). */
   private nowArg(now: string): number | string {
     return this.clock === "caller" ? Date.parse(now) : "";
+  }
+
+  /** Redis server TIME in epoch ms, the expiry clock under ClaimClock "redis". */
+  private async redisServerTimeMs(): Promise<number> {
+    const [seconds = 0, microseconds = 0] = await this.redis.time();
+    return seconds * 1_000 + Math.floor(microseconds / 1_000);
   }
 
   /** Parse and deeply freeze a stored claim; null when malformed. */
