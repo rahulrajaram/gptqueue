@@ -50,9 +50,10 @@ export function evaluateHealth({ statusCode, body }) {
  * (measured from `startAtMs`) expires. Pure over injected time and sleep.
  * @returns {{ ok: boolean, attempts: number, elapsedMs: number, lastReason: string }}
  */
-export async function pollUntilHealthy({ probe, startAtMs, now = Date.now, sleep = setTimeout, deadlineMs = DEFAULT_DEADLINE_MS, intervalMs = DEFAULT_INTERVAL_MS }) {
+export async function pollUntilHealthy({ probe, startAtMs, now = Date.now, sleep = defaultSleep, deadlineMs = DEFAULT_DEADLINE_MS, intervalMs = DEFAULT_INTERVAL_MS }) {
   if (!Number.isFinite(deadlineMs) || deadlineMs <= 0) throw new ReleaseError("bad_argument", `deadlineMs must be a positive finite number, got ${deadlineMs}`);
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) throw new ReleaseError("bad_argument", `intervalMs must be a positive finite number, got ${intervalMs}`);
+  if (intervalMs >= deadlineMs) throw new ReleaseError("bad_argument", `intervalMs (${intervalMs}) must be smaller than deadlineMs (${deadlineMs}); a single pre-readiness probe reintroduces the f-2916 race`);
   let attempts = 0;
   let lastReason = "not_probed";
   for (;;) {
@@ -76,21 +77,29 @@ export async function pollUntilHealthy({ probe, startAtMs, now = Date.now, sleep
   }
 }
 
+/** Awaitable sleep; `await setTimeout(...)` would resolve immediately. */
+export const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** systemd/journalctl effect bundle; overridable for tests. */
 export const systemEffects = Object.freeze({
   restart: (service) => {
     const r = spawnSync("systemctl", ["--user", "restart", service], { encoding: "utf8" });
-    if (r.status !== 0) throw new ReleaseError("restart_failed", `systemctl --user restart ${service} failed: ${r.stderr.trim()}`);
+    if (r.status !== 0 || r.error) throw new ReleaseError("restart_failed", `systemctl --user restart ${service} failed: ${r.error?.message ?? String(r.stderr ?? "").trim()}`);
     return { restartedAt: new Date().toISOString() };
   },
   journal: (service, sinceIso) => {
     const r = spawnSync("journalctl", ["--user", "-u", service, "--since", sinceIso, "--no-pager", "-o", "short-iso"], { encoding: "utf8" });
     // A journal read failing is evidence loss, not deployment failure.
-    return r.status === 0 ? { ok: true, text: r.stdout } : { ok: false, error: r.stderr.trim() };
+    return r.status === 0 && !r.error ? { ok: true, text: r.stdout } : { ok: false, error: r.error?.message ?? String(r.stderr ?? "").trim() };
   },
-  fetchHealth: async (url) => {
+  /** Unit provenance: what systemd is actually about to run. */
+  unitFacts: (service) => {
+    const r = spawnSync("systemctl", ["--user", "show", service, "--property=ActiveState,ExecMainStartTimestamp,FragmentPath,ExecStart", "--no-pager"], { encoding: "utf8" });
+    return r.status === 0 && !r.error ? { ok: true, text: r.stdout } : { ok: false, error: r.error?.message ?? String(r.stderr ?? "").trim() };
+  },
+  fetchHealth: async (url, timeoutMs = 2_000) => {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
+      const response = await fetch(url, { signal: AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, 2_000))) });
       return { statusCode: response.status, body: await response.text() };
     } catch (error) {
       return { statusCode: null, body: String(error?.cause ?? error?.message ?? error) };
@@ -128,7 +137,15 @@ export async function activateWithReadiness(options) {
   }
   const activation = activate(prefix, id);
   if (!activation.changed) {
-    return Object.freeze({ activation, readiness: { ok: true, skipped: "already_current", reason: "ok", attempts: 0 }, journal: undefined, rollback: undefined });
+    // No pointer change: no restart, no rollback authority. Still probe health
+    // so a retry after a crashed activation cannot report success over a dead
+    // listener.
+    const readiness = await pollUntilHealthy({
+      probe: () => effects.fetchHealth(healthUrl),
+      startAtMs: now(), now, sleep, deadlineMs, intervalMs,
+    });
+    const journal = { ...effects.journal(service, new Date().toISOString()), window: "already_current_probe" };
+    return Object.freeze({ activation, readiness, journal, rollback: undefined, ...(readiness.ok ? {} : { error: "already_current_unhealthy" }) });
   }
   const startWall = new Date();
   const startAtMs = now();
@@ -144,16 +161,29 @@ export async function activateWithReadiness(options) {
     return Object.freeze({ activation, restart: { ok: false, error: error.message }, readiness: { ok: false, attempts: 0, lastReason: "restart_failed", elapsedMs: now() - startAtMs }, journal, rollback: rolledBack, error: "restart_failed" });
   }
   const readiness = await pollUntilHealthy({
-    probe: () => effects.fetchHealth(healthUrl),
+    probe: () => effects.fetchHealth(healthUrl, Math.max(1, deadlineMs - (now() - startAtMs))),
     startAtMs, now, sleep, deadlineMs, intervalMs,
   });
   // The journal window starts at the restart, so every line belongs to the
   // release the pointer named at restart time — the NEW release — never the
   // old one's listener.
   const journal = { ...effects.journal(service, restart.restartedAt), window: "restart_to_outcome" };
+  // Unit provenance: which ExecStart/WorkingDirectory systemd just ran, so a
+  // healthy answer from a stale non-release listener (e.g. an install.sh
+  // checkout on the same port) is auditable from the record alone.
+  const provenance = effects.unitFacts(service);
   if (!readiness.ok) {
+    // A concurrent activation may have moved the pointer while we polled; it
+    // owns the pointer now, so never roll back over it.
+    if (status(prefix).current !== id) {
+      return Object.freeze({
+        activation, restart, readiness, journal, provenance,
+        concurrent: { expected: id, actual: status(prefix).current },
+        error: "concurrent_pointer_change",
+      });
+    }
     const rolledBack = rollbackAndRestart(prefix, service, effects);
-    return Object.freeze({ activation, restart, readiness, journal, rollback: rolledBack, error: "readiness_deadline" });
+    return Object.freeze({ activation, restart, readiness, journal, provenance, rollback: rolledBack, error: "readiness_deadline" });
   }
   const after = status(prefix);
   if (after.current !== id) {
@@ -161,12 +191,12 @@ export async function activateWithReadiness(options) {
     // actor owns the pointer now; rolling back would fight it, so report the
     // inconsistency with evidence instead of mutating further.
     return Object.freeze({
-      activation, restart, readiness, journal,
+      activation, restart, readiness, journal, provenance,
       concurrent: { expected: id, actual: after.current },
       error: "concurrent_pointer_change",
     });
   }
-  return Object.freeze({ activation, restart, readiness, journal, rollback: undefined });
+  return Object.freeze({ activation, restart, readiness, journal, provenance, rollback: undefined });
 }
 
 /** Roll the pointer back and restart so the previous release serves again. */

@@ -38,6 +38,7 @@ const makeEffects = (healthScript: Array<{ statusCode: number | null; body: stri
     calls,
     restart: (service: string) => { calls.restarts.push(service); return { restartedAt: `T${calls.restarts.length}` }; },
     journal: (service: string, since: string) => { calls.journals.push({ service, since }); return { ok: true, text: journalText }; },
+    unitFacts: () => ({ ok: true, text: "ExecStart=/node <data-dir>/gptqueue/current/dist/transports/http.js" }),
     fetchHealth: async () => { calls.healthProbes += 1; return healthScript[Math.min(healthScript.length - 1, calls.healthProbes - 1)]; },
   };
 };
@@ -108,6 +109,12 @@ describe("pollUntilHealthy (bounded loop)", () => {
     });
     expect(r).toMatchObject({ ok: false, attempts: 1, lastReason: "unreachable" });
   });
+  it("rejects intervalMs >= deadlineMs, which would allow a single pre-readiness probe", async () => {
+    const probe = async () => ({ statusCode: 200, body: '{"status":"ok"}' });
+    const { now } = fakeClock(100);
+    await expect(ra.pollUntilHealthy({ ...base, now, startAtMs: now(), probe, deadlineMs: 250, intervalMs: 250 }))
+      .rejects.toMatchObject({ code: "bad_argument" });
+  });
   it("rejects NaN or non-positive deadline/interval instead of looping forever", async () => {
     const probe = async () => ({ statusCode: 200, body: '{"status":"ok"}' });
     const { now } = fakeClock(100);
@@ -173,6 +180,30 @@ describe("activateWithReadiness", () => {
     expect(effects.calls.journals).toHaveLength(1);
   });
 
+  it("readiness failure with a concurrently moved pointer reports instead of rolling back over it", async () => {
+    const prefix = newPrefix();
+    plantRelease(prefix, "old"); plantRelease(prefix, "new"); plantRelease(prefix, "other");
+    rr.activate(prefix, "old");
+    const effects = makeEffects([{ statusCode: null, body: "refused" }]);
+    const realFetch = effects.fetchHealth;
+    effects.fetchHealth = async (...a) => { const r = await realFetch(...a); rr.activate(prefix, "other"); return r; };
+    const { now } = fakeClock(1_000);
+    const result = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now, sleep: noSleep, deadlineMs: 4_000 });
+    expect(result.error).toBe("concurrent_pointer_change");
+    expect(result.rollback).toBeUndefined();
+    expect(rr.status(prefix).current).toBe("other");
+  });
+  it("already-current activation reports unhealthy listener as a failure, not success", async () => {
+    const prefix = newPrefix();
+    plantRelease(prefix, "new");
+    rr.activate(prefix, "new");
+    const effects = makeEffects([{ statusCode: null, body: "refused" }]);
+    const { now } = fakeClock(1_000);
+    const result = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now, sleep: noSleep, deadlineMs: 500 });
+    expect(result.error).toBe("already_current_unhealthy");
+    expect(result.readiness.ok).toBe(false);
+    expect(result.rollback).toBeUndefined(); // nothing was activated; no rollback authority
+  });
   it("restart failure rolls back and reports restart_failed without probing", async () => {
     const prefix = newPrefix();
     plantRelease(prefix, "old"); plantRelease(prefix, "new");
@@ -203,10 +234,12 @@ describe("activateWithReadiness", () => {
     plantRelease(prefix, "new");
     rr.activate(prefix, "new");
     const effects = makeEffects(goodScript);
+    const { now } = fakeClock(100);
     await expect(ra.activateWithReadiness({ prefix, id: "missing", healthUrl: "u", effects }))
       .rejects.toMatchObject({ code: "bad_argument" });
-    const noop = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects });
-    expect(noop.readiness).toMatchObject({ ok: true, skipped: "already_current" });
+    const noop = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now, sleep: noSleep });
+    expect(noop.readiness).toMatchObject({ ok: true }); // health probed, not assumed
+    expect(noop.error).toBeUndefined();
     expect(effects.calls.restarts).toEqual([]);
   });
 
