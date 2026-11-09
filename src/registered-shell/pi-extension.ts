@@ -414,6 +414,7 @@ export const createPiExtension = (
       const reason = (event as { reason?: unknown } | undefined)?.reason;
       const parent = parentSessionIdOf(current);
       if (parent && reason !== "new" && reason !== "resume" && reason !== "fork") {
+        await close();
         degraded = new PiGptqueueUnavailableError("pi_subagent_child",
           `Agent-tool child session (parent ${parent.slice(0, 8)}) has no GPTQueue mailbox by design; the parent session owns messaging`);
         status("GPTQueue: subagent child session (no mailbox)");
