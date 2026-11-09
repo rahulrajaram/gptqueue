@@ -205,7 +205,7 @@ describe("activateWithReadiness", () => {
     expect(rr.status(prefix).current).toBe("old");
   });
 
-  it("flags a concurrent pointer change during the readiness wait", async () => {
+  it("flags a concurrent pointer change during the readiness wait without stomping it", async () => {
     const prefix = newPrefix();
     plantRelease(prefix, "old"); plantRelease(prefix, "new"); plantRelease(prefix, "other");
     rr.activate(prefix, "old");
@@ -213,8 +213,11 @@ describe("activateWithReadiness", () => {
     const realFetch = effects.fetchHealth;
     effects.fetchHealth = async (...a) => { const r = await realFetch(...a); rr.activate(prefix, "other"); return r; };
     const { now } = fakeClock(100);
-    await expect(ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now, sleep: noSleep }))
-      .rejects.toMatchObject({ code: "unexpected_current" });
+    const result = await ra.activateWithReadiness({ prefix, id: "new", healthUrl: "u", effects, now, sleep: noSleep });
+    expect(result.error).toBe("concurrent_pointer_change");
+    expect(result.concurrent).toEqual({ expected: "new", actual: "other" });
+    expect(result.rollback).toBeUndefined(); // the concurrent actor owns the pointer
+    expect(rr.status(prefix).current).toBe("other");
   });
 });
 

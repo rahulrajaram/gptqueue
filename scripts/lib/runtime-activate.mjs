@@ -146,7 +146,14 @@ export async function activateWithReadiness(options) {
   }
   const after = status(prefix);
   if (after.current !== id) {
-    throw new ReleaseError("unexpected_current", `current moved to ${after.current} during readiness wait; expected ${id}`);
+    // Another activation moved the pointer during our readiness wait. That
+    // actor owns the pointer now; rolling back would fight it, so report the
+    // inconsistency with evidence instead of mutating further.
+    return Object.freeze({
+      activation, restart, readiness, journal,
+      concurrent: { expected: id, actual: after.current },
+      error: "concurrent_pointer_change",
+    });
   }
   return Object.freeze({ activation, restart, readiness, journal, rollback: undefined });
 }
