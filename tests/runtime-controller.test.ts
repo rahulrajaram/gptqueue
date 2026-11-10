@@ -143,5 +143,30 @@ describe("runtime controller (bind_runtime)", () => {
     cleanup.push(() => takeover.close());
     await expect.poll(async () => (await takeover.bind(nativeBinding).catch(() => ({ agent: undefined }))) .agent, { timeout: 5_000 }).toBe(canonical);
   });
+
+  // GPTQ_AGENT_NAME: a fixed role name never adopts another mailbox or gets
+  // retired into one — the name is a stable shared alias that outlives this
+  // incarnation, so bind keeps the fixed name and close() reports "none".
+  it("a fixed role name neither adopts nor is retired (close -> none)", async () => {
+    const { client: original } = await setup();
+    const nativeBinding = binding();
+    await createRuntimeController(original, { client: "codex", working_directory: WORKDIR }, async (identity) => ({
+      binding: identity, activate: async () => ({ status: "busy" }), close: async () => undefined,
+    })).bind(nativeBinding);
+
+    const fixed = new RedisClient(null, TEST_REDIS_URL);
+    const fixedName = `rc-fixed-${randomUUID().slice(0, 8)}`;
+    await fixed.register("both", fixedName, undefined, undefined, { shared: true });
+    cleanup.push(async () => { await fixed.unregister(); await fixed.shutdown(); });
+    const adapter = async (identity: RuntimeBinding): Promise<RuntimeAdapter> =>
+      ({ binding: identity, activate: async () => ({ status: "queued" }), close: async () => undefined });
+    const controller = createRuntimeController(fixed, { client: "codex", working_directory: WORKDIR }, adapter, () => undefined, true);
+    // The shared name is still owned by the original runtime: a fixed-name
+    // shell keeps its own name instead of adopting that mailbox.
+    expect(await controller.bind(nativeBinding)).toMatchObject({ agent: fixedName, activation_ready: true });
+    expect(fixed.agentName).toBe(fixedName);
+    expect(await controller.close()).toBe("none");
+    expect(await fixed.adapterConnection.hexists(SESSION_KEYS.registry, fixedName)).toBe(1);
+  });
 });
 
