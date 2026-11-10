@@ -221,6 +221,20 @@ describe("TaskClaimStore", () => {
     ).toBeNull();
   });
 
+  // Regression (pedantic, 2026-11-10): fail closed on an unparseable caller
+  // clock. Before the guard, NaN comparisons skipped no claim, so an expired
+  // claim came back as live.
+  it("activeClaimFor fails closed (null) on an unparseable now", async () => {
+    await pushTasks(redis, actorId, ["stale"]);
+    const res = store.claim(claimReq());
+    const ok = expectOk(await res);
+    // Even with a live (non-expired) claim, a garbage clock must not surface it.
+    expect(
+      await store.activeClaimFor({ actor_id: actorId, session_id: "session-runtime", now: "not-a-timestamp" })
+    ).toBeNull();
+    expect(ok.claim!.claim_id).toBeTruthy();
+  });
+
   it("get returns the claim, null when absent, and store_corrupt on malformed JSON", async () => {
     expect(expectOk(await store.get("missing-claim")).claim).toBeNull();
 

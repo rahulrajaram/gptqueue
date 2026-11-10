@@ -622,6 +622,10 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
     if (members.length === 0) return null;
     const raws = await this.redis.hmget(CLAIM_KEYS.claims, ...members);
     const nowMs = Date.parse(input.now);
+    // Fail closed on an unparseable caller clock, like activeClaimsFor, but
+    // without throwing: NaN comparisons would skip no claim, returning an
+    // already-expired claim as live on the workload hot path.
+    if (Number.isNaN(nowMs)) return null;
     for (const raw of raws) {
       if (raw === null) continue;
       const claim = this.parseTaskClaim(raw);

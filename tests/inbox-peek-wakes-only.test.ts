@@ -107,6 +107,31 @@ describe("watchInbox --wakes-only", () => {
     const outcome = await waiting;
     expect(outcome).toEqual({ kind: "mail", pending: 1, expired: 0, wakeEligible: 1 });
   });
+
+  // Regression (pedantic, 2026-11-10): an expired claim still wakes (COR-F3),
+  // but the reported wakeEligible must be the true wake-eligible count, not
+  // the raw pending count — status mail queued alongside an expired claim is
+  // not wake-eligible.
+  it("expired-claim wake reports the true wake-eligible count, not pending", { timeout: 30_000 }, async () => {
+    const agent = inbox("expired");
+    keys.push(`gptq:claims-index:${agent}`);
+    // One expired claim (score far in the past) and two queued messages of
+    // which only the task is wake-eligible.
+    await redis.zadd(`gptq:claims-index:${agent}`, Date.now() - 60_000, "stale-claim");
+    await push(agent, { type: "status" });
+    await push(agent, { type: "task", payload: { content: "real work" } });
+    const outcome = await watchInbox(REDIS_URL, agent, opts());
+    expect(outcome).toEqual({ kind: "mail", pending: 2, expired: 1, wakeEligible: 1 });
+  });
+
+  it("an expired claim alone (no wake-eligible mail) still wakes with wakeEligible 0", { timeout: 30_000 }, async () => {
+    const agent = inbox("expired-only");
+    keys.push(`gptq:claims-index:${agent}`);
+    await redis.zadd(`gptq:claims-index:${agent}`, Date.now() - 60_000, "stale-claim");
+    await push(agent, { type: "status" }); // queued but not wake-eligible
+    const outcome = await watchInbox(REDIS_URL, agent, opts());
+    expect(outcome).toEqual({ kind: "mail", pending: 1, expired: 1, wakeEligible: 0 });
+  });
 });
 
 describe("the Stop hook accepts a --wakes-only watcher", () => {

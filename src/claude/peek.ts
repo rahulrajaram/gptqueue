@@ -157,9 +157,14 @@ export const watchInbox = async (url: string, agent: string, opts: Readonly<{ ti
         // (COR-F3): nothing else recovers a replaced session's expired claims
         // while this session is idle, so ignoring them would strand the task.
         if (pending > 0 || expired > 0) {
-          if (!opts.wakesOnly || expired > 0) return { kind: "mail", pending, expired, wakeEligible: pending };
+          if (!opts.wakesOnly) return { kind: "mail", pending, expired, wakeEligible: pending };
+          // Report the true wake-eligible count even when an expired claim
+          // triggered the wake (COR-F3): run wakeScan first instead of
+          // reporting wakeEligible=pending, which would mark status mail as
+          // wake-eligible. The expired claim still wakes: if only expired
+          // claims exist (wakeEligible 0), we still return mail.
           const scan = await wakeScan(redis, agent);
-          if (scan.wakeEligible > 0) return { kind: "mail", pending: scan.unclaimed, expired, wakeEligible: scan.wakeEligible };
+          if (scan.wakeEligible > 0 || expired > 0) return { kind: "mail", pending: scan.unclaimed, expired, wakeEligible: scan.wakeEligible };
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0) return { kind: "timeout" };
