@@ -50,6 +50,12 @@ export const createRuntimeController = (
   createAdapter: (binding: RuntimeBinding) => Promise<RuntimeAdapter>,
   /** Called once the bound runtime reports it was closed by its host; the owner should retire the session. */
   onRuntimeStale: (binding: RuntimeBinding) => void = () => undefined,
+  /**
+   * True when this shell's name is a fixed role identity (GPTQ_AGENT_NAME):
+   * a refused adoption must NOT retire it, because the name is a stable
+   * shared alias whose registry entry outlives this incarnation.
+   */
+  fixedName: boolean = false,
 ): RuntimeTools & {
   /**
    * Stop the dispatcher and, after a failed adoption, retire the provisional
@@ -139,7 +145,7 @@ export const createRuntimeController = (
       await dispatcher?.close();
       dispatcher = undefined;
       const provisional = client.agentName;
-      if (!refusedTarget || !provisional || provisional === refusedTarget.target) return "none";
+      if (fixedName || !refusedTarget || !provisional || provisional === refusedTarget.target) return "none";
       // Hand anything a peer sent to the provisional name to the bound
       // mailbox and stop the name being discoverable, in one atomic step,
       // fenced on the runtime mapping still naming that mailbox.

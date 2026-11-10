@@ -58,26 +58,64 @@ describe("registered shell boundaries", () => {
     }
   });
 
-  it("generates full unique identities from arbitrary cwd and ignores inherited identity", () => {
-    vi.stubEnv("GPTQ_AGENT_NAME", "foreign");
-    const first = shellAgentName("codex", "/tmp/foreign-project");
-    const second = shellAgentName("codex", "/tmp/foreign-project");
+  it("GPTQ_AGENT_NAME pins the registered-shell identity (stable role alias)", () => {
+    try {
+      vi.stubEnv("GPTQ_AGENT_NAME", "pedantic-feedback");
+      const first = shellAgentName("codex", "/tmp/foreign-project");
+      const second = shellAgentName("codex", "/tmp/foreign-project");
+      expect(first).toBe("pedantic-feedback");
+      expect(second).toBe("pedantic-feedback"); // fixed role name: same across incarnations
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("without GPTQ_AGENT_NAME the identity is byte-identical to the derivation", () => {
+    const env: NodeJS.ProcessEnv = {}; // truly unset, not empty-string
+    const first = shellAgentName("codex", "/tmp/foreign-project", env);
+    const second = shellAgentName("codex", "/tmp/foreign-project", env);
     expect(first).toMatch(/^gptqueue-shell-codex-foreign-project-[0-9a-f-]{36}$/u);
     expect(second).not.toBe(first);
-    expect(first).not.toBe(process.env.GPTQ_AGENT_NAME);
-    vi.unstubAllEnvs();
+    // Empty-string env values are also treated as unset: no override, no throw.
+    expect(shellAgentName("codex", "/tmp/foreign-project", { GPTQ_AGENT_NAME: "" })).toMatch(/^gptqueue-shell-codex-foreign-project-/u);
+  });
+
+  it("an invalid GPTQ_AGENT_NAME fails loudly instead of falling back", () => {
+    for (const bad of ["Foreign Name", "UPPER", "-leading", "a".repeat(129), "gptqueue-system", "with_underscore", "gptqueue-shell-codex-fake-uuid"])
+      expect(() => shellAgentName("codex", "/tmp", { GPTQ_AGENT_NAME: bad }), `name=${bad}`).toThrow(/GPTQ_AGENT_NAME|reserved/u);
   });
 
   it("registers before initialize and exposes only bound tools", async () => {
     const { shell, client, redis } = await connected();
     expect(await redis.hexists(SESSION_KEYS.registry, shell.agentName)).toBe(1);
-    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["send_message", "receive_message", "list_agents", "get_queue_status", "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status", "acknowledge_messages", "dlq_requeue", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile", "dlq_status"]);
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["send_message", "receive_message", "list_agents", "get_queue_status", "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status", "acknowledge_messages", "dlq_requeue", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile", "dlq_status", "list_my_claims"]);
     expect(JSON.stringify(await client.listTools())).not.toContain("session_id");
   });
 
   it("creates distinct identities for concurrent shells", async () => {
     const first = await connected(); const second = await connected();
     expect(first.shell.agentName).not.toBe(second.shell.agentName);
+  });
+
+  // Stable role alias (pedantic feedback loop): two concurrent shells under
+  // one fixed shared name both register; mail to the name is claimable.
+  it("two shells share one fixed GPTQ_AGENT_NAME with GPTQ_AGENT_SHARED=1", { timeout: 20_000 }, async () => {
+    vi.stubEnv("GPTQ_AGENT_NAME", "alias-canary-shared");
+    vi.stubEnv("GPTQ_AGENT_SHARED", "1");
+    try {
+      const first = await connected(); const second = await connected();
+      expect(first.shell.agentName).toBe("alias-canary-shared");
+      expect(second.shell.agentName).toBe("alias-canary-shared");
+      // Both sessions are live members of the shared name, and the fixed
+      // role name is NOT marked provisional (per-startup identities only).
+      expect(await first.redis.scard(SESSION_KEYS.agentSessions("alias-canary-shared"))).toBe(2);
+      expect(await first.redis.sismember(SESSION_KEYS.provisional, "alias-canary-shared")).toBe(0);
+      // Mail addressed to the fixed name is deliverable and claimable by one of them.
+      const sent = json(await first.client.callTool({ name: "send_message", arguments: { to: "alias-canary-shared", content: "role-alias" } }));
+      expect(sent.message_id).toBeTruthy();
+      const claimed = json(await second.client.callTool({ name: "claim_tasks", arguments: { max_batch: 1 } }));
+      expect(claimed.claimed).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("preserves mailbox after close and closes transport lease", async () => {

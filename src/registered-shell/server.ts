@@ -9,7 +9,8 @@ import { createRuntimeController } from "./runtime-controller.js";
 import { createCodexRuntime } from "./codex-runtime.js";
 import { bindingLifecycleEntry, bootstrapCodexBinding, withBindingState, type CodexBindingState } from "./codex-bootstrap.js";
 import { activationOutcomeSchema, type ActivationOutcome } from "./runtime.js";
-import { SESSION_KEYS } from "../core/keys.js";
+import { SESSION_KEYS, SYSTEM_SENDER } from "../core/keys.js";
+import { GptQueueError } from "../mcp-server/errors.js";
 import { parseRegisteredShellOptions, type ShellClient } from "./args.js";
 import { isExplicitWorker } from "../claude/worker-mode.js";
 import { startWorkerShell } from "./worker-shell.js";
@@ -35,17 +36,57 @@ export interface ShellIdentity {
   readonly uuid: string;
   readonly client: ShellClient;
   readonly working_directory: string;
+  /** True when the name came from GPTQ_AGENT_NAME (fixed role identity, not provisional). */
+  readonly fixed: boolean;
 }
 
-export const shellIdentity = (client: ShellClient, cwd = process.cwd(), uuid = randomUUID()): ShellIdentity => {
+/**
+ * A fixed agent name supplied through GPTQ_AGENT_NAME (the stable role-alias
+ * recipe). Validated with the same shape as the names register_agent's
+ * callers use (the charset shellIdentity itself generates: lowercase alnum
+ * and hyphens). An invalid value FAILS LOUDLY at startup: it never silently
+ * falls back to a generated uuid name, because callers (and mail routing)
+ * must be able to rely on the requested name.
+ */
+const FIXED_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,127}$/u;
+
+export const fixedShellName = (env: NodeJS.ProcessEnv = process.env): string | null => {
+  const requested = env.GPTQ_AGENT_NAME;
+  if (requested === undefined || requested === "") return null;
+  if (!FIXED_NAME_PATTERN.test(requested)) {
+    throw new GptQueueError("AGENT_REGISTRATION_INVALID",
+      `GPTQ_AGENT_NAME '${requested}' is not a valid agent name (lowercase alphanumerics and hyphens, max 128 chars, starting alphanumeric). Fix or unset the variable; no fallback name will be used.`, { name: requested });
+  }
+  if (requested === SYSTEM_SENDER) {
+    throw new GptQueueError("AGENT_NAME_RESERVED", `Agent name '${requested}' is reserved for gptqueue's own messages.`, { name: requested });
+  }
+  // Generated shell names (and their registry-reaper candidates) live under
+  // the gptqueue-shell- prefix; a fixed name there would collide with the
+  // reaper's idle-name sweep and with generated identities.
+  if (requested.startsWith("gptqueue-shell-")) {
+    throw new GptQueueError("AGENT_REGISTRATION_INVALID",
+      `GPTQ_AGENT_NAME '${requested}' collides with the generated gptqueue-shell- prefix; choose a role name outside it.`, { name: requested });
+  }
+  return requested;
+};
+
+export const shellIdentity = (client: ShellClient, cwd = process.cwd(), uuid = randomUUID(), env: NodeJS.ProcessEnv = process.env): ShellIdentity => {
   const working_directory = resolve(cwd);
   const directory = basename(working_directory) || working_directory;
   const safe = directory.replace(/[^a-zA-Z0-9_-]/gu, "-").slice(0, 32) || "shell";
-  return Object.freeze({ name: `gptqueue-shell-${client}-${safe}-${uuid}`, label: `${directory} · ${client} · ${uuid.slice(0, 8)}`, uuid, client, working_directory });
+  const fixed = fixedShellName(env);
+  return Object.freeze({
+    name: fixed ?? `gptqueue-shell-${client}-${safe}-${uuid}`,
+    label: fixed ? `${directory} · ${client} · ${fixed}` : `${directory} · ${client} · ${uuid.slice(0, 8)}`,
+    uuid,
+    client,
+    working_directory,
+    fixed: fixed !== null,
+  });
 };
 
-export const shellAgentName = (client: ShellClient, cwd = process.cwd()): string => {
-  return shellIdentity(client, cwd).name;
+export const shellAgentName = (client: ShellClient, cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string => {
+  return shellIdentity(client, cwd, undefined, env).name;
 };
 
 export const parseRegisteredShellArgs = (argv: readonly string[]): RegisteredShellOptions =>
@@ -103,7 +144,7 @@ export const startRegisteredShell = async (
       };
     // The host closed this sidecar's thread: retire the session so its heartbeat
     // and lease stop claiming the mailbox and a resumed thread can adopt it.
-    }, () => { void cleanup("runtime_closed").catch(() => undefined); });
+    }, () => { void cleanup("runtime_closed").catch(() => undefined); }, identity.fixed);
   let registrationComplete = false;
   let cleanupPromise: Promise<void> | undefined;
   let initializedLogged = false;
@@ -149,7 +190,11 @@ export const startRegisteredShell = async (
   };
   callerSignal.addEventListener("abort", onAbort, { once: true });
   try {
-    await bounded(redis.register("both", agentName, `${options.client} interactive shell in ${identity.working_directory}`, identity, { provisional: true }),
+    // A fixed GPTQ_AGENT_NAME is a shared role identity, not this startup's
+    // own sidecar identity: provisional marks a per-startup identity whose
+    // crash-sweep semantics (and provisional+shared rejection) assume a
+    // generated name, so it is dropped when a fixed name is requested.
+    await bounded(redis.register("both", agentName, `${options.client} interactive shell in ${identity.working_directory}`, identity, { provisional: identity.fixed !== true }),
       options.startupTimeoutMs ?? 10_000, "Registered shell startup timed out", shutdown.signal);
     registrationComplete = true;
     lifecycle.emit({ event: "registration_complete", phase: "registration", duration_ms: lifecycle.elapsed() - registrationStarted, session_id: redis.sessionId ?? undefined });

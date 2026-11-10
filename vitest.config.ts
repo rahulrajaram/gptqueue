@@ -13,6 +13,9 @@ import { defineConfig } from "vitest/config";
 // set them explicitly.
 delete process.env.GPTQUEUE_WORKER;
 delete process.env.CLAUDE_CODE_ENTRYPOINT;
+// A fixed registered-shell role name in the ambient env would silently pin
+// every spawned shell to one mailbox (and break tests via AGENT_NAME_HELD).
+delete process.env.GPTQ_AGENT_NAME;
 
 export default defineConfig({
   test: {

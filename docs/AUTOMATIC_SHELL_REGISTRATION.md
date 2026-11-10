@@ -82,7 +82,9 @@ therefore remains online. Terminal exit alone is not an unregister operation for
 that Codex mode. This preserves existing background-session behavior.
 
 Unread messages survive connection closure. Binding a resumed native session
-restores its address; registration without binding is provisional. Abrupt process death or
+restores its address; registration without binding is provisional — except
+when GPTQ_AGENT_NAME pins a fixed role name (set GPTQ_AGENT_SHARED=1 on every
+incarnation), which registers as a shared, non-provisional identity. Abrupt process death or
 an unavailable Redis can leave a lease until its 30-second expiry; retained
 mailboxes and registry entries require an independent retention policy.
 

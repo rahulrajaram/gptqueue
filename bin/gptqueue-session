@@ -1,3 +1,9 @@
 #!/usr/bin/env node
 import { runRegisteredShell } from "../dist/registered-shell/server.js";
-runRegisteredShell().catch(() => { process.exitCode ||= 1; });
+runRegisteredShell().catch((error) => {
+  // Fail loudly: a rejected startup (e.g. an invalid GPTQ_AGENT_NAME) must be
+  // visible on stderr, not just a silent nonzero exit (it precedes the
+  // lifecycle log, which only exists once registration starts).
+  process.stderr.write(`${JSON.stringify({ event: "registered_shell_failed", message: error instanceof Error ? error.message : String(error) })}\n`);
+  process.exitCode ||= 1;
+});
