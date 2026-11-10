@@ -49,7 +49,7 @@ return raw
  * sent to this sidecar's per-startup provisional name; they belong to the
  * bound mailbox (DL-2).
  */
-export const restoreRuntimeMailbox = async (client: RedisClient, binding: RuntimeBinding): Promise<string> => {
+export const restoreRuntimeMailbox = async (client: RedisClient, binding: RuntimeBinding, opts: Readonly<{ fixedName?: boolean }> = {}): Promise<string> => {
   const validated = runtimeBindingSchema.parse(binding);
   const source = client.requireRegistered(), key = runtimeMailboxKey(validated);
   // COR-F5: write the mapping (NX) and, when it names this very name (first
@@ -63,6 +63,10 @@ export const restoreRuntimeMailbox = async (client: RedisClient, binding: Runtim
   // continuity plan checks in core/mailbox-continuity.ts.
   if (!parsed.success || resolve(parsed.data.working_directory) !== resolve(validated.working_directory)) throw new Error("Runtime mailbox mapping does not match binding");
   if (parsed.data.agent !== source) {
+    // A fixed role name (GPTQ_AGENT_NAME) IS the address senders use: adopting
+    // another mailbox would move the alias off its own name and, on the Lua
+    // success path, delete its registry entry. Keep the fixed name instead.
+    if (opts.fixedName) return client.requireRegistered();
     try {
       await client.adoptIdentity(source, parsed.data.agent, key, raw, validated.runtime_id);
     } catch (error) {

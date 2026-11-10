@@ -109,7 +109,7 @@ export const createRuntimeController = (
         binding = validation.binding;
         try {
           try {
-            await restoreRuntimeMailbox(client, binding);
+            await restoreRuntimeMailbox(client, binding, { fixedName });
             refusedTarget = undefined;
             continuity = null;
           } catch (error) {
