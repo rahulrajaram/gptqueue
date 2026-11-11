@@ -198,9 +198,18 @@ export const renderAsk = (decision: AskDecision): string | null => {
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 
-/** Name-free: the watcher resolves this session's registered name itself from the session record. --wakes-only: only mail that would wake the session (a task, or a result/error answering its own request) exits the watcher; status mail batches. */
+/**
+ * Name-free: the watcher resolves this session's registered name itself from the
+ * session record. The Stop gate's own actionable rule is every unclaimed
+ * message (plus this session's claims and expired claims), so the watcher it
+ * recommends must match that: a plain `--watch` wakes on any unclaimed mail.
+ * `--wakes-only` is narrower than the Stop gate and would silently strand a
+ * result/status the session still owes a reply on (field report, statica,
+ * 2026-11-11: a READY packet sat 9.3 h). It stays available for dispatchers
+ * that deliberately want the narrower predicate.
+ */
 export const watchCommandFor = (binDir: string, claudeSessionId: string): string =>
-  `${shellQuote(join(binDir, "gptqueue-inbox-peek"))} --watch --wakes-only --session ${shellQuote(claudeSessionId)}`;
+  `${shellQuote(join(binDir, "gptqueue-inbox-peek"))} --watch --session ${shellQuote(claudeSessionId)}`;
 
 type RawHookJson = { session_id?: unknown; cwd?: unknown; stop_hook_active?: unknown; tool_name?: unknown };
 

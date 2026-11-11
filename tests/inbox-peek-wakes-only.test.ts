@@ -4,8 +4,10 @@
  * "wakes" (a task, or a result/error answering the agent's own outstanding
  * request). Status mail stays unclaimed and batches at the next real wake.
  * Also: a --wakes-only watcher's pidfile satisfies the Stop hook's
- * "is a watcher running?" check, and the hook's suggested command uses
- * --wakes-only. Every test uses its own agent names and deletes only its own keys.
+ * "is a watcher running?" check. The hook's suggested command is plain
+ * --watch (not --wakes-only): a session watcher must match the Stop gate's
+ * actionable rule, so a result/status the session still owes is not stranded.
+ * Every test uses its own agent names and deletes only its own keys.
  */
 import { testRedisUrl } from "./helpers/test-redis.js";
 import { randomUUID } from "node:crypto";
@@ -146,7 +148,7 @@ describe("the Stop hook accepts a --wakes-only watcher", () => {
     expect(watcherRunning(path, "a", claude)).toBe(true);
   });
 
-  it("the hook's suggested watcher command defaults to --wakes-only", () => {
-    expect(watchCommandFor("/bin/dir", "session-1")).toBe("'/bin/dir/gptqueue-inbox-peek' --watch --wakes-only --session 'session-1'");
+  it("the hook's suggested watcher command is plain --watch (not the narrower --wakes-only)", () => {
+    expect(watchCommandFor("/bin/dir", "session-1")).toBe("'/bin/dir/gptqueue-inbox-peek' --watch --session 'session-1'");
   });
 });
