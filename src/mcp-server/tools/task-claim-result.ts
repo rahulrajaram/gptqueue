@@ -42,6 +42,22 @@ export function claimTasksResult(result: ClaimResult) {
   });
 }
 
+/** Map a TaskClaimStore release result to an MCP tool result. */
+export function releaseClaimResult(result: {
+  ok: true;
+  released: number;
+  deadlettered: number;
+} | { ok: false; error: { code: string; message: string } }) {
+  if (!result.ok) {
+    return errorResult(result);
+  }
+  return toolResult({
+    status: "ok",
+    released: result.released,
+    deadlettered: result.deadlettered,
+  });
+}
+
 /** Map a TaskClaimStore acknowledge result to an MCP tool result. */
 export function acknowledgeTasksResult(result: AcknowledgeResult) {
   if (!result.ok) {

@@ -274,6 +274,30 @@ describe("TaskClaimStore", () => {
     if (!again.ok) expect(again.error.code).toBe("unknown_claim");
   });
 
+  it("release returns the claim's tasks to the inbox and removes the claim", async () => {
+    await pushTasks(redis, actorId, ["r1", "r2"]);
+    const claimed = expectOk(await store.claim(claimReq()));
+    const claimId = claimed.claim!.claim_id;
+    expect(await inboxDepth(redis, actorId)).toBe(0);
+
+    const released = expectOk(await store.release({ claim_id: claimId, actor_id: actorId, session_id: "session-runtime" }));
+    expect(released.released).toBe(2);
+    expect(released.deadlettered).toBe(0);
+    expect(await inboxDepth(redis, actorId)).toBe(2);
+    expect(await redis.hget(CLAIM_KEYS.claims, claimId)).toBeNull();
+    expect(await redis.zscore(CLAIM_KEYS.index(actorId), claimId)).toBeNull();
+  });
+
+  it("release by a foreign session is not_claim_owner and changes nothing", async () => {
+    await pushTasks(redis, actorId, ["r3"]);
+    const claimed = expectOk(await store.claim(claimReq()));
+    const claimId = claimed.claim!.claim_id;
+    const foreign = await store.release({ claim_id: claimId, actor_id: actorId, session_id: "session-other" });
+    expect(foreign.ok).toBe(false);
+    if (!foreign.ok) expect(foreign.error.code).toBe("not_claim_owner");
+    expect(await redis.hget(CLAIM_KEYS.claims, claimId)).not.toBeNull();
+  });
+
   it("a foreign session acknowledge is not_claim_owner without revealing the owning session", async () => {
     await pushTasks(redis, actorId, ["x1"]);
     const claimed = expectOk(await store.claim(claimReq()));

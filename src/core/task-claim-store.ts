@@ -101,6 +101,11 @@ export type RecoverResult =
   | Readonly<{ ok: true; recovered: number; deadlettered: number }>
   | Readonly<{ ok: false; error: TaskClaimStoreError }>;
 
+/** A caller-initiated release of one of its own outstanding claims. */
+export type ReleaseResult =
+  | Readonly<{ ok: true; released: number; deadlettered: number }>
+  | Readonly<{ ok: false; error: TaskClaimStoreError }>;
+
 export type DeadLetterEntriesInput = Readonly<{
   actor_id: string;
   /** Maximum DLQ entries to return (defaults to the DLQ length bound). */
@@ -213,6 +218,7 @@ export class TaskClaimStore {
   private readonly ackMessagesScript: string;
   private readonly renewScript: string;
   private readonly requeueScript: string;
+  private readonly releaseScript: string;
   private readonly purgeScript: string;
 
   private readonly clock: ClaimClock;
@@ -226,6 +232,7 @@ export class TaskClaimStore {
     this.ackMessagesScript = readFileSync(join(LUA_DIR, "claims-ack-messages.lua"), "utf-8");
     this.renewScript = claimLuaScript("claims-renew.lua");
     this.requeueScript = claimLuaScript("claims-requeue.lua");
+    this.releaseScript = claimLuaScript("claims-release.lua");
     this.purgeScript = `${purgeActorClaimsLua}
 return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`;
   }
@@ -599,6 +606,51 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
       return fail(
         "budget_exceeded",
         `claim '${input.claim_id}' for actor '${input.actor_id}' has exhausted its lifetime budget and cannot be renewed`
+      );
+    }
+    return fail(
+      "not_claim_owner",
+      `claim '${input.claim_id}' is owned by another session`
+    );
+  }
+
+  /**
+   * Release one of the caller's own outstanding claims: put its tasks back on
+   * the caller's inbox (so they can be claimed again) and remove the claim.
+   * Recovery counters are incremented exactly as lazy recovery does, so a
+   * message that keeps being released is dead-lettered once it exceeds the
+   * cap. Only the claiming session may release its claim.
+   */
+  async release(input: AcknowledgeInput): Promise<ReleaseResult> {
+    const result = (await this.redis.eval(
+      this.releaseScript,
+      4,
+      CLAIM_KEYS.claims,
+      CLAIM_KEYS.index(input.actor_id),
+      SESSION_KEYS.queue(input.actor_id),
+      DLQ_KEYS.list(input.actor_id),
+      input.claim_id,
+      input.actor_id,
+      input.session_id,
+      DLQ_PROVISIONAL.RECOVER_CAP,
+      DLQ_PROVISIONAL.DLQ_MAX_LENGTH,
+      DLQ_PROVISIONAL.RECOVER_COUNTER_TTL_SECONDS
+    )) as [number, number, number];
+    const [code, released, deadlettered] = result;
+
+    if (code === 1) {
+      return { ok: true, released: released as unknown as number, deadlettered: deadlettered as unknown as number };
+    }
+    if (code === 2) {
+      return fail(
+        "unknown_claim",
+        `no outstanding claim '${input.claim_id}' for actor '${input.actor_id}'`
+      );
+    }
+    if (code === -1) {
+      return fail(
+        "store_corrupt",
+        `release refused: '${String(released)}' key holds the wrong type`
       );
     }
     return fail(

@@ -215,7 +215,7 @@ export const startRegisteredShell = async (
         tool_names: ["send_message", "receive_message", "list_agents", "get_queue_status",
           "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status",
           "acknowledge_messages", "dlq_requeue", "find_agents", "get_agent_details", "get_delivery_status", "set_agent_profile",
-          "dlq_status", "list_my_claims"] },
+          "dlq_status", "list_my_claims", "claim_details", "release_claim"] },
     }));
     const transportStarted = lifecycle.elapsed();
     const previousInitialized = server.server.oninitialized;

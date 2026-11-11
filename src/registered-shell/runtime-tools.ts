@@ -5,6 +5,8 @@ import { claimTasks, claimTasksSchema } from "../mcp-server/tools/claim-tasks.js
 import { acknowledgeTasks, acknowledgeTasksSchema } from "../mcp-server/tools/acknowledge-tasks.js";
 import { acknowledgeMessages, acknowledgeMessagesSchema } from "../mcp-server/tools/acknowledge-messages.js";
 import { renewClaim, renewClaimSchema } from "../mcp-server/tools/renew-claim.js";
+import { claimDetails, claimDetailsSchema } from "../mcp-server/tools/claim-details.js";
+import { releaseClaim, releaseClaimSchema } from "../mcp-server/tools/release-claim.js";
 import { dlqRequeue, dlqRequeueSchema } from "../mcp-server/tools/dlq-requeue.js";
 import { stableToolError, toolResult } from "../mcp-server/tool-result.js";
 import { InboxEvents } from "../core/inbox-events.js";
@@ -51,6 +53,12 @@ export const registerRuntimeTools = (server: McpServer, client: RedisClient, run
   const renewSchema = renewClaimSchema.omit({ session_id: true }).strict();
   server.tool("renew_claim", "Extend your claim while authorized processing remains underway.", renewSchema.shape,
     WRITABLE, async (params) => safe(() => renewClaim(client, renewSchema.parse(params))));
+  const detailsSchema = claimDetailsSchema.omit({ session_id: true }).strict();
+  server.tool("claim_details", "Fetch your own claim's full payloads by id (recovery read after compaction or a lost claim_tasks output).", detailsSchema.shape,
+    READ_ONLY, async (params) => safe(() => claimDetails(client, detailsSchema.parse(params))));
+  const releaseSchema = releaseClaimSchema.omit({ session_id: true }).strict();
+  server.tool("release_claim", "Return your own claim's tasks to your inbox and remove the claim, so they can be claimed again.", releaseSchema.shape,
+    WRITABLE, async (params) => safe(() => releaseClaim(client, releaseSchema.parse(params))));
   server.tool("bind_runtime", "Bind the exact runtime-supplied session identity to this connection. Never infer it from a directory or agent UUID.",
     runtimeBindingSchema.shape, WRITABLE, async (params) => safe(async () => toolResult(await runtime.bind(runtimeBindingSchema.parse(params)))));
   server.tool("get_runtime_status", "Report this connection's exact runtime binding and automatic inbox activation readiness.",
