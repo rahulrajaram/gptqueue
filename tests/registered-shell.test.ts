@@ -113,6 +113,10 @@ describe("registered shell boundaries", () => {
       expect(sent.message_id).toBeTruthy();
       const claimed = json(await second.client.callTool({ name: "claim_tasks", arguments: { max_batch: 1 } }));
       expect(claimed.claimed).toBe(true);
+      // f-3190: the claim id is also at the top level, so a caller whose
+      // context overflows on a large payload can still read it.
+      expect(claimed.claim_id).toBeTruthy();
+      expect(claimed.claim_id).toBe(claimed.claim.claim_id);
     } finally {
       vi.unstubAllEnvs();
     }

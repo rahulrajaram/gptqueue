@@ -24,6 +24,13 @@ export function claimTasksResult(result: ClaimResult) {
   return toolResult({
     status: "ok",
     claimed: true,
+    // The claim id is the first thing the caller must read: if a large
+    // payload overflows the caller's context, the claim id must still be
+    // visible so the lease can be renewed or acknowledged. (f-3190: a
+    // loopworks Codex lead's claim_tasks output overflowed its context
+    // before it could read the claim_id; the claim stayed stuck for its
+    // 3600 s lease.)
+    claim_id: result.claim.claim_id,
     claim: {
       claim_id: result.claim.claim_id,
       actor_id: result.claim.actor_id,
