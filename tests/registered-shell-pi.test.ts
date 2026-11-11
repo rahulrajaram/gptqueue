@@ -122,8 +122,8 @@ describe("registered Pi extension", () => {
 
 it("accepts previous runtime catalogs and optional diagnostics without accepting foreign tools", () => {
   const tools = [...GPTQUEUE_TOOLS, ...RUNTIME_TOOL_NAMES].map(name => ({ name, inputSchema: { type: "object" } }));
-  expect(validateCatalog({ tools }, true)).toHaveLength(9);
-  expect(validateCatalog({ tools: [...tools, { name: "find_agents", inputSchema: { type: "object" } }] }, true)).toHaveLength(10);
+  expect(validateCatalog({ tools }, true)).toHaveLength(11);
+  expect(validateCatalog({ tools: [...tools, { name: "find_agents", inputSchema: { type: "object" } }] }, true)).toHaveLength(12);
   expect(() => validateCatalog({ tools: [...tools, { name: "foreign_tool", inputSchema: { type: "object" } }] }, true)).toThrow(/mismatch/);
   expect(() => validateCatalog({ tools: [...tools, tools[0]!] }, true)).toThrow(/mismatch/);
 });

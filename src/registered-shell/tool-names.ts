@@ -5,9 +5,15 @@
  * (tests/registered-shell-tool-names.test.ts checks it).
  */
 
-/** Claim protocol and runtime binding; a runtime shell cannot work without them. */
+/**
+ * Claim protocol (including caller-bound recovery), runtime binding and status;
+ * a runtime shell cannot work without them. The recovery tools sit with the
+ * claim protocol so this list matches the registered order the shell advertises
+ * (tests/registered-shell.test.ts) and SHELL_TOOL_NAMES stays authoritative for
+ * validateCatalog (pi-extension.ts).
+ */
 export const RUNTIME_TOOL_NAMES = Object.freeze([
-  "claim_tasks", "acknowledge_tasks", "renew_claim", "bind_runtime", "get_runtime_status",
+  "claim_tasks", "acknowledge_tasks", "renew_claim", "claim_details", "release_claim", "bind_runtime", "get_runtime_status",
 ] as const);
 
 /**
