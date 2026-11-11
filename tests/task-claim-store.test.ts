@@ -298,6 +298,124 @@ describe("TaskClaimStore", () => {
     expect(await redis.hget(CLAIM_KEYS.claims, claimId)).not.toBeNull();
   });
 
+  describe("release parity with recovery (F2 wake, F3 DLQ accounting)", () => {
+    // DLQ_PROVISIONAL is a frozen import, so a smaller cap / bound is exercised
+    // by invoking the raw release script exactly as the recovery tests do.
+    const releaseLua = claimLuaScript("claims-release.lua");
+    const SYSTEM = "gptqueue-system";
+    const actor = "release-parity-actor";
+    const session = "session-runtime";
+
+    const envelope = (id: string, overrides: Record<string, unknown> = {}) =>
+      JSON.stringify({ id, from: "sender", to: actor, timestamp: T0, type: "task", payload: { content: id }, ...overrides });
+
+    const evalRelease = async (claimId: string, cap: number, maxLength: number): Promise<[number, number, number, number]> =>
+      (await redis.eval(
+        releaseLua, 9,
+        CLAIM_KEYS.claims, CLAIM_KEYS.index(actor), SESSION_KEYS.queue(actor), DLQ_KEYS.list(actor),
+        SESSION_KEYS.inboxEvents(actor), DLQ_KEYS.dropped(actor),
+        DLQ_NOTICE_KEYS.pending(actor), DLQ_NOTICE_KEYS.overflow(actor), DLQ_NOTICE_KEYS.window(actor),
+        claimId, actor, session, cap, maxLength, 604800, SYSTEM
+      )) as [number, number, number, number];
+
+    const claimTask = async (task: string): Promise<string> => {
+      await pushTasks(redis, actor, [task]);
+      const claimed = expectOk(await store.claim({ actor_id: actor, session_id: session, max_batch: 1, ttl_seconds: 300, now: T0 }));
+      return claimed.claim!.claim_id;
+    };
+
+    it("emits one inbox wake event per re-queued task (F2)", async () => {
+      const claimId = await claimTask(envelope("m1"));
+      const before = await redis.xlen(SESSION_KEYS.inboxEvents(actor));
+      const [code, released, deadlettered] = await evalRelease(claimId, 5, 1000);
+      expect(code).toBe(1);
+      expect(released).toBe(1);
+      expect(deadlettered).toBe(0);
+      expect(await redis.xlen(SESSION_KEYS.inboxEvents(actor))).toBe(before + 1);
+      const [[, fields] = ["", []]] = await redis.xrevrange(SESSION_KEYS.inboxEvents(actor), "+", "-", "COUNT", 1);
+      expect(fields).toEqual(expect.arrayContaining(["message_id", "m1", "type", "task", "from", "sender", "to", actor]));
+    });
+
+    it("refuses a release whose reply wake target holds the wrong type, with no writes (F2 guard)", async () => {
+      const reply = JSON.stringify({ id: "r1", from: "sender", to: actor, timestamp: T0, type: "result", payload: { in_reply_to: "req-1" } });
+      const claimId = await claimTask(reply);
+      await redis.rpush(SESSION_KEYS.outstanding(actor, "req-1"), "wrong-type");
+      const [code, role] = await evalRelease(claimId, 5, 1000);
+      expect(code).toBe(-1);
+      expect(role).toBe("outstanding");
+      expect(await redis.hget(CLAIM_KEYS.claims, claimId)).not.toBeNull();
+      expect(await inboxDepth(redis, actor)).toBe(0);
+    });
+
+    it("dead-letters past the cap and accounts DLQ drops (F3)", async () => {
+      await pushTasks(redis, actor, [envelope("m1"), envelope("m2"), envelope("m3")]);
+      const claimed = expectOk(await store.claim({ actor_id: actor, session_id: session, max_batch: 3, ttl_seconds: 300, now: T0 }));
+      const claimId = claimed.claim!.claim_id;
+      // cap 0 -> every task exceeds it; DLQ bound 2 -> the trim discards one.
+      const [code, released, deadlettered, dlqDropped] = await evalRelease(claimId, 0, 2);
+      expect(code).toBe(1);
+      expect(released).toBe(0);
+      expect(deadlettered).toBe(3);
+      expect(dlqDropped).toBe(1);
+      expect(await redis.llen(DLQ_KEYS.list(actor))).toBe(2);
+      expect(await redis.get(DLQ_KEYS.dropped(actor))).toBe("1");
+      expect(await redis.scard(DLQ_NOTICE_KEYS.pending(actor))).toBe(3);
+    });
+
+    it("records no notice id for a system-authored task (F3)", async () => {
+      const sysTask = JSON.stringify({ id: "sys-1", from: SYSTEM, to: actor, timestamp: T0, type: "task", payload: { content: "x" } });
+      const claimId = await claimTask(sysTask);
+      const [code, , deadlettered] = await evalRelease(claimId, 0, 1000);
+      expect(code).toBe(1);
+      expect(deadlettered).toBe(1);
+      expect(await redis.scard(DLQ_NOTICE_KEYS.pending(actor))).toBe(0);
+    });
+
+    it("store.release dead-letters after the frozen cap and leaves the DLQ entry (F3 store path)", async () => {
+      let claimId = await claimTask(envelope("cap-1"));
+      let last: Awaited<ReturnType<TaskClaimStore["release"]>> | undefined;
+      for (let i = 0; i < 6; i += 1) {
+        last = await store.release({ claim_id: claimId, actor_id: actor, session_id: session });
+        expect(last.ok).toBe(true);
+        if (i < 5) {
+          const re = expectOk(await store.claim({ actor_id: actor, session_id: session, max_batch: 1, ttl_seconds: 300, now: T0 }));
+          claimId = re.claim!.claim_id;
+        }
+      }
+      expect(last!.ok && last!.deadlettered).toBe(1);
+      expect(await redis.llen(DLQ_KEYS.list(actor))).toBe(1);
+      // The store path must retry the notice, exactly as recovery does.
+      expect(await inboxDepth(redis, actor)).toBe(1);
+      const listed = expectOk(await store.deadLetterEntries({ actor_id: actor }));
+      expect(listed.entries[0]!.message_id).toBe("cap-1");
+    });
+
+    it("refuses a wrong-typed inbox and keeps the claim (FIX1 parity)", async () => {
+      const claimId = await claimTask(envelope("wt-1"));
+      await redis.set(SESSION_KEYS.queue(actor), "not-a-list");
+      const refused = await store.release({ claim_id: claimId, actor_id: actor, session_id: session });
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error.code).toBe("store_corrupt");
+      expect(await redis.hget(CLAIM_KEYS.claims, claimId)).not.toBeNull();
+    });
+
+    it("refuses a wrong-typed claims index and keeps the claim (F-1)", async () => {
+      const claimId = await claimTask(envelope("idx-1"));
+      await redis.set(CLAIM_KEYS.index(actor), "not-a-zset");
+      const [code, role] = await evalRelease(claimId, 5, 1000);
+      expect(code).toBe(-1);
+      expect(role).toBe("index");
+      expect(await redis.hget(CLAIM_KEYS.claims, claimId)).not.toBeNull();
+      expect(await inboxDepth(redis, actor)).toBe(0);
+    });
+
+    it("release of an unknown claim is a typed unknown_claim", async () => {
+      const missing = await store.release({ claim_id: "missing-claim", actor_id: actor, session_id: session });
+      expect(missing.ok).toBe(false);
+      if (!missing.ok) expect(missing.error.code).toBe("unknown_claim");
+    });
+  });
+
   it("a foreign session acknowledge is not_claim_owner without revealing the owning session", async () => {
     await pushTasks(redis, actorId, ["x1"]);
     const claimed = expectOk(await store.claim(claimReq()));

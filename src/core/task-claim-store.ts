@@ -620,25 +620,39 @@ return purge_actor_claims(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], ARGV[1])`
    * Recovery counters are incremented exactly as lazy recovery does, so a
    * message that keeps being released is dead-lettered once it exceeds the
    * cap. Only the claiming session may release its claim.
+   *
+   * Full recovery parity: re-queued tasks emit the same inbox wake event a
+   * fresh send does (so an idle runtime blocked in XREAD wakes at once), and a
+   * release-triggered dead letter updates the DLQ dropped counter and the
+   * notice-pending state; a committed release then retries pending notices via
+   * tryNotifyDeadLetters, exactly like recoverExpired.
    */
   async release(input: AcknowledgeInput): Promise<ReleaseResult> {
     const result = (await this.redis.eval(
       this.releaseScript,
-      4,
+      9,
       CLAIM_KEYS.claims,
       CLAIM_KEYS.index(input.actor_id),
       SESSION_KEYS.queue(input.actor_id),
       DLQ_KEYS.list(input.actor_id),
+      SESSION_KEYS.inboxEvents(input.actor_id),
+      DLQ_KEYS.dropped(input.actor_id),
+      DLQ_NOTICE_KEYS.pending(input.actor_id),
+      DLQ_NOTICE_KEYS.overflow(input.actor_id),
+      DLQ_NOTICE_KEYS.window(input.actor_id),
       input.claim_id,
       input.actor_id,
       input.session_id,
       DLQ_PROVISIONAL.RECOVER_CAP,
       DLQ_PROVISIONAL.DLQ_MAX_LENGTH,
-      DLQ_PROVISIONAL.RECOVER_COUNTER_TTL_SECONDS
-    )) as [number, number, number];
+      DLQ_PROVISIONAL.RECOVER_COUNTER_TTL_SECONDS,
+      SYSTEM_SENDER
+    )) as [number, number | string, number | string, number | string];
     const [code, released, deadlettered] = result;
 
     if (code === 1) {
+      // Match recovery: a committed release retries pending notice state.
+      await tryNotifyDeadLetters(this.redis, input.actor_id);
       return { ok: true, released: released as unknown as number, deadlettered: deadlettered as unknown as number };
     }
     if (code === 2) {
