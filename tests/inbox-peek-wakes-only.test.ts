@@ -66,8 +66,8 @@ describe("wakeScan: the --list rule over the whole queue", () => {
     const request = randomUUID();
     await redis.set(SESSION_KEYS.outstanding(agent, request), "peer", "EX", 60);
     keys.push(SESSION_KEYS.outstanding(agent, request));
-    await push(agent, { type: "result", payload: { in_reply_to: request } });
-    await push(agent, { type: "result", payload: { in_reply_to: randomUUID() } }); // request not outstanding
+    await push(agent, { type: "result", payload: { content: "done", in_reply_to: request } });
+    await push(agent, { type: "result", payload: { content: "done", in_reply_to: randomUUID() } }); // request not outstanding
     const scan = await wakeScan(redis, agent);
     expect(scan).toEqual({ unclaimed: 4, wakeEligible: 2 });
   });
@@ -97,7 +97,7 @@ describe("watchInbox --wakes-only", () => {
     const request = randomUUID();
     await redis.set(SESSION_KEYS.outstanding(agent, request), "peer", "EX", 60);
     keys.push(SESSION_KEYS.outstanding(agent, request));
-    await push(agent, { type: "result", from: "peer", payload: { in_reply_to: request } });
+    await push(agent, { type: "result", from: "peer", payload: { content: "done", in_reply_to: request } });
     const outcome = await waiting;
     expect(outcome).toEqual({ kind: "mail", pending: 2, expired: 0, wakeEligible: 1 });
   });
