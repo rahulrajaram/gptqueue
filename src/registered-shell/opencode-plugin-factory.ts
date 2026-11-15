@@ -16,6 +16,8 @@ import { claimTasksSchema } from "../mcp-server/tools/claim-tasks.js";
 import { acknowledgeTasksSchema } from "../mcp-server/tools/acknowledge-tasks.js";
 import { acknowledgeMessagesSchema } from "../mcp-server/tools/acknowledge-messages.js";
 import { renewClaimSchema } from "../mcp-server/tools/renew-claim.js";
+import { claimDetailsSchema } from "../mcp-server/tools/claim-details.js";
+import { releaseClaimSchema } from "../mcp-server/tools/release-claim.js";
 import { queueStatusSchema } from "../mcp-server/tools/queue-status.js";
 import { listAgentsSchema } from "../mcp-server/tools/list-agents.js";
 import { dlqRequeueSchema } from "../mcp-server/tools/dlq-requeue.js";
@@ -222,6 +224,14 @@ Object.freeze({
   gptqueue_renew_claim: forwarded(
     "gptqueue_renew_claim", "renew_claim",
     "Renew a claim while authorized work remains underway.", boundSchema(renewClaimSchema),
+  ),
+  gptqueue_claim_details: forwarded(
+    "gptqueue_claim_details", "claim_details",
+    "[safety: readonly] Fetch this bound session's own claim's full task payloads by claim id (recovery read after compaction or a lost claim_tasks output).", boundSchema(claimDetailsSchema),
+  ),
+  gptqueue_release_claim: forwarded(
+    "gptqueue_release_claim", "release_claim",
+    "[safety: writable] Release one of this bound session's own claims: its tasks return to the inbox and the claim is removed, so they can be claimed again.", boundSchema(releaseClaimSchema),
   ),
   gptqueue_send_message: forwarded(
     "gptqueue_send_message", "send_message",

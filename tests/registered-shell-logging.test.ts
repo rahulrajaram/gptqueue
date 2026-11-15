@@ -130,7 +130,10 @@ describe("registered shell lifecycle logging", () => {
     const client = new Client({ name: "invalid-log-test", version: "1" });
     const redis = new Redis(REDIS_URL);
     try {
-      await client.connect(clientTransport); expect((await client.listTools()).tools.length).toBe(13);
+      // The invalid log dir must not shrink the advertised tool set: the full
+      // 19 names (base four + SHELL_TOOL_NAMES) are pinned exactly in
+      // tests/registered-shell.test.ts, which forces this count to stay current.
+      await client.connect(clientTransport); expect((await client.listTools()).tools.length).toBe(19);
       await shell.close();
       expect(await redis.scard(SESSION_KEYS.agentSessions(shell.agentName))).toBe(0);
       expect(await redis.exists(SESSION_KEYS.lease(shell.sessionId), SESSION_KEYS.session(shell.sessionId))).toBe(0);

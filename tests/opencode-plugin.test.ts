@@ -113,11 +113,14 @@ describe("OpenCode plugin frontend", () => {
     });
     expect(Object.keys(plugin.tool)).toEqual([
       "gptqueue_claim_tasks", "gptqueue_acknowledge_tasks", "gptqueue_acknowledge_messages", "gptqueue_renew_claim",
+      "gptqueue_claim_details", "gptqueue_release_claim",
       "gptqueue_send_message", "gptqueue_receive_message", "gptqueue_get_queue_status", "gptqueue_list_agents",
       "gptqueue_get_runtime_status", "gptqueue_find_agents", "gptqueue_get_agent_details", "gptqueue_get_delivery_status",
-      "gptqueue_dlq_status", "gptqueue_dlq_requeue",
+      "gptqueue_dlq_status", "gptqueue_dlq_requeue", "gptqueue_list_my_claims",
     ]);
     expect(plugin.tool.gptqueue_claim_tasks!.args).not.toHaveProperty("session_id");
+    expect(plugin.tool.gptqueue_claim_details!.args).not.toHaveProperty("session_id");
+    expect(plugin.tool.gptqueue_release_claim!.args).not.toHaveProperty("session_id");
     // The sidecar's safety tags reach the OpenCode surface (parity F1).
     expect(plugin.tool.gptqueue_dlq_status!.description).toMatch(/^\[safety: readonly\]/u);
     expect(plugin.tool.gptqueue_dlq_requeue!.description).toMatch(/^\[safety: writable\]/u);

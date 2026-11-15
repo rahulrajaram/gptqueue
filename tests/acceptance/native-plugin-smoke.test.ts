@@ -61,7 +61,13 @@ describe("native OpenCode plugin loader smoke", () => {
     await owned?.close();
   });
 
-  it("loads default-only plugin, exposes tools, and auto-registers a native session", async (ctx) => {
+  // This smoke's own phase budgets (HTTP readiness, tool ids, session creation,
+  // registration polling) exceed the suite-wide 15s unit default: opencode's
+  // plugin-loaded instance creation alone is slower than that here (measured
+  // ~40–50s with ANY file:// plugin), so the test carries an explicit budget
+  // that fits its internal deadlines. This aligns the harness budget with the
+  // test's design; it does not relax what the test proves.
+  it("loads default-only plugin, exposes tools, and auto-registers a native session", { timeout: 150_000 }, async (ctx) => {
     const prerequisites = opencodePrerequisites(existsSync, { binary: opencodeBin, models: modelsPath, plugin: pluginPath });
     ctx.skip(prerequisites.kind === "unavailable", "OpenCode model/binary prerequisites unavailable");
     // OpenCode is present: a missing built plugin is a build failure, not a skip.
@@ -121,7 +127,14 @@ describe("native OpenCode plugin loader smoke", () => {
       const base = `http://127.0.0.1:${port}`;
       const directory = workDir!;
       phase = "http_readiness";
-      const readyDeadline = Date.now() + 20_000;
+      // The first /config request triggers opencode's instance creation, which
+      // loads plugins and is slow with ANY file:// plugin (measured ~40–50s in
+      // this guest, where the trivial-plugin case costs the same). The bounded
+      // per-request aborts below are load-bearing: a hung first request only
+      // makes progress after the client disconnects and retries, so keep the
+      // attempts short and give the overall readiness horizon room to fit the
+      // measured instance-creation time.
+      const readyDeadline = Date.now() + 90_000;
       let ready = false;
       while (Date.now() < readyDeadline) {
         if (child.exitCode !== null) throw new Error(`OpenCode exited before HTTP readiness (${child.exitCode})`);
