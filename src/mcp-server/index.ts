@@ -33,23 +33,39 @@ const claudeRecord = workerSession ? null : startClaudeSessionRecord(redisClient
 // Under Claude, registration may wait up to a lease TTL for an old-format
 // holder (ID-3), longer than Claude should wait for MCP startup, so it runs in
 // the background: initialize is answered at once and tool calls wait for it.
-// A transient failure (Redis unavailable) is retried in the background with
-// capped backoff, so it never becomes a permanent refusal (BC-F1).
+// A transient failure (Redis unavailable) is retried with capped backoff on
+// every path (BC-F1), so it never becomes a permanent refusal; a final
+// failure is logged as startup_registration_failed.
 let lastRegistrationError: unknown = null;
 const registration: Promise<unknown> = !initialName
   ? Promise.resolve()
-  : claudeRecord
-    ? registerUntilFinal(
-      () => registerClaudeAware(redisClient, initialName, process.env, undefined, (origin) => claudeRecord.setOrigin(origin)),
-      (error, delayMs) => {
-        lastRegistrationError = error;
-        process.stderr.write(`${JSON.stringify({ event: "startup_registration_retry", message: (error as Error).message, delay_ms: delayMs })}\n`);
-      })
-    : registerClaudeAware(redisClient, initialName);
-if (!claudeRecord) await registration;
+  : registerUntilFinal(
+    () => claudeRecord
+      ? registerClaudeAware(redisClient, initialName, process.env, undefined, (origin) => claudeRecord.setOrigin(origin))
+      : registerClaudeAware(redisClient, initialName),
+    (error, delayMs) => {
+      lastRegistrationError = error;
+      process.stderr.write(`${JSON.stringify({ event: "startup_registration_retry", message: (error as Error).message, delay_ms: delayMs })}\n`);
+    });
+
+// GQ-001: attach the failure handler BEFORE awaiting `registration`. A
+// rejected registration awaited at top level rethrows and fails module
+// evaluation before the next statement can run, so this log — and the clean
+// exit below — were unreachable on the non-Claude path, which instead died
+// as an unhandled crash (the documented background retry never applied).
 registration.catch((error: unknown) => {
   process.stderr.write(`${JSON.stringify({ event: "startup_registration_failed", code: (error as { code?: unknown }).code ?? null, message: (error as Error).message })}\n`);
 });
+if (!claudeRecord) {
+  // Fail fast on a final (non-retryable) failure — logged above — as a
+  // clean non-zero exit rather than a module-evaluation crash. Transient
+  // failures keep retrying above and never reach this branch.
+  const failed = await registration.then(() => false, () => true);
+  if (failed) {
+    await redisClient.shutdown().catch(() => undefined);
+    process.exit(1);
+  }
+}
 
 // Graceful shutdown. Besides signals, exit when the client goes away (stdin
 // ends or the MCP connection closes): an orphaned server would otherwise keep
