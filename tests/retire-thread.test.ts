@@ -692,18 +692,36 @@ describe("retire-thread preflight budget on a slow daemon", () => {
   const abortRejection = (error: () => Error) => (signal?: AbortSignal): Promise<never> =>
     new Promise<never>((_, reject) => { signal?.addEventListener("abort", () => reject(error()), { once: true }); });
 
+  it("the re-read budget is still finite: a stalled re-read exits 4 with nothing archived", async () => {
+    vi.useFakeTimers();
+    try {
+      let reads = 0;
+      const script = scriptRpc({ "thread/read": [ok(idleThread("t1"))], "thread/archive": [ok({})] });
+      const f = makeFixture({}, {}, happyStore(), {
+        monotonic: () => 0,
+        rpc: { request: (method, params, kind, signal) => method === "thread/read" && ++reads === 2
+          ? abortRejection(() => new Error("socket closed"))(signal)
+          : script.request(method, params, kind, signal) },
+      });
+      const pending = f.run();
+      await vi.advanceTimersByTimeAsync(20_001);
+      const result = await pending;
+      expect(reads).toBe(2);
+      expect(result.exitCode).toBe(4);
+      expect(result.code).toBe("deadline_exceeded");
+      expect(script.calls.filter((call) => call.method === "thread/archive")).toHaveLength(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it.each([
     ["a /proc snapshot (proc_unreadable on abort)", "snapshot"],
     ["an RPC (plain error on abort)", "rpc"],
   ] as const)("an exhausted budget is reported as deadline_exceeded, not as the abort of %s", async (_label, stalled) => {
     vi.useFakeTimers();
     try {
-      const overrides: Partial<RetireDeps> = { monotonic: () => 0 };
-      if (stalled === "snapshot") {
-        overrides.snapshot = abortRejection(() => Object.assign(new Error("cannot classify process 1"), { mode: "proc_unreadable" }));
-      } else {
-        overrides.rpc = { request: (_method, _params, _kind, signal) => abortRejection(() => new Error("socket closed"))(signal) };
-      }
+      const overrides: Partial<RetireDeps> = stalled === "snapshot"
+        ? { monotonic: () => 0, snapshot: abortRejection(() => Object.assign(new Error("cannot classify process 1"), { mode: "proc_unreadable" })) }
+        : { monotonic: () => 0, rpc: { request: (_method: string, _params: Record<string, unknown>, _kind: unknown, signal?: AbortSignal) => abortRejection(() => new Error("socket closed"))(signal) } };
       const f = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, happyStore(), overrides);
       const pending = f.run();
       await vi.advanceTimersByTimeAsync(20_001);
