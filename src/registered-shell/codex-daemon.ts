@@ -493,7 +493,9 @@ export const snapshotDaemon = async (
       throw new DiscoveryError("proc_unreadable", `cannot classify daemon child ${pid}: ${messageOf(error)}`);
     }
     if (argv === null || argv.length === 0) {
-      if (await readProcessStat(procRoot, pid, signal) === null) continue;
+      // The child may have exited (and become a zombie) since the first stat read.
+      const recheck = await readProcessStat(procRoot, pid, signal);
+      if (recheck === null || isExitedState(recheck)) continue;
       throw new DiscoveryError("proc_unreadable", `daemon child ${pid} has no readable cmdline`);
     }
     const child: ProcPin = { pid, startTicks: stat.startTicks, ppid: stat.ppid, argv, nsPid: null };
