@@ -11,7 +11,7 @@
     "gptqueue-pty": "./bin/gptqueue-pty"
   },
   "scripts": {
-    "build": "tsc && cp -r src/mcp-server/lua dist/mcp-server/",
+    "build": "tsc && cp -r src/mcp-server/lua dist/mcp-server/ && node scripts/write-build-manifest.mjs",
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "prepare": "npm run build",
     "hooks:install": "scripts/install-commithooks",

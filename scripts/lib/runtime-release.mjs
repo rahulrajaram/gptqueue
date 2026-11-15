@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { privateRedisEnv } from "./owned-redis.mjs";
+import { digestSourceTree } from "./build-provenance.mjs";
 
 export const STAGED_ENTRIES = Object.freeze(["dist", "bin", "package.json", "package-lock.json"]);
 /** bin/ entry points a release must ship (operator tools are invoked from <prefix>/current/bin). */
@@ -42,7 +43,7 @@ const DEPS_DIR = "node_modules";
 const META_FILES = Object.freeze(["manifest.json", "verify.json"]);
 
 export class ReleaseError extends Error {
-  /** @param {"dirty_checkout"|"missing_build"|"stale_lua"|"digest_mismatch"|"tampered_release"|"verify_failed"|"no_previous"|"not_installed"|"bad_argument"} code */
+  /** @param {"dirty_checkout"|"missing_build"|"stale_build"|"stale_lua"|"digest_mismatch"|"tampered_release"|"verify_failed"|"no_previous"|"not_installed"|"bad_argument"} code */
   constructor(code, message) { super(message); this.name = "ReleaseError"; this.code = code; }
 }
 
@@ -92,6 +93,15 @@ export function checkSource(source, { allowDirty = false } = {}) {
   if (tracked && !allowDirty) throw new ReleaseError("dirty_checkout", `tracked changes in ${source}:\n${tracked}`);
   for (const entry of STAGED_ENTRIES) {
     if (!existsSync(join(source, entry))) throw new ReleaseError("missing_build", `${entry} missing in ${source}; run npm run build`);
+  }
+  const buildManifestPath = join(source, "dist/build-manifest.json");
+  let buildManifest;
+  try { buildManifest = JSON.parse(readFileSync(buildManifestPath, "utf8")); }
+  catch { throw new ReleaseError("stale_build", `dist/build-manifest.json is missing or invalid in ${source}; run npm run build`); }
+  const head = git(source, ["rev-parse", "HEAD"]).trim();
+  const sourceDigest = digestSourceTree(join(source, "src"));
+  if (buildManifest.gitHead !== head || buildManifest.sourceDigest !== sourceDigest) {
+    throw new ReleaseError("stale_build", `dist was not built from HEAD and current src in ${source}; run npm run build`);
   }
   // The build copies Lua into dist; refuse a stale dist whose Lua differs from source.
   for (const name of readdirSync(join(source, LUA_SOURCE_DIR)).filter((n) => n.endsWith(".lua"))) {
