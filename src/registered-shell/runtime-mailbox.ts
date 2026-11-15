@@ -47,7 +47,7 @@ return raw
 /**
  * Exact native continuity. The only envelopes ever moved are those a peer
  * sent to this sidecar's per-startup provisional name; they belong to the
- * bound mailbox (DL-2).
+ * bound mailbox.
  */
 export const restoreRuntimeMailbox = async (client: RedisClient, binding: RuntimeBinding, opts: Readonly<{ fixedName?: boolean }> = {}): Promise<string> => {
   const validated = runtimeBindingSchema.parse(binding);

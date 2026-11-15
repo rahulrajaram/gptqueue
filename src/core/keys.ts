@@ -133,7 +133,7 @@ export const SESSION_KEYS = {
    */
   registrationAuditGap: "gptq:registration-audit:gap",
   /**
-   * DL-2: names registered as a sidecar's per-startup provisional identity
+   * Names registered as a sidecar's per-startup provisional identity
    * and not yet adopted or bound. The provisional sweeper retires a member
    * whose sessions all expired (core/provisional-sweeper.ts).
    */

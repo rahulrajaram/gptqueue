@@ -201,7 +201,7 @@ export const startRegisteredShell = async (
     shutdown.signal.throwIfAborted();
     const sessionId = redis.sessionId;
     if (!sessionId) throw new Error("Registration returned no session");
-    // get_runtime_status reports the binding supervisor's state while unbound (WK-6).
+    // get_runtime_status reports the binding supervisor's state while unbound.
     const runtimeTools = { ...runtime, status: () => withBindingState(runtime.status(), bindingState) };
     server = createBoundMcpServer({ agentName, redisClient: redis, runtime: runtimeTools }, shutdown.signal);
     // Describe the implementation instantiated by this process, not files currently on disk.
@@ -241,7 +241,7 @@ export const startRegisteredShell = async (
         lifecycle.emit({ ...bindingLifecycleEntry(state, runtime.status()), session_id: sessionId });
       };
       const provisional = redis.requireRegistered();
-      // The current name: a bind may adopt a different mailbox (COR-F4).
+      // The current name: a bind may adopt a different mailbox.
       void bootstrapCodexBinding(runtime, () => redis.agentName ?? provisional, identity.working_directory, shutdown.signal,
         undefined, { onState, onProgress })
         .catch(() => lifecycle.emit({ event: "native_binding_unavailable", phase: "binding",
@@ -261,7 +261,7 @@ export const startRegisteredShell = async (
 export const runRegisteredShell = async (argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env): Promise<void> => {
   const options = parseRegisteredShellArgs(argv);
-  // GPTQUEUE_WORKER=1: serve MCP without Redis, registration or binding (sv-2).
+  // GPTQUEUE_WORKER=1: serve MCP without Redis, registration or binding.
   const worker = isExplicitWorker(env);
   const stop = new AbortController();
   const interrupt = () => { process.exitCode = 130; stop.abort(); };

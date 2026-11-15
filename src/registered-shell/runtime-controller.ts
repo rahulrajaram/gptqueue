@@ -69,7 +69,7 @@ export const createRuntimeController = (
   let host: RuntimeAdapter | undefined;
   let dispatcher: InboxDispatcher | undefined;
   let closed = false;
-  // DL-2: the bound mailbox a failed adoption targeted, and the runtime
+  // The bound mailbox a failed adoption targeted, and the runtime
   // mapping that named it. While this client still holds its provisional
   // name, closing retires that name into it, but only while that mapping
   // still names the target (an operator remap must not be undone).

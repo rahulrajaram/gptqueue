@@ -62,7 +62,7 @@ export type CodexBootstrapOptions = Readonly<{
 }>;
 
 /**
- * WK-6: keep trying to bind for the life of the process. A daemon that is
+ * Keep trying to bind for the life of the process. A daemon that is
  * briefly unavailable at startup (reboot, restart) must not leave the
  * sidecar unbound for good. Fast attempts first, then capped exponential
  * backoff with jitter; a daemon notification ends a wait early. Stops once

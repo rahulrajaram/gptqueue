@@ -31,7 +31,7 @@ export const startClaudeSessionRecord = (client: IdentitySource, env: NodeJS.Pro
   return Object.freeze({ remove: () => publish(null, null), setOrigin: (next: NameOrigin) => { origin = next; } });
 };
 
-/** True for the core's typed refusal AGENT_NAME_HELD of a name held by a live session (decision D2; compared case-insensitively). */
+/** True for the core's typed refusal AGENT_NAME_HELD of a name held by a live session (compared case-insensitively). */
 export const isNameHeld = (error: unknown): boolean => {
   const code = (error as { code?: unknown } | null)?.code;
   return typeof code === "string" && code.toLowerCase() === "agent_name_held";

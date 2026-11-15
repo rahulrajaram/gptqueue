@@ -108,7 +108,7 @@ export type PiGptqueueUnavailableCode =
   "gptqueue_unavailable" | "runtime_binding_refused" | "runtime_binding_failed" | "runtime_unsupported"
   /** GPTQUEUE_WORKER=1 in the Pi process: never connects, never retries. */
   | "headless_worker"
-  /** f-2957: an Agent-tool child session: never spawns a sidecar, never registers. */
+  /** An Agent-tool child session: never spawns a sidecar, never registers. */
   | "pi_subagent_child";
 export class PiGptqueueUnavailableError extends Error {
   constructor(readonly code: PiGptqueueUnavailableCode, readonly reason: string) {
@@ -150,7 +150,7 @@ const bindError = (code: string | undefined, text: string): Error => {
 };
 
 /**
- * f-2957: the parent session recorded in a Pi session header, when this
+ * The parent session recorded in a Pi session header, when this
  * session is an Agent-tool child (or a fork/new-session that named a parent).
  * Undefined for primary sessions and unreadable/ephemeral sessions.
  */
@@ -403,9 +403,9 @@ export const createPiExtension = (
       supersede(); cancelRetry(); retryAttempt = 0; degraded = undefined;
       context = current;
       const mine = generation;
-      // f-2957: a Pi Agent-tool child session must not register its own sidecar
+      // A Pi Agent-tool child session must not register its own sidecar
       // mailbox — that minted a second online identity for the same worktree and
-      // forced Overwatch to HOLD while correlating them. Children are detected
+      // stalled the coordinator correlating them. Children are detected
       // by the parent recorded in the session header at a startup session_start;
       // the user's own new/resume/fork sessions also record a parent but must
       // keep their mailbox, so ONLY a "startup" start (a fresh sidechain's

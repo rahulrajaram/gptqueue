@@ -50,7 +50,7 @@ return pruned
 `;
 
 /**
- * Exclusive name claim (D2, ID-1, ID-5). Atomically decides whether a new
+ * Exclusive name claim. Atomically decides whether a new
  * session may hold an agent name and, if so, creates it. Every member of the
  * name's session set is classified:
  *   - no lease: expired; removed (taken over);
@@ -130,7 +130,7 @@ export interface ClaimOptions {
   /** The caller's own current session, which never blocks its re-registration. */
   readonly selfSessionId?: string | null;
   /**
-   * DL-2: mark the name as a sidecar's provisional identity, atomically with a
+   * Mark the name as a sidecar's provisional identity, atomically with a
    * successful claim (never on a refused one). A non-provisional claim clears
    * any mark, so a sweep can only ever retire a name its holder declared.
    */
@@ -287,7 +287,7 @@ export class SessionStore {
 
     // Record, initial lease, and set membership land together (so a
     // concurrent prune never sees a leaseless member) and only after the
-    // exclusive name check passes, in one script (D2).
+    // exclusive name check passes, in one script.
     const host = hostname();
     const pidns = pidNamespaceId();
     const deadHolders = await this.deadLocalHolders(agentName, host, pidns);

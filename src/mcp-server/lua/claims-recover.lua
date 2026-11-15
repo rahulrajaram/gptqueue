@@ -43,7 +43,7 @@
 -- ARGV[3] = dlq_max_length (int >= 1): LTRIM bound on the DLQ list (keep newest)
 -- ARGV[4] = counter_ttl_seconds (int >= 1): EX placed on a fresh recovery counter
 --
--- Wake and size (DL-2): a re-queued task emits the same inbox event a fresh
+-- Wake and size: a re-queued task emits the same inbox event a fresh
 -- send would (wake_plan in claims-lib.lua), so an idle runtime blocked in
 -- XREAD wakes at once instead of waiting for a rescan. Recovery is NOT bounded
 -- by the send admission bound: accepted work is never dropped. The overshoot
