@@ -8,6 +8,7 @@ import {
   classifyPresence,
   type RuntimePresenceState,
 } from "../../core/actor-presence.js";
+import { AGENT_NAME_PATTERN } from "../../core/session-store.js";
 import type { ActorDirectoryRecord } from "../../core/actor-directory.js";
 import type { WakeLease } from "../../core/wake-lease.js";
 import { dispatchLaunch } from "../launcher.js";
@@ -23,7 +24,12 @@ export const sendMessageSchema = z.object({
     .describe(
       "Optional session_id returned by register_agent. Required when the transport does not preserve process-local registration state."
     ),
-  to: z.string().describe("Target agent name"),
+  to: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(AGENT_NAME_PATTERN, "Recipient name must be 1-128 characters from letters, digits, '.', '_' or '-'.")
+    .describe("Target agent name"),
   content: z.string().describe("Message content"),
   type: z
     .enum(["task", "result", "status", "error", "ping"])

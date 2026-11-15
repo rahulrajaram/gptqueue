@@ -1,10 +1,14 @@
 import { z } from "zod";
 import type { RedisClient } from "../redis-client.js";
 import { toolResult } from "../tool-result.js";
+import { AGENT_NAME_PATTERN } from "../../core/session-store.js";
 
 export const registerAgentSchema = z.object({
   name: z
     .string()
+    .min(1)
+    .max(128)
+    .regex(AGENT_NAME_PATTERN, "Agent name must be 1-128 characters from letters, digits, '.', '_' or '-'.")
     .describe(
       "Name for this agent. Ask the user to choose one if not already known."
     ),

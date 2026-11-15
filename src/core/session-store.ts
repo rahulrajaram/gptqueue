@@ -23,6 +23,18 @@ const REGISTRY_ROLLBACK_KEYS = [
 ] as const;
 
 /**
+ * SEC-1: the one rule an agent name must satisfy before the core accepts it
+ * as a Redis key component (`gptq:*:<name>`, including the Lua key
+ * expressions built as `'gptq:q:' .. name`): 1..128 characters from
+ * [A-Za-z0-9._-]. Deliberately NOT the durable actors' 64-character
+ * IDENTITY_CHARSET bound (actor-presence.ts): 427 of 725 live registered
+ * names are longer than 64 (max 87) and every one matches this pattern, so
+ * this rule accepts them all. Mirrored by the register_agent `name` and
+ * send_message `to` zod schemas.
+ */
+export const AGENT_NAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
  * Renew a lease only while its session record exists, re-adding the session
  * to its agent's set. A closed or pruned session is never resurrected as an
  * orphan record, and a session that merely stalled past its TTL comes back.
@@ -268,6 +280,15 @@ export class SessionStore {
     if (agentName === SYSTEM_SENDER) {
       throw new GptQueueError("AGENT_NAME_RESERVED", `Agent name '${agentName}' is reserved for gptqueue's own messages.`, { name: agentName });
     }
+    if (!AGENT_NAME_PATTERN.test(agentName)) {
+      // SEC-1: an agent name becomes part of every `gptq:*:<name>` key and
+      // of Lua key expressions, so an empty, whitespace, ':'-containing or
+      // oversized name must be refused at this boundary — not stored as a
+      // nameless or key-colliding identity.
+      throw new GptQueueError("AGENT_NAME_INVALID",
+        `Agent name is invalid: use 1-128 characters from letters, digits, '.', '_' or '-'.`,
+        { length: agentName.length, excerpt: agentName.slice(0, 32) });
+    }
     const sessionId = uuidv4();
     const now = new Date().toISOString();
 
@@ -425,6 +446,25 @@ export class SessionStore {
     return holders.filter((sid): sid is string => sid !== null);
   }
 
+  /**
+   * GQ-002: the ids of `agentName`'s sessions — besides `exceptSessionId` —
+   * that still hold a live lease: the other live holders of a (shared)
+   * name. The rename path refuses while any exist, so a shared mailbox and
+   * its registry entry are never migrated out from under live co-holders.
+   */
+  async liveSessionsExcept(agentName: string, exceptSessionId: string | null): Promise<readonly string[]> {
+    const members = await this.redis.smembers(SESSION_KEYS.agentSessions(agentName));
+    const others = members.filter((sid) => sid !== exceptSessionId);
+    if (others.length === 0) return [];
+    const leases = await execPipeline<number>(
+      others.reduce(
+        (pipe, sid) => pipe.exists(SESSION_KEYS.lease(sid)),
+        this.redis.pipeline()
+      )
+    );
+    return others.filter((_, i) => leases[i] === 1);
+  }
+
   /** Refresh a session's lease TTL. Returns false when the session no longer exists. */
   async refreshLease(sessionId: string): Promise<boolean> {
     const renewed = await this.redis.eval(
@@ -520,6 +560,10 @@ export class SessionStore {
    * unknown name cannot silently create an orphan mailbox.
    */
   async resolveRegistered(name: string): Promise<boolean> {
+    // SEC-1: an invalid name can never be a registered recipient; refuse it
+    // here (send-time resolution) too, so a legacy or hand-written registry
+    // field cannot make send_message deliver into a malformed key.
+    if (!AGENT_NAME_PATTERN.test(name)) return false;
     return (await this.redis.hexists(SESSION_KEYS.registry, name)) === 1;
   }
 
