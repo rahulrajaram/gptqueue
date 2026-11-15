@@ -12,13 +12,18 @@ first acknowledged task.
   private, socket-only `redis-server` (`/usr/bin/redis-server` must be
   installed; see `docs/OPERATING_RULES.md` §10)
 
-## 1. Install
+## 1. Build and run
 
 ```bash
 cd /path/to/gptqueue
-scripts/install.sh              # builds, restarts the server on 127.0.0.1:8101, health-checks
+npm install                     # builds via prepare
+bin/gptqueue-http --port 8101   # serves MCP on loopback; state lives in Redis
 curl http://127.0.0.1:8101/health
 ```
+
+`npm install` installs dependencies and builds `dist/`. `bin/gptqueue-http` starts the
+HTTP transport on the chosen port. Do not run `scripts/install.sh` on this checkout unless
+you intend to deploy a long-lived server on this machine.
 
 The server speaks MCP over Streamable HTTP at `http://127.0.0.1:8101/mcp`
 (it binds loopback; see "Security" in the README for remote binds). A stdio
@@ -113,8 +118,8 @@ Before a session works in a project tree it can claim custody:
 Release with a structured handoff (`custody_release`); if a session dies,
 the claim is forfeited on expiry and a successor takes over with
 `custody_claim` plus an explicit untracked-file inventory. Custody is
-orthogonal to messaging — see `docs/CODE_REVIEW_HARNESS.md`'s sibling docs
-and the tool descriptions for the full state machine.
+orthogonal to messaging — see `docs/OPERATING_RULES.md` and the tool
+descriptions for the full state machine.
 
 ## 6. Watching the system
 

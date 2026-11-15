@@ -289,7 +289,7 @@ from another sender. Mail that needs the recipient to act must be sent as `type=
 
 ## Install note (not applied)
 
-1. `npm run build` in the deployed checkout (`<path-to-gptqueue>`).
+1. `npm run build` in your checkout (`<path-to-gptqueue>`).
 2. Replace the untracked `~/.local/bin` scripts with symlinks to the checkout. The shims resolve
    `dist/` relative to their real path.
    ```

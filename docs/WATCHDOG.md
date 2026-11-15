@@ -18,8 +18,8 @@ configured leads. Scheduling it (a timer) is an operator decision and is not ins
   that ends at its deadline or on a Redis error is recorded when Redis is still reachable. So is a config failure (exit 2,
   `error: config_missing` or `config_invalid`), written only after the pass has decided to exit, so a
   broken config cannot leave an old healthy status in place.
-- **Unit environment:** the timer unit sets `Environment=XDG_STATE_HOME=<state-dir>`, so the
-  watchdog's files land in `<state-dir>/gptqueue/watchdog/`. Without it the XDG default
+- **Unit environment:** the timer unit sets `Environment=XDG_STATE_HOME=<state-dir>` (for example
+  `~/.local/state`), so the watchdog's files land in `<state-dir>/gptqueue/watchdog/`. Without it the XDG default
   applies (`~/.local/state/gptqueue/watchdog/`).
 - **Rotation and retention:** before each append, `escalations.jsonl` is renamed to
   `escalations-<UTC date>.jsonl` (with `-1`, `-2`, ... on collision) when it has reached 50 MB, or when

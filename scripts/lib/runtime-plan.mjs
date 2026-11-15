@@ -1,5 +1,5 @@
 // Read-only hot-swap plan: the exact host edits that move every gptqueue entry
-// point from a checkout (e.g. <path-to-gptqueue>) to <prefix>/current.
+// point from a checkout (e.g. ~/src/gptqueue) to <prefix>/current.
 // Nothing here writes outside the returned plan object.
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";

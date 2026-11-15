@@ -111,23 +111,21 @@ Acknowledging a claim clears the counters of its tasks, and `dlq_requeue` restor
 
 ## Install
 
-From npm (ships prebuilt; provides `gptqueue-server`, `gptqueue-http` and `gptqueue-pty`):
-
-```bash
-npm install -g gptqueue
-```
-
-`gptqueue-pty` needs the native `node-pty` module. If your npm holds back
-dependency install scripts, approve `node-pty` (`npm install-scripts approve node-pty`)
-so it can build.
-
-From source:
+**Not yet published to npm.** Build from source (the npm tarball will be provided by the first
+release; publishing is a separate, manual step):
 
 ```bash
 git clone https://github.com/rahulrajaram/gptqueue.git
 cd gptqueue
 npm install   # builds automatically via prepare
 ```
+
+`gptqueue-pty` needs the native `node-pty` module. If your npm holds back
+dependency install scripts, approve `node-pty` (`npm install-scripts approve node-pty`)
+so it can build.
+
+Once published, the package will provide `gptqueue-server`, `gptqueue-http` and
+`gptqueue-pty` for a global `npm install -g gptqueue`.
 
 ## Transports
 
