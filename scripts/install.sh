@@ -32,7 +32,11 @@ if [ -L "$LOG" ]; then
   exit 1
 fi
 if [ -e "$LOG" ]; then
-  chmod 600 -- "$LOG" 2>/dev/null || true
+  if [ ! -O "$LOG" ]; then
+    echo "[install] ERROR: log path $LOG is owned by another user; refusing to write to it" >&2
+    exit 1
+  fi
+  chmod 600 -- "$LOG"
 else
   install -m 0600 /dev/null "$LOG"
 fi
