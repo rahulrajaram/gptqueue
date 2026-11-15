@@ -13,6 +13,16 @@
  * indefinite `starting`: the resolution is based strictly on observed process
  * death.
  *
+ * Pid liveness is only conclusive on the boot and in the PID namespace that
+ * spawned the process. When the lease records that identity (boot id + PID-
+ * namespace inode, attached by the dispatcher together with the pid) and the
+ * probing process is NOT on the same boot and PID namespace — a different
+ * host sharing this Redis, or a sibling container — a failed local probe
+ * proves nothing about the spawned process. Such a lease is reported as
+ * `unknown` and left to its TTL: it is never cleared from a context that
+ * cannot observe the pid. A legacy lease without recorded identity
+ * reconciles by bare local pid liveness, as it always did.
+ *
  * Used by BOTH presence-assembly sites (actor-status.ts and
  * send-message.ts's maybeWake). The caller is responsible for the
  * reconcile → get-lease-again → classify ordering: when `cleared` is true the
@@ -20,7 +30,9 @@
  */
 
 import type { RedisClient } from "../redis-client.js";
-import { isPidAlive } from "../launcher.js";
+import type { WakeLease } from "../../core/wake-lease.js";
+import { hostBootId, isPidAlive } from "../launcher.js";
+import { pidNamespaceId } from "../../core/session-store.js";
 
 /** Liveness of a wake lease's spawn evidence, computed after reconciliation. */
 export type PidLiveness = "alive" | "dead" | "unknown";
@@ -65,6 +77,13 @@ export async function reconcileWakeLease(
     // No spawn evidence to probe; the activation may still be coming up.
     return { cleared: false, pid_liveness: "unknown" };
   }
+  if (hasSpawnHostIdentity(lease) && !isSameSpawnHost(lease)) {
+    // The pid lives on another boot or in another PID namespace: a failed
+    // local probe does not mean the spawned process died, so the lease is
+    // left to its TTL instead of being cleared from a context that cannot
+    // observe it.
+    return { cleared: false, pid_liveness: "unknown" };
+  }
   if (isPidAlive(lease.spawned_pid)) {
     return { cleared: false, pid_liveness: "alive" };
   }
@@ -82,3 +101,17 @@ export async function reconcileWakeLease(
     return { cleared: false, pid_liveness: "dead" };
   }
 }
+
+/** Whether the lease records where its pid was spawned (boot id or pidns). */
+const hasSpawnHostIdentity = (
+  lease: WakeLease
+): boolean =>
+  lease.spawned_boot_id !== undefined || lease.spawned_pidns !== undefined;
+
+/**
+ * Whether the probing process sits on the same boot and in the same PID
+ * namespace the lease's pid was spawned on/in. An unreadable local identity
+ * is a mismatch: without proof of a shared context the pid is unobservable.
+ */
+const isSameSpawnHost = (lease: WakeLease): boolean =>
+  lease.spawned_boot_id === hostBootId() && lease.spawned_pidns === pidNamespaceId();

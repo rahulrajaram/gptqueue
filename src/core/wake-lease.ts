@@ -29,6 +29,15 @@ export interface WakeLease {
   /** Additive spawn evidence; set best-effort by the dispatcher after launch. */
   readonly spawned_pid?: number;
   readonly spawned_at?: string;
+  /**
+   * Additive spawner host identity (kernel boot id of the spawning machine).
+   * A pid is only observable on the boot and PID namespace that spawned it:
+   * reconciliation trusts `spawned_pid` liveness only when these match the
+   * probing process; otherwise the lease is left to its TTL.
+   */
+  readonly spawned_boot_id?: string;
+  /** PID-namespace inode (e.g. "pid:[4026531836]") of the spawning process. */
+  readonly spawned_pidns?: string;
 }
 
 export type WakeLeaseError = Readonly<{
@@ -68,6 +77,14 @@ export interface WakeLeaseAttachSpawnInput {
   readonly lease_id: string;
   readonly pid: number;
   readonly spawned_at: string; // ISO timestamp; the adapter layer reads the clock, not the core
+  /**
+   * Spawner's kernel boot id (/proc/sys/kernel/random/boot_id). Null or
+   * omitted records no identity: the lease stays legacy and reconciles by
+   * bare pid liveness as it always did.
+   */
+  readonly boot_id?: string | null;
+  /** Spawner's PID-namespace inode; null/omitted records no identity. */
+  readonly pidns?: string | null;
 }
 
 
@@ -186,7 +203,9 @@ export class WakeLeaseStore {
       WAKE_LEASE_KEYS.lease(input.actor_id),
       input.lease_id,
       input.pid,
-      input.spawned_at
+      input.spawned_at,
+      input.boot_id ?? "",
+      input.pidns ?? ""
     )) as number;
     return { ok: true, attached: result === 1 };
   }
