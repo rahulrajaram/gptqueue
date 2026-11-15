@@ -22,7 +22,7 @@
     "prepublishOnly": "npm test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "license": "MIT",
   "author": "Rahul Rajaram",

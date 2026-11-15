@@ -4,7 +4,7 @@ Thanks for considering a contribution.
 
 ## Development setup
 
-Requirements: Node.js >= 20, npm, and a local `redis-server` (the test suite starts its
+Requirements: Node.js >= 22, npm, and a local `redis-server` (the test suite starts its
 own private, socket-only instance; `/usr/bin/redis-server` must be installed).
 
 ```bash
@@ -28,7 +28,7 @@ npm test
 npm run test:py
 ```
 
-CI runs the same steps on Node 20 and 22 (`.github/workflows/ci.yml`). Live acceptance
+CI runs the same steps on Node 22 and 24 (`.github/workflows/ci.yml`). Live acceptance
 tests are skipped unless `GPTQUEUE_LIVE_ACCEPTANCE=1`; do not enable them in CI.
 
 ## Commit and review conventions

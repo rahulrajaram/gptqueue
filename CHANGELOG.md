@@ -10,6 +10,10 @@ All notable changes to this project are documented here. The format follows
 
 Initial public release candidate.
 
+### Changed
+- Node.js 22 is the minimum supported version (`engines` and CI now cover 22 and 24); Node.js 20 reached end of life in
+  April 2026.
+
 ### Added
 - MCP server over stdio and Streamable HTTP, backed by Redis.
 - Durable agent registration and session leases; bounded per-agent inboxes.

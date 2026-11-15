@@ -6,7 +6,7 @@ first acknowledged task.
 
 ## 0. Prerequisites
 
-- Node.js 20+ and npm
+- Node.js 22+ and npm
 - Redis running locally (`redis://127.0.0.1:6379`) — db0 is the live
   server's database. Tests never touch it: every vitest run starts its own
   private, socket-only `redis-server` (`/usr/bin/redis-server` must be
