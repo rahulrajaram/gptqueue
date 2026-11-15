@@ -12,8 +12,8 @@ in through one seam, `src/integrations/agent-tracking.ts`.
 
 ## How a session gets a seat
 
-1. The operator declares seats in a **seat file**, versioned in the skills
-   repository.
+1. The operator declares seats in a **seat file** selected by `GPTQ_SEAT_FILE`
+   (see the default path below).
 2. A launcher starts the runtime with `GPTQ_SEAT=<seat_id>`, and
    optionally `GPTQ_SEAT_FILE=<path>`. The default path is
    `$XDG_CONFIG_HOME/gptqueue/seats.json`, or
@@ -43,7 +43,7 @@ that can call `startSeat` in the same way. Slice 1 does not wire them yet.
       "name": "Acme supervisor",
       "description": "Coordinates the Acme leads and owns the merge gate.",
       "capabilities": ["merge-gate", "decision-packets"],
-      "policy": { "runtimes": ["claude"], "cwd_roots": ["/workspace/project-a"] }
+      "policy": { "runtimes": ["claude"], "cwd_roots": ["/path/to/project-a"] }
     }
   ]
 }
@@ -106,8 +106,9 @@ Both stores pass one contract suite: `tests/agent-tracking/seat-contract.ts`.
 
 ## sw4rm vocabulary
 
-The field shapes come from sw4rm (`github.com/rahulrajaram/sw4rm` at
-`976d560`). This library does not use the sw4rm wire protocol.
+Field shapes follow the sw4rm vocabulary, checked against the
+`@sw4rm/js-sdk` dev dependency in tests. This library does not use the sw4rm
+wire protocol.
 
 | Here | sw4rm |
 |---|---|

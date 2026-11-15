@@ -287,32 +287,10 @@ outstanding request: `in_reply_to` names a request whose `gptq:outstanding:<reci
 holds the reply's sender. Status mail never wakes, nor does ping, an unsolicited reply or a reply
 from another sender. Mail that needs the recipient to act must be sent as `type=task`.
 
-## Install note (not applied)
+## Install
 
-1. `npm run build` in your checkout (`<path-to-gptqueue>`).
-2. Replace the untracked `~/.local/bin` scripts with symlinks to the checkout. The shims resolve
-   `dist/` relative to their real path.
-   ```
-   ln -sf <path-to-gptqueue>/bin/gptqueue-claude-mcp   ~/.local/bin/gptqueue-claude-mcp
-   ln -sf <path-to-gptqueue>/bin/gptqueue-claude-hook  ~/.local/bin/gptqueue-claude-hook
-   ln -sf <path-to-gptqueue>/bin/gptqueue-claude-name  ~/.local/bin/gptqueue-claude-name
-   ln -sf <path-to-gptqueue>/bin/gptqueue-inbox-peek   ~/.local/bin/gptqueue-inbox-peek
-   ```
-   `gptqueue-claude-verify.mjs` becomes `scripts/verify-claude-mcp.mjs`.
-3. In `~/.claude/settings.json`, only the hook timeouts change, from 10 s to 15 s. The commands
-   stay the same if the symlinks are used. The hook entry (`dist/claude/hook-main.js`) loads only
-   ioredis and the small `src/claude` modules: no MCP server, SDK or zod. Measured on 2026-10-05,
-   median of 5 runs of `node bin/gptqueue-claude-hook stop` against a private Redis:
-   8.8 s from a shared virtiofs mount under contention (worst run 8.9 s), and 0.2 s from a local
-   tmpfs copy.
-   ```
-   "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.local/bin/gptqueue-claude-hook session-start", "timeout": 15}]}]
-   "Stop":         [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.local/bin/gptqueue-claude-hook stop", "timeout": 15}]}]
-   "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "$HOME/.local/bin/gptqueue-claude-hook user-prompt-submit", "timeout": 15}]}]
-   ```
-   The `UserPromptSubmit` entry is optional. It records the session's agent as `running`
-   (`gptq:turn-state:<agent>`) and prints nothing; an allowed Stop records it as `idle`.
-   The loop adapter's watchdog reads this turn state. Only a confirmed identity is recorded,
-   and a failure never blocks the prompt.
-4. Keep the MCP server entry that runs `gptqueue-claude-mcp`. It must start the shim directly, not
-   through a shell that stays alive, or the record will be keyed by the shell's pid.
+Run `npm run build` in your checkout, then point your Claude Code hooks at
+`<path-to-gptqueue>/bin/gptqueue-claude-hook` with the event argument
+(`session-start`, `stop`, `user-prompt-submit`, or `pre-tool-use`). Hook JSON is
+read from stdin. The hook loads only ioredis and the small `src/claude` modules:
+no MCP server, SDK or zod.

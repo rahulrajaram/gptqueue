@@ -26,7 +26,7 @@ retry (bounded to 24 hours). It does not make your handler idempotent.
 
 ## 2. Two consumption paths exist; do not mix them on one inbox
 
-- `receive_message` — **deprecated** (decision D3). Destructive BLPOP,
+- `receive_message` — **deprecated**. Destructive BLPOP,
   at-most-once: a message popped by a session that then fails is lost. It
   still works for plain agents, but every runtime should consume with
   `claim_tasks`/`acknowledge_tasks` instead.
@@ -208,7 +208,7 @@ A directory from another pid namespace (for example a run inside a separate
 PID-namespace sandbox, which reaps its own processes) is removed only when it
 is at least 60 s old and nothing answers on its socket when checked.
 
-## Agent name ownership (decision D2)
+## Agent name ownership
 
 Agent names are exclusive by default. `register_agent` (and a rename onto
 another name) fails with error code `AGENT_NAME_HELD`, details `name`,

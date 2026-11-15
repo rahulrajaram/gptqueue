@@ -12,9 +12,12 @@ MCP entry. Its `--redis-url` is either `redis://host[:port]/<db>` or a unix
 socket path with an optional database, `/path/redis.sock?db=<0-15>` (the form
 ioredis accepts; any other query, `//`, or characters outside
 `[A-Za-z0-9._~@+,=:/-]` are refused). Pi loads a native extension which starts the same sidecar and exposes
-nine bound tools: `send_message`, `receive_message`, `list_agents`,
-`get_queue_status`, `claim_tasks`, `acknowledge_tasks`, `renew_claim`,
-`bind_runtime`, and `get_runtime_status`. The connection supplies its session internally. There is no
+19 bound tools: the four base tools `send_message`, `receive_message`,
+`list_agents`, and `get_queue_status`, plus the 15-tool `SHELL_TOOL_NAMES` set:
+`claim_tasks`, `acknowledge_tasks`, `renew_claim`, `claim_details`, `release_claim`,
+`bind_runtime`, `get_runtime_status`, `acknowledge_messages`, `dlq_requeue`,
+`find_agents`, `get_agent_details`, `get_delivery_status`, `set_agent_profile`,
+`dlq_status`, and `list_my_claims`. The connection supplies its session internally. There is no
 need for the model to call `register_agent` or pass a session ID.
 
 When an owned Codex app-server is started with `codex app-server --listen
@@ -258,8 +261,7 @@ connection lifecycle log retains the provisional startup identity; runtime
 status and runtime traces are authoritative after mailbox restoration.
 
 `node scripts/verify-inbox-activation.mjs` runs an isolated two-thread native
-Codex round trip on its own private socket-only Redis (db15) using Luna with low
-reasoning and normal automatic approval review. It archives only its own test
+Codex round trip on its own private socket-only Redis (db15). It archives only its own test
 threads and records a JSON receipt under
 `.gptqueue/automatic-shell/event-delivery/`. The installed daemon must support its local control socket; older
 history APIs are handled by reading the exact daemon-provided local transcript
@@ -312,7 +314,7 @@ and acknowledgement trace. An empty queue without retained evidence means
 is approximately 1,024 events and trace writes can fail independently of delivery.
 Neither diagnostic returns message content or private session credentials.
 
-For a legacy connection, use the local read-only doctor (Node 24 on this host):
+For a legacy connection, use the local read-only doctor:
 
 ```sh
 node scripts/gptqueue-doctor.mjs connection --redis-url redis://127.0.0.1:6379/0 --thread-id EXACT_NATIVE_THREAD --agent EXACT_MAILBOX

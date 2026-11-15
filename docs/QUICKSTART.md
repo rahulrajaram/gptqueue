@@ -89,7 +89,7 @@ Agents that are not running can be launched when work arrives:
    { "version": 2,
      "commands": [
        { "command": "/usr/bin/node",
-         "allowed_args": [[ "/srv/runtimes/bob.mjs" ]],
+         "allowed_args": [[ "/opt/runtimes/bob.mjs" ]],
          "comment": "test runtimes" } ] }
    ```
 
@@ -99,7 +99,7 @@ Agents that are not running can be launched when work arrives:
    actor_register { "activation_policy_mode": "wake_if_offline",
                     "max_concurrency": 2,
                     "launch_command": "/usr/bin/node",
-                    "launch_args": ["/srv/runtimes/bob.mjs"], "launch_cwd": "/path/inside/workspace" }
+                    "launch_args": ["/opt/runtimes/bob.mjs"], "launch_cwd": "/path/inside/workspace" }
    ```
 
    The actor identity is derived from the registering session's name —

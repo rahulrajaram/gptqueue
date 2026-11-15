@@ -157,10 +157,6 @@ forced termination can leave fail-closed identity residue requiring inspection.
 
 ## Pi adapter provenance
 
-The experiment uses the existing `pi-mcp-adapter` installation only. On this
-machine it was installed from npm as version 2.21.1, with its resolved tarball
-and integrity recorded in `~/.pi/agent/npm/package-lock.json`; its package
-manifest identifies `https://github.com/nicobailon/pi-mcp-adapter` and the MIT
-license. Override the inspected local entrypoint with
-`GPTQ_PI_MCP_ADAPTER_ENTRY` when necessary. The wrapper never invokes
-`pi install`, `npm install`, or any discovery/install lane.
+The wrapper uses an existing `pi-mcp-adapter` installation (MIT) and never
+installs anything. Override the inspected local entrypoint with
+`GPTQ_PI_MCP_ADAPTER_ENTRY` when necessary.

@@ -10,11 +10,11 @@ calls; run one file at a time, after `npm run build`:
 
     GPTQUEUE_LIVE_ACCEPTANCE=1 npx --no-install vitest run tests/acceptance-live/codex.live.test.ts
 
-| File | Runtime wiring | Model |
-|---|---|---|
-| `codex.live.test.ts` | private `codex app-server --listen unix://<receipt>/app.sock --disable hooks`; per-invocation `-c` disables every user MCP server and points `gptqueue-shared` at `bin/gptqueue-session --client codex` with the private Redis and `GPTQUEUE_CODEX_APP_SERVER_SOCKET`; the sidecar binds itself; turns observed from `turn/started` / `turn/completed` notifications | `gpt-6-luna` |
-| `pi.live.test.ts` | two `pi --mode rpc` processes in one directory, `-ne -e <generated wrapper of dist/registered-shell/pi-extension.js>`, no skills/context/builtin tools, sessions under the receipt dir; turns observed from RPC `agent_start` / `turn_start` / `turn_end` events | `zai/glm-5.3-flash` |
-| `claude.live.test.ts` | interactive `claude` under a PTY (operator decision D5: it may write only its own transcript under `~/.claude/projects` and update `~/.claude.json`); `--strict-mcp-config` with this build's `bin/gptqueue-claude-mcp`, `--settings` with this build's SessionStart/Stop hooks, `--setting-sources local`; the model starts the `gptqueue-inbox-peek --watch` watcher as the hook says | `claude-opus-5-5` |
+| File | Runtime wiring |
+|---|---|
+| `codex.live.test.ts` | private `codex app-server --listen unix://<receipt>/app.sock --disable hooks`; per-invocation `-c` disables every user MCP server and points `gptqueue-shared` at `bin/gptqueue-session --client codex` with the private Redis and `GPTQUEUE_CODEX_APP_SERVER_SOCKET`; the sidecar binds itself; turns observed from `turn/started` / `turn/completed` notifications |
+| `pi.live.test.ts` | two `pi --mode rpc` processes in one directory, `-ne -e <generated wrapper of dist/registered-shell/pi-extension.js>`, no skills/context/builtin tools, sessions under the receipt dir; turns observed from RPC `agent_start` / `turn_start` / `turn_end` events |
+| `claude.live.test.ts` | interactive `claude` under a PTY (it may write only its own transcript under `~/.claude/projects` and update `~/.claude.json`); `--strict-mcp-config` with this build's `bin/gptqueue-claude-mcp`, `--settings` with this build's SessionStart/Stop hooks, `--setting-sources local`; the model starts the `gptqueue-inbox-peek --watch` watcher as the hook says |
 
 Isolation: vitest starts the run's private socket-only Redis, and `support.ts`
 refuses any other Redis (every TCP URL included); gptqueue logs and state for

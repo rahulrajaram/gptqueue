@@ -39,11 +39,6 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | **PTY wrapper** (`src/pty-wrapper/`) | Wraps a CLI process in a PTY, watches Redis for incoming messages, and injects notifications when the process is idle |
 | **Hook script** (`scripts/check-queue.sh`) | Claude Code hook for startup context injection and stop-gate (blocks exit if inbox has unread messages) |
 
-## Design Reports
-
-- [Autonomous Agent Coordination Product Thesis](docs/AUTONOMOUS_COORDINATION_PRODUCT_THESIS.md)
-- [Session and Transport Redesign Report](docs/SESSION_TRANSPORT_REDESIGN_REPORT.md)
-
 ## MCP Tools
 
 | Tool | Description |
@@ -63,16 +58,32 @@ Agent identity is backed by Redis session records with TTL-based leases, so sess
 | `claim_tasks` | Atomically claim up to `max_batch` messages (default 1, range 1–16) from your own durable inbox as an at-least-once delivery batch for the calling session. Returns the claim (`claim_id`, `tasks`, `expires_at`) or an explicit empty-batch result when nothing is pending. `ttl_seconds` (default 300, range 1–3600) bounds how long an unacknowledged claim stays out of the inbox before lazy recovery re-queues it. For registered durable actors, the directory's admitted `max_concurrency` caps the number of simultaneously outstanding unacked claims: once the ceiling is reached, a further claim is refused with a `concurrency_limit_reached` error until an existing claim is acknowledged or lazily recovered. Plain agents (no directory record) claim without any ceiling |
 | `acknowledge_tasks` | Acknowledge a `claim_id` returned by `claim_tasks`, confirming delivery of that batch. Only the claiming session may acknowledge its own claim; acknowledged tasks are removed so they are not re-delivered |
 | `acknowledge_messages` | Acknowledge selected messages (`message_ids`, 1–16 distinct ids) of a `claim_id` your session holds, leaving the rest in the same claim with the same `expires_at`. Use it when a claim mixes finished messages (FYIs, results) with tasks still in progress; use `acknowledge_tasks` to acknowledge a whole claim. Returns `acknowledged`, `remaining` and `claim_deleted` (a claim emptied this way is deleted). Ownership is `acknowledge_tasks`' rule. Refusals change nothing: `invalid_message_selector` (empty, duplicate or more than 16 ids), `unknown_message` (an id not in the claim), `ambiguous_claim` (the claim holds two envelopes with that id), `unreadable_envelope` (an id is not found but the claim holds an envelope whose id cannot be read), `unknown_claim`, `not_claim_owner`, `store_corrupt`. The schema is strict: unknown fields are refused. Keeping tasks unclaimed-but-deferred (parking) is a separate, future feature; the remainder still expires and is recovered as usual |
+| `list_my_claims` | List this session's outstanding, non-expired claims with `claim_id`, lease timing and task count, so a lost claim ID can be recovered. No task payloads are returned. Supports optional `session_id` for stateless transports |
 | `renew_claim` | Renew an outstanding `claim_id` returned by `claim_tasks`, extending its expiry by `ttl_seconds` (default 300, range 1–3600) from the renew instant. Only the claiming session may renew its own claim (`not_claim_owner` otherwise). The extension is capped by the claim's provisional lifetime budget rendered from its `claimed_at`, so an endlessly-renewing runtime cannot hold a batch forever: a post-expiry renewal is `claim_expired` and budget exhaustion is `budget_exceeded` |
 | `dlq_status` | List the calling agent's dead-letter queue (DLQ) entries, newest first. A message is dead-lettered after it has been recovered (re-queued) more than `RECOVER_CAP` times without an acknowledge, so a perpetually failing message cannot loop through lazy recovery forever. Supports an optional `limit` (default 50, range 1–1000) |
 | `dlq_requeue` | Move one dead-lettered message (by `message_id` from `dlq_status`) from the calling agent's DLQ back to the tail of its own inbox, restoring a fresh recovery budget. Not found is a structured `dlq_entry_not_found` error |
 
-### Registered shell (additional tools)
+### Registered shell tools
 
-The registered shell (`bin/gptqueue-session`) registers six additive tools on top of the table above:
+The registered shell (`bin/gptqueue-session`) exposes 19 caller-bound tools.
+Its four base tools are `send_message`, `receive_message`, `list_agents`, and
+`get_queue_status`. It also exposes the 15-tool `SHELL_TOOL_NAMES` set:
+`claim_tasks`, `acknowledge_tasks`, `renew_claim`, `claim_details`, `release_claim`,
+`bind_runtime`, `get_runtime_status`, `acknowledge_messages`, `dlq_requeue`,
+`find_agents`, `get_agent_details`, `get_delivery_status`, `set_agent_profile`,
+`dlq_status`, and `list_my_claims`. The connection supplies its session internally;
+these tools accept no `session_id`, and `register_agent` is not exposed.
+
+The claim and acknowledgement tools follow the contracts above. The following
+tools provide runtime binding, recovery and diagnostics:
 
 | Tool | Description |
 |---|---|
+| `claim_details` | Fetch your own claim's full task payloads by `claim_id`, for recovery after losing the original `claim_tasks` output |
+| `release_claim` | Return your own claim's tasks to the inbox and remove the claim. Recovery counters increment as with expiry recovery; repeated releases can dead-letter a message |
+| `bind_runtime` | Bind the exact runtime-supplied session identity to this connection; never infer it from a directory or agent UUID |
+| `get_runtime_status` | Report this connection's runtime binding and automatic inbox activation readiness |
+| `list_my_claims` | List this connection's outstanding, non-expired claims with IDs, lease timing and task counts, without task payloads |
 | `find_agents` | Find exact agent candidates by declared purpose and identity. Ambiguous matches are never routed automatically; online does not imply activation readiness |
 | `get_agent_details` | Inspect an exact mailbox, runtime binding, published capabilities, declared role and activation readiness. Omit `agent` for the current connection. No message content or credentials |
 | `get_delivery_status` | Inspect one message's queue, claim, acknowledgement or dead-letter evidence without consuming it. Missing retained evidence means unknown, not delivered |
@@ -80,7 +91,7 @@ The registered shell (`bin/gptqueue-session`) registers six additive tools on to
 | `dlq_status` | The general `dlq_status`, bound to this connection's mailbox: lists only your own dead-lettered messages (`limit`, default 50, range 1–1000). It accepts no `session_id` or target mailbox; unknown fields are refused |
 | `dlq_requeue` | The general `dlq_requeue`, bound to this connection's mailbox: restores one of your own dead-lettered messages (`message_id`) to your inbox tail with a fresh recovery budget. Another mailbox's entry is `dlq_entry_not_found`; unknown fields are refused |
 
-These two are the self-serve recovery path for a runtime whose tasks were dead-lettered: inspect with `dlq_status`, restore with `dlq_requeue`, then claim as usual. OpenCode exposes them as `gptqueue_dlq_status` and `gptqueue_dlq_requeue`.
+`dlq_status` and `dlq_requeue` are the self-serve recovery path for a runtime whose tasks were dead-lettered: inspect with `dlq_status`, restore with `dlq_requeue`, then claim as usual. OpenCode exposes them as `gptqueue_dlq_status` and `gptqueue_dlq_requeue`.
 
 `package.json` maps `gptqueue`, `gptqueue-server`, `gptqueue-http`, and `gptqueue-pty` as installed commands; the registered-shell and wrapper entry points are repo-local — invoke them as `node bin/<entry>` (for example `node bin/gptqueue-session`).
 
@@ -121,8 +132,10 @@ npm install   # builds automatically via prepare
 ```
 
 `gptqueue-pty` needs the native `node-pty` module. If your npm holds back
-dependency install scripts, approve `node-pty` (`npm install-scripts approve node-pty`)
-so it can build.
+dependency install scripts and supports `install-scripts` (as npm 11.19.0 does),
+approve `node-pty` with `npm install-scripts approve node-pty`. To rebuild the
+native module, run `npm rebuild node-pty` (see [CONTRIBUTING.md](CONTRIBUTING.md));
+ensure your npm configuration permits its install script.
 
 Once published, the package will provide `gptqueue-server`, `gptqueue-http` and
 `gptqueue-pty` for a global `npm install -g gptqueue`.
@@ -329,6 +342,7 @@ Optionally add the hook script to `~/.claude/settings.json` for automatic startu
 | `GPTQUEUE_HOST` | `127.0.0.1` | HTTP server bind host; non-loopback requires `GPTQUEUE_HTTP_TOKEN` |
 | `GPTQUEUE_LAUNCH_ALLOWLIST` | `~/.config/gptqueue/launch-allowlist.json` | Path of the operator wake-launch allowlist; keep it outside agent workspaces (see the security section) |
 | `GPTQUEUE_HTTP_TOKEN` | _(none)_ | Bearer token required on every `/mcp` request when set |
+| `GPTQUEUE_HTTP_SOCKET` | _(none)_ | Listen on this Unix socket path instead of TCP (opt-in) |
 | `GPTQUEUE_HTTP_IDLE_TIMEOUT_MS` | `3600000` (1 hour) | Close an HTTP MCP session after this long with no open request (an open SSE stream counts as open); the client gets `404` and re-initializes. `0` disables |
 | `GPTQUEUE_HTTP_MAX_SESSIONS` | `256` | Maximum concurrent HTTP MCP sessions; further `initialize` requests get `503` |
 | `GPTQ_AGENT_NAME` | _(none)_ | Pre-register with this agent name on startup (stdio only) |

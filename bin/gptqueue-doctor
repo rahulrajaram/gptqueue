@@ -130,7 +130,7 @@ try {
       break;
     }
     case 'config': {
-      // Static lint of the agent-execution baseline (docs/AGENT_EXECUTION_BASELINE.md).
+      // Static lint of the Codex settings gptqueue relies on (the keys listed in `checks`).
       // Behavioral proof lives in the acceptance matrix (GPTQUEUE_CODEX_APPROVAL=1).
       // Each key check is scoped to the documented canonical table header; a key
       // line under any other section does not satisfy its check, and sandbox_mode
@@ -175,7 +175,7 @@ try {
       }
       const failed = checks.filter(check => !check.ok);
       result = { tier, codex_home: home, status: failed.length ? 'baseline_not_met' : 'ok', checks,
-        action: failed.length ? 'Apply the missing keys per docs/AGENT_EXECUTION_BASELINE.md. Approval keys are operator-only; installers never write them.' : null };
+        action: failed.length ? 'Add the keys listed under failed checks to your Codex config. Approval keys are operator-only; installers never write them.' : null };
       if (failed.length) process.exitCode = 1;
       break;
     }
