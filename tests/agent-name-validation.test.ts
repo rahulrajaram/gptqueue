@@ -53,7 +53,7 @@ describe("SessionStore agent-name validation (SEC-1)", () => {
   });
 
   it("rejects control and line-separator characters with AGENT_NAME_INVALID", async () => {
-    for (const name of ["a\nb", "a\u0000b", "a\u2028b"]) {
+    for (const name of ["a\nb", "a\u0000b", "a\u2028b", "a\u200bb", "admin\u202Elood"]) {
       await expect(store.createSession(name, "both")).rejects.toMatchObject({ code: "AGENT_NAME_INVALID" });
     }
   });

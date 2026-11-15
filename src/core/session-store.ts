@@ -31,13 +31,17 @@ const REGISTRY_ROLLBACK_KEYS = [
  * display names with spaces and non-ASCII letters ("Code Reviewer",
  * "équipe/レビュー"), and it is deliberately NOT the durable actors'
  * 64-character IDENTITY_CHARSET bound (actor-presence.ts): 427 of 725 live
- * registered names are longer than 64 (max 87). Mirrored by the
+ * registered names are longer than 64 (max 87). Format characters (\p{Cf}:
+ * zero-width and bidi controls) are refused so two names cannot look the
+ * same while differing invisibly. Names are compared as exact code points,
+ * not Unicode-normalized, so NFC and NFD spellings are distinct agents.
+ * Mirrored by the
  * register_agent `name` and send_message `to` zod schemas.
  */
-export const AGENT_NAME_PATTERN = /^(?!\s)(?!.*\s$)[^\p{Cc}\p{Zl}\p{Zp}]{1,128}$/u;
+export const AGENT_NAME_PATTERN = /^(?!\s)(?!.*\s$)[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]{1,128}$/u;
 /** Human-readable form of AGENT_NAME_PATTERN for error messages. */
 export const AGENT_NAME_RULE =
-  "1-128 characters, no control or line-separator characters, and no leading or trailing whitespace";
+  "1-128 characters, no control, format (zero-width or bidi) or line-separator characters, and no leading or trailing whitespace";
 
 /**
  * Renew a lease only while its session record exists, re-adding the session
