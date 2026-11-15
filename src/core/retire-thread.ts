@@ -358,8 +358,12 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
     deps.onEvent?.(event);
   };
   const stamp = (): string => new Date(deps.clock()).toISOString();
+  // An exhausted observation budget keeps its own code: relabelling it as a
+  // daemon, RPC or Redis fault would hide that the run simply ran out of time.
   const envError = (code: string, error: unknown): EnvironmentError =>
-    new EnvironmentError(code, `${code}: observation failed${error instanceof EnvironmentError ? ` (${error.code})` : ""}`);
+    error instanceof EnvironmentError && error.code === "deadline_exceeded"
+      ? error
+      : new EnvironmentError(code, `${code}: observation failed${error instanceof EnvironmentError ? ` (${error.code})` : ""}`);
 
   const outcome = (exitCode: number, outcomeName: string, code: string | null = null, problem: string | null = null): RetireOutcome =>
     ({ exitCode, outcome: outcomeName, code, problem, events });
@@ -372,10 +376,12 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cancellation: Promise<void> | undefined;
+    let timedOut = false;
     const pending = operation(controller.signal);
     try {
       return await Promise.race([pending, new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
+          timedOut = true;
           // Save cleanup before aborting: a rejected command may win the race,
           // but finally still waits for transport shutdown and task settlement.
           cancellation = Promise.resolve().then(async () => {
@@ -389,6 +395,12 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
           );
         }, Math.ceil(remaining));
       })]);
+    } catch (error) {
+      // The abort makes the in-flight operation reject too (an aborted /proc
+      // read surfaces as proc_unreadable, an aborted RPC as a plain error), and
+      // that rejection can win the race. Once the deadline fired, report it.
+      if (timedOut) throw new EnvironmentError("deadline_exceeded", "observation deadline exceeded");
+      throw error;
     } finally { clearTimeout(timer); await cancellation; }
   };
   const snapshot = async () => {
@@ -599,7 +611,11 @@ export const runRetireThread = async (options: RetireOptions, deps: RetireDeps):
     }
 
     // Re-read the mutable guards immediately before the archive so the
-    // observational window is as small as the protocol allows.
+    // observational window is as small as the protocol allows. The re-read is
+    // its own phase with its own finite budget: on a busy daemon (hundreds of
+    // children) the discovery observations alone can use most of the first
+    // budget, which made every real run fail here while dry runs passed.
+    deadline = monotonic() + PREFLIGHT_TIMEOUT_MS;
     const reread = await readThread(options.threadId);
     const rereadParent = reread.parentThreadId !== null ? (await readThread(reread.parentThreadId)).statusType ?? "unknown" : null;
     const fresh = await ownership();
