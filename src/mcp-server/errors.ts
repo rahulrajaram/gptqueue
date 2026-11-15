@@ -1,6 +1,8 @@
 /** Client-facing error codes gptqueue raises itself. */
 export type GptQueueErrorCode = "SESSION_UNAVAILABLE" | "AGENT_NOT_REGISTERED" | "AGENT_NAME_HELD" | "RUNTIME_BINDING_HELD" | "AGENT_NAME_RESERVED" | "AGENT_REGISTRATION_INVALID"
   | "RECIPIENT_RETIRED"
+  /** The name is still held by another live session of a shared registration, so renaming it would strand them. */
+  | "AGENT_NAME_SHARED"
   /** Startup registration has not settled yet but is still being attempted: retry later. */
   | "REGISTRATION_PENDING";
 

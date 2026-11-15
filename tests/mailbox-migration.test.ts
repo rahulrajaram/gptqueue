@@ -363,6 +363,50 @@ describe("RedisClient.register rename path (F2: no message loss)", () => {
     expect(await redis.hexists(SESSION_KEYS.registry, "new-name")).toBe(0);
   });
 
+  it("GQ-002: refuses a rename while another live session still holds the old name, leaving the shared mailbox untouched", async () => {
+    const first = await client.register("both", "old-name", "first", undefined, { shared: true });
+    const coHolder = new RedisClient(null, TEST_REDIS_URL);
+    try {
+      // D2: both opt into sharing, so two live sessions hold `old-name`.
+      await coHolder.register("both", "old-name", "co-holder", undefined, { shared: true });
+      await seedOldMailbox(2);
+
+      await expect(client.register("both", "new-name", "renamed")).rejects.toMatchObject({ code: "AGENT_NAME_SHARED" });
+
+      // Nothing moved and nothing was retired: the co-holder keeps the
+      // shared mailbox, the registry entry and its live session, instead of
+      // becoming a ghost under a name whose queue was migrated away and
+      // whose registry entry was HDEL'd (send_message: unknown_recipient).
+      expect(client.agentName).toBe("old-name");
+      expect(client.sessionId).toBe(first.session_id);
+      expect(coHolder.agentName).toBe("old-name");
+      expect(await contents(redis, "old-name")).toEqual([msg(1), msg(2)]);
+      expect(await contents(redis, "new-name")).toEqual([]);
+      expect(await redis.hexists(SESSION_KEYS.registry, "old-name")).toBe(1);
+      expect(await redis.hexists(SESSION_KEYS.registry, "new-name")).toBe(0);
+      expect((await client.sessions.getPresence("old-name")).online).toBe(true);
+    } finally {
+      await coHolder.closeCurrentSession().catch(() => undefined);
+      await coHolder.shutdown();
+    }
+  });
+
+  it("GQ-002: the rename succeeds once the co-holder's session has closed", async () => {
+    await client.register("both", "old-name", "first", undefined, { shared: true });
+    const coHolder = new RedisClient(null, TEST_REDIS_URL);
+    await coHolder.register("both", "old-name", "co-holder", undefined, { shared: true });
+    await seedOldMailbox(1);
+    await coHolder.closeCurrentSession();
+    await coHolder.shutdown();
+
+    const second = await client.register("both", "new-name", "renamed");
+
+    expect(second.name).toBe("new-name");
+    expect(await contents(redis, "new-name")).toEqual([msg(1)]);
+    expect(await contents(redis, "old-name")).toEqual([]);
+    expect(await redis.hexists(SESSION_KEYS.registry, "old-name")).toBe(0);
+  });
+
   it("a refused rename keeps refreshing the original session's lease (RF2)", async () => {
     // Fake only the interval timers that drive heartbeat and lease refresh.
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });

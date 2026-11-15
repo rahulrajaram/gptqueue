@@ -425,6 +425,25 @@ export class SessionStore {
     return holders.filter((sid): sid is string => sid !== null);
   }
 
+  /**
+   * GQ-002: the ids of `agentName`'s sessions — besides `exceptSessionId` —
+   * that still hold a live lease: the other live holders of a (shared)
+   * name. The rename path refuses while any exist, so a shared mailbox and
+   * its registry entry are never migrated out from under live co-holders.
+   */
+  async liveSessionsExcept(agentName: string, exceptSessionId: string | null): Promise<readonly string[]> {
+    const members = await this.redis.smembers(SESSION_KEYS.agentSessions(agentName));
+    const others = members.filter((sid) => sid !== exceptSessionId);
+    if (others.length === 0) return [];
+    const leases = await execPipeline<number>(
+      others.reduce(
+        (pipe, sid) => pipe.exists(SESSION_KEYS.lease(sid)),
+        this.redis.pipeline()
+      )
+    );
+    return others.filter((_, i) => leases[i] === 1);
+  }
+
   /** Refresh a session's lease TTL. Returns false when the session no longer exists. */
   async refreshLease(sessionId: string): Promise<boolean> {
     const renewed = await this.redis.eval(

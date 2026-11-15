@@ -402,6 +402,19 @@ export class RedisClient {
     //      failure here cannot lose messages (worst case: stale old-name
     //      keys that lease expiry cleans up), so cleanup is best-effort.
     if (renaming) {
+      // GQ-002: the old name may be shared with other live sessions (D2).
+      // Its mailbox and registry entry belong to every live holder;
+      // migrating and retiring them would strand each co-holder under a
+      // name whose queue no longer exists (send_message:
+      // unknown_recipient, claims on a permanently empty inbox). Refuse the
+      // rename while any other live session holds it — nothing has changed
+      // yet, so the old identity keeps serving untouched.
+      const coHolders = await this.sessionStore.liveSessionsExcept(oldName!, oldSessionId);
+      if (coHolders.length > 0) {
+        throw new GptQueueError("AGENT_NAME_SHARED",
+          `Agent name '${oldName}' still has ${coHolders.length} other live session(s); renaming it would take the shared mailbox away from them. Close or unregister the other session(s) first.`,
+          { name: oldName!, co_holders: coHolders.length });
+      }
       if (this.heartbeatTimer) {
         clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = null;
