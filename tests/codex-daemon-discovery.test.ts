@@ -52,6 +52,8 @@ type ProcSpec = Readonly<{
   fdUnreadable?: boolean;
   ppid?: number;
   startTicks?: string;
+  /** /proc/<pid>/stat state letter (default S); Z is a zombie. */
+  state?: string;
   /** fd symlink targets (e.g. ["socket:[42]"]). */
   fds?: readonly string[];
 }>;
@@ -61,9 +63,9 @@ type TreeSpec = Readonly<{
   procs: Readonly<Record<number, ProcSpec>>;
 }>;
 
-const statLine = (pid: number, ppid: number, startTicks: string): string =>
+const statLine = (pid: number, ppid: number, startTicks: string, state = "S"): string =>
   // Fields after "(comm)": [0]=state [1]=ppid ... [19]=starttime.
-  `${pid} (proc) S ${ppid} ${"0 ".repeat(17)}${startTicks} 0 0 0`;
+  `${pid} (proc) ${state} ${ppid} ${"0 ".repeat(17)}${startTicks} 0 0 0`;
 
 const tempRoots: string[] = [];
 
@@ -87,8 +89,8 @@ const makeProcTree = async (spec: TreeSpec): Promise<{ root: string; socketPath:
     if (proc.statusUnreadable) await mkdir(join(dir, "status"));
     else await writeFile(join(dir, "status"), `Name:\tfixture\nUid:\t${(proc.uids ?? [uid, uid, uid, uid]).join("\t")}\n`);
     if (proc.cmdlineUnreadable) await mkdir(join(dir, "cmdline"));
-    else if (proc.argv) await writeFile(join(dir, "cmdline"), `${proc.argv.join("\0")}\0`);
-    await writeFile(join(dir, "stat"), statLine(Number(pid), proc.ppid ?? 0, proc.startTicks ?? "100"));
+    else if (proc.argv) await writeFile(join(dir, "cmdline"), proc.argv.length === 0 ? "" : `${proc.argv.join("\0")}\0`);
+    await writeFile(join(dir, "stat"), statLine(Number(pid), proc.ppid ?? 0, proc.startTicks ?? "100", proc.state));
     if (proc.fdUnreadable) await writeFile(join(dir, "fd"), "not a directory");
     else {
       await mkdir(join(dir, "fd"), { recursive: true });
@@ -505,6 +507,39 @@ describe("P004 daemon safety regressions", () => {
       await rm(join(root, "12", target)); await mkdir(join(root, "12", target));
       expect((await discoveryError(snapshotDaemon(pin, { procRoot: root }))).mode).toBe("proc_unreadable");
     }
+  });
+});
+
+describe("zombie processes are exited, not unreadable", () => {
+  // A zombie keeps its /proc entry but has an empty cmdline and no fds.
+  const zombie = (ppid: number): ProcSpec => ({ argv: [], state: "Z", ppid, startTicks: "900" });
+
+  it("a same-user zombie anywhere on the machine does not block discovery", async () => {
+    const { root, socketPath } = await makeProcTree({ sockets: [{ path: "/run/codex.sock", inode: 10 }], procs: {
+      11: { argv: daemonArgv("/run/codex.sock"), fds: ["socket:[10]"] }, 12: zombie(777),
+    } });
+    expect((await discoverCodexDaemon({ socketPath: socketPath(), procRoot: root })).pid).toBe(11);
+  });
+
+  it("a live process with an empty cmdline still refuses discovery", async () => {
+    const { root, socketPath } = await makeProcTree({ sockets: [{ path: "/run/codex.sock", inode: 10 }], procs: {
+      11: { argv: daemonArgv("/run/codex.sock"), fds: ["socket:[10]"] }, 12: { argv: [], state: "S", ppid: 777 },
+    } });
+    expect((await discoveryError(discoverCodexDaemon({ socketPath: socketPath(), procRoot: root }))).mode).toBe("proc_unreadable");
+  });
+
+  it("a zombie daemon child is left out of the snapshot instead of refusing it", async () => {
+    const { root, socketPath } = await makeProcTree({ sockets: [{ path: "/run/codex.sock", inode: 10 }], procs: {
+      11: { argv: daemonArgv("/run/codex.sock"), fds: ["socket:[10]"] },
+      12: { argv: ["codex", "exec"], ppid: 11 }, 13: zombie(11),
+    } });
+    const identity = await discoverCodexDaemon({ socketPath: socketPath(), procRoot: root });
+    expect((await snapshotDaemon(identity, { procRoot: root })).children.map((child) => child.pid)).toEqual([12]);
+  });
+
+  it("readProcessPin treats a zombie as exited (null), so a pinned sidecar that died counts as gone", async () => {
+    const { root } = await makeProcTree({ sockets: [{ path: "/run/codex.sock", inode: 10 }], procs: { 13: zombie(11) } });
+    expect(await readProcessPin(root, 13)).toBeNull();
   });
 });
 

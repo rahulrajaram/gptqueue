@@ -113,12 +113,12 @@ export const readProcessArgv = async (procRoot: string, pid: number, signal?: Ab
   return tokens;
 };
 
-/** ppid and start ticks from /proc/<pid>/stat, or null when the process is gone. */
+/** ppid, start ticks and state from /proc/<pid>/stat, or null when the process is gone. */
 export const readProcessStat = async (
   procRoot: string,
   pid: number,
   signal?: AbortSignal,
-): Promise<Readonly<{ ppid: number; startTicks: string }> | null> => {
+): Promise<Readonly<{ ppid: number; startTicks: string; state: string }> | null> => {
   signal?.throwIfAborted();
   let raw: string;
   try {
@@ -130,13 +130,22 @@ export const readProcessStat = async (
   // comm may contain spaces and parens; fields restart after the last ')'.
   const close = raw.lastIndexOf(")");
   const fields = close < 0 ? [] : raw.slice(close + 2).trim().split(/\s+/);
+  const state = fields[0];
   const ppid = Number(fields[1]);
   const startTicks = fields[19];
-  if (close < 0 || !Number.isInteger(ppid) || ppid < 0 || startTicks === undefined || !/^\d+$/.test(startTicks)) {
+  if (close < 0 || state === undefined || !/^[A-Za-z]$/.test(state) || !Number.isInteger(ppid) || ppid < 0 || startTicks === undefined || !/^\d+$/.test(startTicks)) {
     throw new Error(`unparsable ${procRoot}/${pid}/stat`);
   }
-  return { ppid, startTicks };
+  return { ppid, startTicks, state };
 };
+
+/**
+ * A zombie (Z) or dead (X) process has exited: the kernel already closed its
+ * descriptors and emptied its cmdline, so it can neither own a socket nor be a
+ * live sidecar. Any same-user zombie on the machine (for example a test
+ * runner's unreaped child) used to make discovery refuse with "empty argv".
+ */
+const isExitedState = (stat: Readonly<{ state: string }>): boolean => stat.state === "Z" || stat.state === "X";
 
 export const readNsPid = async (procRoot: string, pid: number, signal?: AbortSignal): Promise<string | null> => {
   signal?.throwIfAborted();
@@ -157,14 +166,14 @@ export const readNsPid = async (procRoot: string, pid: number, signal?: AbortSig
  */
 export const readProcessPin = async (procRoot: string, pid: number, signal?: AbortSignal): Promise<ProcPin | null> => {
   const stat = await readProcessStat(procRoot, pid, signal);
-  if (stat === null) return null;
+  if (stat === null || isExitedState(stat)) return null;
   const argv = await readProcessArgv(procRoot, pid, signal);
   if (argv === null) {
     if (await readProcessStat(procRoot, pid, signal) === null) return null;
     throw new Error(`process ${pid} has no readable cmdline`);
   }
   const after = await readProcessStat(procRoot, pid, signal);
-  if (after === null) return null;
+  if (after === null || isExitedState(after)) return null;
   if (after.startTicks !== stat.startTicks || after.ppid !== stat.ppid) throw new Error(`process ${pid} changed during pinning`);
   return { pid, startTicks: stat.startTicks, ppid: stat.ppid, argv, nsPid: await readNsPid(procRoot, pid, signal) };
 };
@@ -277,7 +286,11 @@ const socketOwnerPids = async (procRoot: string, inode: string, signal?: AbortSi
       if (await readProcessStat(procRoot, pid, signal) === null) continue;
       throw new Error(`cannot classify live process ${pid}: missing argv`);
     }
-    if (argv.length === 0 || !argv[0]) throw new Error(`cannot classify process ${pid}: empty argv`);
+    if (argv.length === 0 || !argv[0]) {
+      const exitedStat = await readProcessStat(procRoot, pid, signal);
+      if (exitedStat === null || isExitedState(exitedStat)) continue;
+      throw new Error(`cannot classify process ${pid}: empty argv`);
+    }
     if (!isCodexAppServerArgv(argv)) continue;
     const fdDir = join(procRoot, String(pid), "fd");
     let names: string[];
@@ -466,13 +479,13 @@ export const snapshotDaemon = async (
   for (const pid of await listPids(procRoot, signal)) {
     signal?.throwIfAborted();
     if (pid === identity.pid) continue;
-    let stat: Readonly<{ ppid: number; startTicks: string }> | null;
+    let stat: Readonly<{ ppid: number; startTicks: string; state: string }> | null;
     try {
       stat = await readProcessStat(procRoot, pid, signal);
     } catch (error) {
       throw new DiscoveryError("proc_unreadable", `cannot classify process ${pid}: ${messageOf(error)}`);
     }
-    if (stat === null || stat.ppid !== identity.pid) continue;
+    if (stat === null || stat.ppid !== identity.pid || isExitedState(stat)) continue;
     let argv: string[] | null;
     try {
       argv = await readProcessArgv(procRoot, pid, signal);
