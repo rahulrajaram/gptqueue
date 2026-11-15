@@ -209,8 +209,11 @@ Review the plan after building:
 
 ```sh
 python3 scripts/install-inbox-activation.py \
-  --node-bin "$(command -v node)"
+  --node-bin "$(command -v node)" \
+  --redis-url redis://REDIS_HOST:6379/0
 ```
+
+The URL must match the sidecar's `--redis-url` so the hooks probe the same Redis instance and database.
 
 Add `--apply` to install them into `~/.codex/hooks.json`, preserving other hooks.
 Then open `/hooks` in Codex and review/trust the three GPTQueue command hooks.

@@ -1,5 +1,4 @@
-import { mkdir, open, type FileHandle } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { mkdir, open, readdir, stat, unlink, type FileHandle } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
@@ -95,21 +94,38 @@ export interface HookBindingLog {
   close: () => Promise<void>;
 }
 
+/** Hook binding logs this client owns that fall older than this are deleted when the next one opens. */
+export const HOOK_LOG_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** Delete this hook's own log files older than the cutoff; retention is best effort (R3). */
+const pruneExpiredHookLogs = async (stateRoot: string, client: string, cutoffMs: number): Promise<void> => {
+  const prefix = `hook-${client}-`;
+  for (const name of await readdir(stateRoot).catch(() => [] as string[])) {
+    if (!name.startsWith(prefix) || !name.endsWith(".jsonl")) continue;
+    const path = join(stateRoot, name);
+    const info = await stat(path).catch(() => null);
+    if (info?.isFile() === true && info.mtimeMs < cutoffMs) await unlink(path).catch(() => undefined);
+  }
+};
+
 /**
- * Durable startup-hook binding diagnostics: one exclusive append-only file per
- * hook invocation, correlated by session and hook event. Records carry only
- * safe codes and counters — never message payloads, transport errors, or
- * credentials. Failure to log is reported once on stderr and never interrupts
- * binding or hook exit semantics.
+ * Durable hook binding diagnostics: one append-only file per client, session
+ * and UTC day — repeated invocations (one per prompt) append to the same day's
+ * file instead of minting a new file each time, and this hook's own files
+ * older than HOOK_LOG_RETENTION_MS are deleted when the next one opens (R3).
+ * Records carry only safe codes and counters — never message payloads,
+ * transport errors, or credentials. Failure to log is reported once on stderr
+ * and never interrupts binding or hook exit semantics.
  */
 export const createHookLog = (
   client: string, sessionId: string, hookEvent: string,
   options: Readonly<{ dir?: string; now?: () => Date }> = {},
 ): HookBindingLog => {
   const stateRoot = options.dir ?? defaultLogDir();
-  const stamp = (options.now ?? (() => new Date()))().toISOString().replace(/[:.]/gu, "-");
+  const now = options.now ?? (() => new Date());
+  const day = now().toISOString().slice(0, 10);
   const safeSession = /^[0-9a-f-]{36}$/iu.test(sessionId) ? sessionId : "unparsed";
-  const path = join(stateRoot, `hook-${client}-${safeSession}-${stamp}-${randomBytes(4).toString("hex")}.jsonl`);
+  const path = join(stateRoot, `hook-${client}-${safeSession}-${day}.jsonl`);
   let warning = false;
   let fileReady: Promise<FileHandle> | undefined;
   let writes = Promise.resolve();
@@ -121,11 +137,12 @@ export const createHookLog = (
   };
   const ensureFile = (): Promise<FileHandle> => fileReady ??= (async () => {
     await mkdir(stateRoot, { recursive: true, mode: 0o700 });
-    // Fresh file per invocation; never follow a symlink or reuse an existing target.
-    return open(path, constants.O_APPEND | constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    await pruneExpiredHookLogs(stateRoot, client, now().getTime() - HOOK_LOG_RETENTION_MS);
+    // One file per client/session/day: same-day invocations append. Never follow a symlink.
+    return open(path, constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
   })();
   const emit = (event: string, fields: Readonly<Record<string, string | number | boolean | undefined>> = {}): void => {
-    const record = Object.freeze({ schema_version: 1, timestamp: (options.now ?? (() => new Date()))().toISOString(),
+    const record = Object.freeze({ schema_version: 1, timestamp: now().toISOString(),
       event, client, pid: process.pid, session_id: sessionId, hook_event: hookEvent,
       ...Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) });
     const line = JSON.stringify(record);

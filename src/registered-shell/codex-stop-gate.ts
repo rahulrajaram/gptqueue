@@ -114,7 +114,16 @@ const gate = async (event: CodexStopEvent, redis: Redis, now: () => Date): Promi
   } catch {
     return "{}"; // cannot tell whether this thread is gptqueue's: never block an unrelated thread
   }
-  if (agent === null) return "{}";
+  if (agent === null) {
+    // Redis answered but this thread has no runtime-mailbox mapping: an unbound
+    // thread (the common case) is indistinguishable here from the gate probing
+    // a different Redis than the sidecar (a mis-probe, R1), so emit one
+    // observable stderr event; the stop still fails open.
+    try {
+      process.stderr.write(`${JSON.stringify({ event: "codex_stop_gate_no_mapping", runtime: "codex", session_id: event.session_id })}\n`);
+    } catch { /* stderr is best effort */ }
+    return "{}";
+  }
 
   const priorKey = SESSION_KEYS.stopGate("codex", event.session_id);
   const prior = await redis.get(priorKey).then((raw) => parseJson(raw, priorSchema), () => null);

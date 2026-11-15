@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { runCodexHook } from "../dist/registered-shell/codex-hook.js";
-runCodexHook().catch(() => {
+// The installer appends the sidecar's Redis URL (--redis-url <url>) so the hook
+// probes the same instance the sidecar writes to; absent, the REDIS_URL/db 0
+// fallback keeps existing installs working (R1).
+const flagIndex = process.argv.indexOf("--redis-url");
+const redisUrl = flagIndex === -1 ? undefined : process.argv[flagIndex + 1];
+runCodexHook({ redisUrl: redisUrl || undefined }).catch(() => {
   console.error('[gptqueue] {"event":"runtime_binding_failed","code":"invalid_hook_or_transport"}');
   process.exitCode = 1;
 });

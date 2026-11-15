@@ -24,10 +24,12 @@ type CodexHookEvent = z.infer<typeof eventSchema>;
  * effort. `at` is the prompt event's time, captured when the hook process
  * started and before binding (S2): this hook runs asynchronously, so it can
  * finish after the turn's Stop recorded idle, and a later timestamp here would
- * wrongly flip a finished turn back to running.
+ * wrongly flip a finished turn back to running. `redisUrl` is the configured
+ * sidecar URL; when neither it nor `client` is given the REDIS_URL/db 0
+ * fallback applies (R1).
  */
-export const recordRunning = async (event: CodexHookEvent, at: string, client?: Redis): Promise<void> => {
-  const redis = client ?? probeClient();
+export const recordRunning = async (event: CodexHookEvent, at: string, client?: Redis, redisUrl?: string): Promise<void> => {
+  const redis = client ?? probeClient(redisUrl);
   try {
     const raw = await redis.get(SESSION_KEYS.runtimeMailbox("codex", event.session_id));
     const agent = raw === null ? null : (JSON.parse(raw) as { agent?: unknown }).agent;
@@ -101,7 +103,7 @@ export const bindCodexHook = async (
   return false;
 };
 
-export const runCodexHook = async (): Promise<void> => {
+export const runCodexHook = async (options: Readonly<{ redisUrl?: string }> = {}): Promise<void> => {
   const startedAt = new Date().toISOString(); // the event's time, before any binding work (S2)
   let input = "";
   for await (const chunk of process.stdin) {
@@ -121,7 +123,8 @@ export const runCodexHook = async (): Promise<void> => {
   if (parsed.hook_event_name === "Stop") {
     // Synchronous, per turn, on every daemon thread: no binding work and no per-turn log file.
     // A hung Redis must not hold the turn: every command gives up after 3 s and the gate fails open.
-    const redis = probeClient(undefined, { commandTimeoutMs: 3000 });
+    // Probe the configured sidecar URL (R1); without one the REDIS_URL/db 0 fallback applies.
+    const redis = probeClient(options.redisUrl, { commandTimeoutMs: 3000 });
     try {
       process.stdout.write(await runCodexStop(parsed, redis));
     } finally {
@@ -139,7 +142,7 @@ export const runCodexHook = async (): Promise<void> => {
       console.error('[gptqueue] ' + JSON.stringify({ event: 'runtime_binding_failed', code }));
       process.exitCode = 1;
     } else if (parsed.hook_event_name === "UserPromptSubmit") {
-      await recordRunning(parsed, startedAt).catch(() => log.emit("turn_state_unrecorded", {}));
+      await recordRunning(parsed, startedAt, undefined, options.redisUrl).catch(() => log.emit("turn_state_unrecorded", {}));
     }
   } finally {
     try { await rpc.close(); } finally { await log.close(); }

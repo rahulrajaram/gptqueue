@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -131,6 +131,44 @@ describe("Codex runtime hook", () => {
       expect(text).not.toContain("ECONNREFUSED");
       expect((await stat(join(dir, (await readdir(dir))[0]!))).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it("R3: appends same-day invocations for one session to a single log file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "gptqueue-hooklog-")); dirs.push(dir);
+    const now = () => new Date("2026-11-15T10:00:00Z");
+    const first = createHookLog("codex", session, "SessionStart", { dir, now });
+    first.emit("hook_binding_started", {});
+    await first.close();
+    const second = createHookLog("codex", session, "UserPromptSubmit", { dir, now });
+    second.emit("hook_binding_outcome", { outcome: "ready" });
+    await second.close();
+    // One file per prompt used to accumulate forever; now every same-day invocation appends.
+    const files = await readdir(dir);
+    expect(files).toEqual([`hook-codex-${session}-2026-11-15.jsonl`]);
+    const records = (await readFile(join(dir, files[0]!), "utf8")).trim().split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => record.hook_event)).toEqual(["SessionStart", "UserPromptSubmit"]);
+    expect(records.map((record) => record.event)).toEqual(["hook_binding_started", "hook_binding_outcome"]);
+  });
+
+  it("R3: deletes its own log files older than the retention window and leaves everything else", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "gptqueue-hooklog-")); dirs.push(dir);
+    const old = new Date("2026-10-01T00:00:00Z");
+    const own = join(dir, `hook-codex-${session}-2026-09-30.jsonl`);
+    await writeFile(own, "{}\n"); await utimes(own, old, old);
+    const otherClient = join(dir, "hook-claude-00000000-0000-0000-0000-000000000000-2026-09-30.jsonl");
+    await writeFile(otherClient, "{}\n"); await utimes(otherClient, old, old);
+    const unrelated = join(dir, "notes.txt");
+    await writeFile(unrelated, "x"); await utimes(unrelated, old, old);
+    const log = createHookLog("codex", session, "SessionStart", { dir, now: () => new Date("2026-11-15T10:00:00Z") });
+    log.emit("hook_binding_started", {});
+    await log.close();
+    const remaining = (await readdir(dir)).sort();
+    expect(remaining).toEqual([
+      "hook-claude-00000000-0000-0000-0000-000000000000-2026-09-30.jsonl",
+      `hook-codex-${session}-2026-11-15.jsonl`,
+      "notes.txt",
+    ]);
   });
 
   it("records not_ready timeouts and legacy outcomes durably", async () => {
