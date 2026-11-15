@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -130,6 +131,77 @@ class InboxHookInstallerTest(unittest.TestCase):
             bad = self.run_installer("--redis-url", "redis://127.0.0.1:6379/3?bad=1",
                                      "--codex-dir", str(codex), "--state-dir", str(state), "--node-bin", str(NODE))
             self.assertNotEqual(bad.returncode, 0)
+
+    def test_existing_commands_replace_redis_urls_idempotently_and_rollback(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); codex, state = self.paths(root)
+            hooks = codex / "hooks.json"
+            base = shlex.join([str(NODE), str(ROOT / "bin/gptqueue-codex-hook")])
+            configured = {"hooks": {event: [{"hooks": [
+                {"type": "command", "command": base + suffix, "timeout": 42},
+                {"type": "command", "command": "keep-me"},
+            ]}] for event, suffix in [
+                ("SessionStart", ""),
+                ("UserPromptSubmit", " --redis-url redis://old:6379/1"),
+                ("Stop", " --redis-url=redis://old:6379/1 --redis-url redis://other:6379/2"),
+                ("CustomEvent", " --redis-url redis://old:6379/1"),
+            ]}}
+            # Multiple matching commands in one group must all be upgraded.
+            configured["hooks"]["Stop"][0]["hooks"].append(
+                {"type": "command", "command": base + " --extra 'two words'"})
+            original = (json.dumps(configured, separators=(",", ":")) + "\n").encode()
+            hooks.write_bytes(original)
+            url = "redis://localhost:6379/7"
+            common = ["--codex-dir", str(codex), "--state-dir", str(state),
+                      "--node-bin", str(NODE), "--redis-url", url]
+            plan = self.run_installer(*common)
+            self.assertEqual(plan.returncode, 0, plan.stderr)
+            self.assertEqual(hooks.read_bytes(), original)
+            self.assertFalse(state.exists())
+            applied = self.run_installer("--apply", *common)
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            result = json.loads(hooks.read_text())
+            for event, groups in result["hooks"].items():
+                self.assertEqual(groups[0]["hooks"][1]["command"], "keep-me")
+                self.assertEqual(groups[0]["hooks"][0]["timeout"], 42)
+                for hook in groups[0]["hooks"]:
+                    if "gptqueue-codex-hook" in hook["command"]:
+                        tokens = shlex.split(hook["command"])
+                        self.assertEqual(tokens.count("--redis-url"), 1)
+                        self.assertEqual(tokens[tokens.index("--redis-url") + 1], url)
+                        self.assertFalse(any(t.startswith("--redis-url=") for t in tokens))
+            self.assertIn("two words", shlex.split(result["hooks"]["Stop"][0]["hooks"][2]["command"]))
+            planned = json.loads(plan.stdout)
+            self.assertEqual(planned["new_entries"], [])
+            self.assertEqual(planned["updated_entries"], list(configured["hooks"]))
+            self.assertEqual(json.loads(applied.stdout)["updated_entries"], planned["updated_entries"])
+            first = hooks.read_bytes()
+            manifest = (state / "manifest.json").read_bytes()
+            again = self.run_installer("--apply", *common)
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertEqual(json.loads(again.stdout)["updated_entries"], [])
+            self.assertEqual(hooks.read_bytes(), first)
+            self.assertEqual((state / "manifest.json").read_bytes(), manifest)
+            rolled = self.run_installer("--rollback", "--state-dir", str(state))
+            self.assertEqual(rolled.returncode, 0, rolled.stderr)
+            self.assertEqual(hooks.read_bytes(), original)
+
+    def test_omitted_redis_url_preserves_existing_configured_bytes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); codex, state = self.paths(root)
+            hooks = codex / "hooks.json"
+            command = shlex.join([str(NODE), str(ROOT / "bin/gptqueue-codex-hook"),
+                                  "--redis-url", "redis://localhost:6379/5"])
+            original = json.dumps({"hooks": {event: [{"hooks": [
+                {"type": "command", "command": command}]}]
+                for event in ("SessionStart", "UserPromptSubmit", "Stop")}}).encode()
+            hooks.write_bytes(original)
+            result = self.run_installer("--apply", "--codex-dir", str(codex),
+                                        "--state-dir", str(state), "--node-bin", str(NODE))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(hooks.read_bytes(), original)
+            self.assertFalse(state.exists())
+            self.assertEqual(json.loads(result.stdout)["updated_entries"], [])
 
     def test_refuses_symlink_without_following_or_modifying_target(self):
         with tempfile.TemporaryDirectory() as raw:

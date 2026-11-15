@@ -31,10 +31,10 @@ HOOK_ENTRIES = {
 }
 
 
-def hook_config(content: bytes, node: str, redis_url: str | None = None) -> tuple[bytes, list[str], list[str]]:
-    """Add each missing GPTQueue entry. Existing GPTQueue entries and unrelated hooks stay as they are.
+def hook_config(content: bytes, node: str, redis_url: str | None = None) -> tuple[bytes, list[str], list[str], list[str]]:
+    """Return desired bytes and new, existing, and updated events.
 
-    Returns the desired bytes and the events whose entry is new and which already had one.
+    Only rewrite existing commands when an explicit Redis URL is supplied.
     """
     config = json.loads(content or b"{}")
     if not isinstance(config, dict) or not isinstance(config.get("hooks", {}), dict):
@@ -46,6 +46,28 @@ def hook_config(content: bytes, node: str, redis_url: str | None = None) -> tupl
                          + (["--redis-url", redis_url] if redis_url else []))
     new: list[str] = []
     existing: list[str] = []
+    updated: list[str] = []
+    if redis_url:
+        for event, groups in hooks.items():
+            if not isinstance(groups, list):
+                raise ValueError(f"Invalid hook groups: {event}")
+            for group in groups:
+                for hook in group.get("hooks", []):
+                    old_command = hook.get("command", "")
+                    if "gptqueue-codex-hook" not in old_command:
+                        continue
+                    tokens = iter(shlex.split(old_command))
+                    retained: list[str] = []
+                    for token in tokens:
+                        if token == "--redis-url":
+                            next(tokens, None)
+                        elif not token.startswith("--redis-url="):
+                            retained.append(token)
+                    replacement = shlex.join([*retained, "--redis-url", redis_url])
+                    if replacement != old_command:
+                        hook["command"] = replacement
+                        if event not in updated:
+                            updated.append(event)
     for event, entry in HOOK_ENTRIES.items():
         groups = hooks.get(event, [])
         if not isinstance(groups, list):
@@ -55,9 +77,9 @@ def hook_config(content: bytes, node: str, redis_url: str | None = None) -> tupl
             continue
         hooks[event] = [*groups, {"hooks": [{"type": "command", "command": command, **entry}]}]
         new.append(event)
-    if not new:
-        return content, new, existing
-    return (json.dumps(config, indent=2) + "\n").encode(), new, existing
+    if not new and not updated:
+        return content, new, existing, updated
+    return (json.dumps(config, indent=2) + "\n").encode(), new, existing, updated
 
 
 def supersede(manifest: Path) -> Path | None:
@@ -99,17 +121,18 @@ def main() -> None:
         registration.validate_redis_url(args.redis_url)
     target = args.codex_dir.absolute() / "hooks.json"
     original = registration.snapshot(target)
-    desired, new, existing = hook_config(original.content, args.node_bin, args.redis_url)
+    desired, new, existing, updated = hook_config(original.content, args.node_bin, args.redis_url)
     print(json.dumps({"mode": "apply" if args.apply else "plan", "target": str(target),
                       "manifest": str(manifest), "sha256": registration.digest(desired),
                       "hooks": list(HOOK_ENTRIES),
                       "new_entries": new,
                       "existing_entries": existing,
-                      "requires_hook_trust": new,
-                      "next_step": (f"Review and trust the new GPTQueue hook(s) {', '.join(new)} in Codex /hooks, then resume the session."
-                                    if new else "Nothing to add; the GPTQueue hooks are already installed."),
+                      "updated_entries": updated,
+                      "requires_hook_trust": list(dict.fromkeys([*new, *updated])),
+                      "next_step": (f"Review and trust the new or updated GPTQueue hook(s) {', '.join(dict.fromkeys([*new, *updated]))} in Codex /hooks, then resume the session."
+                                    if new or updated else "Nothing to add; the GPTQueue hooks are already installed."),
                       "source": str(ROOT / "bin/gptqueue-codex-hook")}, indent=2))
-    if args.apply and new:
+    if args.apply and (new or updated):
         state.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (state / ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
