@@ -34,17 +34,29 @@ const launch = (url = testRedisUrl()) => {
   return { child, done, ready };
 };
 
+// The pass conditions are events (the child's `transport_connected` line, then
+// its exit). The per-test timeout is only an upper bound for a hung child: a
+// cold `gptqueue-session` start plus retirement takes a few seconds alone but
+// can exceed vitest's 15 s default under parallel suite load.
+const LIFETIME_UPPER_BOUND_MS = 90_000;
+
 describe("registered stdio process lifetime", () => {
   it.each([{ event: "EOF", code: 0 }, { event: "SIGINT", code: 130 }, { event: "SIGTERM", code: 143 }] as const)(
     "retires its session on $event and exits $code", async ({ event, code }) => {
       const redis = new Redis(testRedisUrl());
+      const started = performance.now();
       const job = launch(); let name: string | undefined;
       try {
         name = await job.ready;
+        const readyMs = Math.round(performance.now() - started);
         const sessions = await redis.smembers(SESSION_KEYS.agentSessions(name));
         expect(sessions).toHaveLength(1);
+        const stopping = performance.now();
         if (event === "EOF") job.child.stdin.end(); else job.child.kill(event);
-        expect(await job.done).toEqual({ code, signal: null });
+        const exit = await job.done;
+        // Phase timings make a slow start or a slow retirement visible in the log.
+        console.info(JSON.stringify({ test: "registered-shell-lifetime", event, ready_ms: readyMs, retire_ms: Math.round(performance.now() - stopping) }));
+        expect(exit).toEqual({ code, signal: null });
         expect(await redis.smembers(SESSION_KEYS.agentSessions(name))).toEqual([]);
         expect(await redis.exists(SESSION_KEYS.lease(sessions[0]!))).toBe(0);
         expect(await redis.exists(SESSION_KEYS.session(sessions[0]!))).toBe(0);
@@ -56,9 +68,9 @@ describe("registered stdio process lifetime", () => {
         }
         await redis.quit();
       }
-    }
+    }, LIFETIME_UPPER_BOUND_MS
   );
-  it("honors SIGTERM while Redis startup is blocked", async () => {
+  it("honors SIGTERM while Redis startup is blocked", { timeout: LIFETIME_UPPER_BOUND_MS }, async () => {
     // A silent listener on a private unix socket (no TCP): accepts, never answers.
     const dir = mkdtempSync(join(tmpdir(), "gptq-blocked-redis-"));
     const path = join(dir, "blocked.sock");
