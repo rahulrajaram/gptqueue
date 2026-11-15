@@ -767,8 +767,9 @@ describe("launch allowlist & identity policy (wire)", () => {
 
   it("rejects a derived actor_id outside the identity charset over the wire (invalid_identity_charset)", async () => {
     // actor_id is now DERIVED from the registered name (H4); register a name
-    // containing a space so the derived identity violates the charset.
-    const owner = await connect(uniq("pol-ident-act") + " ");
+    // containing an inner space (a valid agent name, SEC-1) so the derived
+    // identity violates the durable-actor charset.
+    const owner = await connect(`pol ${uniq("ident-act")}`);
     const res = await owner.call("actor_register", {
       session_id: owner.sessionId,
       alias: "ok-alias",

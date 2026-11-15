@@ -25,14 +25,19 @@ const REGISTRY_ROLLBACK_KEYS = [
 /**
  * SEC-1: the one rule an agent name must satisfy before the core accepts it
  * as a Redis key component (`gptq:*:<name>`, including the Lua key
- * expressions built as `'gptq:q:' .. name`): 1..128 characters from
- * [A-Za-z0-9._-]. Deliberately NOT the durable actors' 64-character
- * IDENTITY_CHARSET bound (actor-presence.ts): 427 of 725 live registered
- * names are longer than 64 (max 87) and every one matches this pattern, so
- * this rule accepts them all. Mirrored by the register_agent `name` and
- * send_message `to` zod schemas.
+ * expressions built as `'gptq:q:' .. name`): 1..128 code points, no
+ * control or line-separator characters, and no leading or trailing
+ * whitespace. It keeps the existing contract that register_agent accepts
+ * display names with spaces and non-ASCII letters ("Code Reviewer",
+ * "équipe/レビュー"), and it is deliberately NOT the durable actors'
+ * 64-character IDENTITY_CHARSET bound (actor-presence.ts): 427 of 725 live
+ * registered names are longer than 64 (max 87). Mirrored by the
+ * register_agent `name` and send_message `to` zod schemas.
  */
-export const AGENT_NAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+export const AGENT_NAME_PATTERN = /^(?!\s)(?!.*\s$)[^\p{Cc}\p{Zl}\p{Zp}]{1,128}$/u;
+/** Human-readable form of AGENT_NAME_PATTERN for error messages. */
+export const AGENT_NAME_RULE =
+  "1-128 characters, no control or line-separator characters, and no leading or trailing whitespace";
 
 /**
  * Renew a lease only while its session record exists, re-adding the session
@@ -281,12 +286,13 @@ export class SessionStore {
       throw new GptQueueError("AGENT_NAME_RESERVED", `Agent name '${agentName}' is reserved for gptqueue's own messages.`, { name: agentName });
     }
     if (!AGENT_NAME_PATTERN.test(agentName)) {
-      // SEC-1: an agent name becomes part of every `gptq:*:<name>` key and
-      // of Lua key expressions, so an empty, whitespace, ':'-containing or
-      // oversized name must be refused at this boundary — not stored as a
-      // nameless or key-colliding identity.
+      // SEC-1: an agent name becomes part of every `gptq:*:<name>` key, so an
+      // empty, blank, padded, control-character or oversized name is refused
+      // at this boundary instead of being stored as a nameless identity.
+      // Spaces and non-ASCII letters inside a name stay valid: register_agent
+      // has always accepted display names such as "Code Reviewer".
       throw new GptQueueError("AGENT_NAME_INVALID",
-        `Agent name is invalid: use 1-128 characters from letters, digits, '.', '_' or '-'.`,
+        `Agent name is invalid: use ${AGENT_NAME_RULE}.`,
         { length: agentName.length, excerpt: agentName.slice(0, 32) });
     }
     const sessionId = uuidv4();

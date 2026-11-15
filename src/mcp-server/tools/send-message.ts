@@ -8,7 +8,7 @@ import {
   classifyPresence,
   type RuntimePresenceState,
 } from "../../core/actor-presence.js";
-import { AGENT_NAME_PATTERN } from "../../core/session-store.js";
+import { AGENT_NAME_PATTERN, AGENT_NAME_RULE } from "../../core/session-store.js";
 import type { ActorDirectoryRecord } from "../../core/actor-directory.js";
 import type { WakeLease } from "../../core/wake-lease.js";
 import { pidNamespaceId } from "../../core/session-store.js";
@@ -27,9 +27,7 @@ export const sendMessageSchema = z.object({
     ),
   to: z
     .string()
-    .min(1)
-    .max(128)
-    .regex(AGENT_NAME_PATTERN, "Recipient name must be 1-128 characters from letters, digits, '.', '_' or '-'.")
+    .regex(AGENT_NAME_PATTERN, `Recipient name must have ${AGENT_NAME_RULE}.`)
     .describe("Target agent name"),
   content: z.string().describe("Message content"),
   type: z
