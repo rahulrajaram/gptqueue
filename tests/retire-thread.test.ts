@@ -662,6 +662,77 @@ describe("retire-thread guards (injected fakes)", () => {
   });
 });
 
+describe("retire-thread preflight budget on a slow daemon", () => {
+  it("the pre-archive re-read gets its own budget: a slow real run still archives", async () => {
+    // Each thread/read costs 12 s of observation time (a busy daemon with
+    // hundreds of children). Discovery plus the first read fit in one 20 s
+    // budget, as a dry run shows; the re-read must not inherit what is left.
+    let t = 0;
+    const slowRead = (): RpcOutcome => ({ run: () => { t += 12_000; return idleThread("t1"); } });
+    const f: Fixture = makeFixture({}, {
+      "thread/read": [slowRead(), slowRead()],
+      "thread/archive": [{ run: () => { f.pins.set(8100, null); f.setPostArchive(true); return {}; } }],
+      "thread/loaded/list": [ok({ data: [] })],
+    }, happyStore(), { monotonic: () => t });
+    const result = await f.run();
+    expect(result.code).toBeNull();
+    expect(result.exitCode).toBe(0);
+    expect(archiveCalls(f)).toBe(1);
+    expect(steps(f)).toEqual(["check", "archived", "verify"]);
+  });
+
+  it("the same slow daemon still passes a dry run within one budget", async () => {
+    let t = 0;
+    const f = makeFixture({ dryRun: true }, {
+      "thread/read": [{ run: () => { t += 12_000; return idleThread("t1"); } }],
+    }, happyStore(), { monotonic: () => t });
+    expect((await f.run()).outcome).toBe("dry_run");
+  });
+
+  const abortRejection = (error: () => Error) => (signal?: AbortSignal): Promise<never> =>
+    new Promise<never>((_, reject) => { signal?.addEventListener("abort", () => reject(error()), { once: true }); });
+
+  it("the re-read budget is still finite: a stalled re-read exits 4 with nothing archived", async () => {
+    vi.useFakeTimers();
+    try {
+      let reads = 0;
+      const script = scriptRpc({ "thread/read": [ok(idleThread("t1"))], "thread/archive": [ok({})] });
+      const f = makeFixture({}, {}, happyStore(), {
+        monotonic: () => 0,
+        rpc: { request: (method, params, kind, signal) => method === "thread/read" && ++reads === 2
+          ? abortRejection(() => new Error("socket closed"))(signal)
+          : script.request(method, params, kind, signal) },
+      });
+      const pending = f.run();
+      await vi.advanceTimersByTimeAsync(20_001);
+      const result = await pending;
+      expect(reads).toBe(2);
+      expect(result.exitCode).toBe(4);
+      expect(result.code).toBe("deadline_exceeded");
+      expect(script.calls.filter((call) => call.method === "thread/archive")).toHaveLength(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([
+    ["a /proc snapshot (proc_unreadable on abort)", "snapshot"],
+    ["an RPC (plain error on abort)", "rpc"],
+  ] as const)("an exhausted budget is reported as deadline_exceeded, not as the abort of %s", async (_label, stalled) => {
+    vi.useFakeTimers();
+    try {
+      const overrides: Partial<RetireDeps> = stalled === "snapshot"
+        ? { monotonic: () => 0, snapshot: abortRejection(() => Object.assign(new Error("cannot classify process 1"), { mode: "proc_unreadable" })) }
+        : { monotonic: () => 0, rpc: { request: (_method: string, _params: Record<string, unknown>, _kind: unknown, signal?: AbortSignal) => abortRejection(() => new Error("socket closed"))(signal) } };
+      const f = makeFixture({}, { "thread/read": [ok(idleThread("t1"))] }, happyStore(), overrides);
+      const pending = f.run();
+      await vi.advanceTimersByTimeAsync(20_001);
+      const result = await pending;
+      expect(result.exitCode).toBe(4);
+      expect(result.code).toBe("deadline_exceeded");
+      expect(archiveCalls(f)).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+});
+
 describe("P004 source-review safety regressions", () => {
   it("R7 finite preflight budget cancels and settles a nonreplying scan before any archive", async () => {
     vi.useFakeTimers();
