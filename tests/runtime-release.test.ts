@@ -8,6 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  rmSync,
   readdirSync, readlinkSync, statSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,7 +28,11 @@ const gitIn = (...args: string[]) => {
   if (r.status !== 0) throw new Error(r.stderr);
   return r.stdout.trim();
 };
-const commit = (message: string) => { gitIn("add", "-A"); gitIn("commit", "-q", "-m", message); };
+const stampBuild = () => {
+  const result = spawnSync(process.execPath, [join(REPO, "scripts/write-build-manifest.mjs"), "--root", source], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(result.stderr);
+};
+const commit = (message: string) => { gitIn("add", "-A"); gitIn("commit", "-q", "-m", message); stampBuild(); };
 const writable = (p: string) => chmodSync(p, statSync(p).mode | 0o200);
 
 let refDeps = "";
@@ -38,9 +43,11 @@ const installInto = (prefix: string, extra: Record<string, unknown> = {}) =>
   rr.install({ source, prefix, redisUrl: REDIS_URL, installDependencies: copyDeps, ...extra });
 
 beforeAll(async () => {
-  mkdirSync(join(source, "src/mcp-server"), { recursive: true });
+  mkdirSync(source, { recursive: true });
+  // As in the real repo (where dist/ is ignored), the build stamp is never tracked.
+  writeFileSync(join(source, ".gitignore"), "dist/build-manifest.json\n");
   for (const entry of ["dist", "bin", "package.json", "package-lock.json"]) cpSync(join(REPO, entry), join(source, entry), { recursive: true });
-  cpSync(join(REPO, "src/mcp-server/lua"), join(source, "src/mcp-server/lua"), { recursive: true });
+  cpSync(join(REPO, "src"), join(source, "src"), { recursive: true });
   spawnSync("git", ["init", "-q", source]);
   commit("fixture");
   // One real lockfile install; later installs copy it to keep the file fast.
@@ -52,6 +59,26 @@ beforeAll(async () => {
 afterAll(() => rr.removeTree(scratch));
 
 describe("RT-1 release staging", () => {
+  it("PROV-1 rejects dist built for a different source commit", () => {
+    mkdirSync(join(source, "src"), { recursive: true });
+    writeFileSync(join(source, "src/provenance-probe.ts"), "export const probe = true;\n");
+    gitIn("add", "src/provenance-probe.ts");
+    gitIn("commit", "-q", "-m", "advance source without rebuilding dist");
+
+    try {
+      expect(() => rr.checkSource(source)).toThrow(expect.objectContaining({ code: "stale_build" }));
+      expect(() => rr.checkSource(source, { allowDirty: true })).toThrow(expect.objectContaining({ code: "stale_build" }));
+    } finally { stampBuild(); }
+  });
+
+  it("PROV-1 rejects a missing build provenance stamp", () => {
+    const manifest = join(source, "dist/build-manifest.json");
+    rmSync(manifest);
+    try {
+      expect(() => rr.checkSource(source)).toThrow(expect.objectContaining({ code: "stale_build" }));
+    } finally { stampBuild(); }
+  });
+
   it("stages dist, bin, package files, Lua and production deps into an immutable release named <sha>-<digest>", async () => {
     const prefix = newPrefix();
     const result = await installInto(prefix);
@@ -102,7 +129,7 @@ describe("RT-1 release staging", () => {
       expect(() => rr.checkSource(source)).toThrow(expect.objectContaining({ code: "dirty_checkout" }));
       expect(rr.checkSource(source, { allowDirty: true }).dirty).toBe(true);
     } finally { writeFileSync(pkg, before); }
-    const lua = join(source, "src/mcp-server/lua/bounded-push.lua");
+    const lua = join(source, "dist/mcp-server/lua/bounded-push.lua");
     const luaBefore = readFileSync(lua);
     try {
       appendFileSync(lua, "-- newer source\n");
