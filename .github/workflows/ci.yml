@@ -37,6 +37,9 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Typecheck tests
+        run: npx tsc -p tsconfig.test.json --noEmit
+
       - name: Lint
         run: npx oxlint src/
 
