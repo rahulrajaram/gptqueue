@@ -2,14 +2,14 @@
  * Loop adapter S1: the Codex Stop gate. Pure decisions, the runner against
  * the private test Redis, and the built hook entry point end to end.
  */
-import { testRedisUrl } from "./helpers/test-redis.js";
+import { testRedisUrl, testRedisTarget } from "./helpers/test-redis.js";
 import { spawn } from "node:child_process";
 import { createServer, type Server, type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Redis } from "ioredis";
 import { decideCodexStop, runCodexStop, type CodexStopInput } from "../src/registered-shell/codex-stop-gate.js";
 import { recordRunning } from "../src/registered-shell/codex-hook.js";
@@ -105,6 +105,41 @@ describe("Codex Stop gate against Redis", { timeout: 60_000 }, () => {
     expect(await redis.exists(SESSION_KEYS.stopGate("codex", thread))).toBe(0);
   });
 
+  it("R1: a Stop with no mapping on a reachable Redis emits one observable stderr event", async () => {
+    // A mis-probe (the hook on a different Redis than the sidecar) looks exactly
+    // like an unbound thread: no mapping, Redis reachable. One stderr event makes it diagnosable.
+    const thread = randomUUID();
+    const writes: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk: Uint8Array | string) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      expect(await runCodexStop({ session_id: thread }, redis)).toBe("{}");
+    } finally {
+      stderr.mockRestore();
+    }
+    const events = writes.flatMap((line) => {
+      try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; }
+    });
+    expect(events).toContainEqual(expect.objectContaining({ event: "codex_stop_gate_no_mapping", session_id: thread }));
+  });
+
+  it("R1: recordRunning reports through the configured URL, not REDIS_URL, when they differ", async () => {
+    const { name, thread } = await boundThread();
+    const wrongDb = `${testRedisTarget().path}?db=14`; // same private server, no mapping there
+    vi.stubEnv("REDIS_URL", wrongDb);
+    try {
+      await recordRunning(
+        { session_id: thread, cwd: "/workspace/project", hook_event_name: "UserPromptSubmit" },
+        new Date().toISOString(), undefined, REDIS_URL,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect((await new TurnStateStore(redis).read(name))?.phase).toBe("running");
+  });
+
   it("fails open with {} when the binding cannot be read", async () => {
     const broken = { get: async () => { throw new Error("ECONNREFUSED"); } } as unknown as Redis;
     expect(await runCodexStop({ session_id: randomUUID() }, broken)).toBe("{}");
@@ -185,6 +220,24 @@ describe("Codex Stop gate against Redis", { timeout: 60_000 }, () => {
     const unbound = await hook({ ...base, session_id: randomUUID(), stop_hook_active: false });
     expect(unbound.code).toBe(0);
     expect(unbound.stdout).toBe("{}");
+  });
+
+  it("R1: the built hook probes --redis-url even when REDIS_URL points elsewhere", async () => {
+    const { thread, send } = await boundThread();
+    await send();
+    const wrongDb = `${testRedisTarget().path}?db=14`;
+    const out = await new Promise<{ stdout: string; code: number | null }>((done) => {
+      const child = spawn(process.execPath, [resolve(__dirname, "..", "bin", "gptqueue-codex-hook"), "--redis-url", REDIS_URL], {
+        env: { PATH: process.env.PATH, HOME: process.env.HOME, REDIS_URL: wrongDb, GPTQ_LOG_DIR: logDir }, stdio: ["pipe", "pipe", "ignore"],
+      });
+      let stdout = "";
+      child.stdout.on("data", (d) => { stdout += d; });
+      child.on("close", (code) => done({ stdout: stdout.trim(), code }));
+      child.stdin.end(JSON.stringify({ session_id: thread, cwd: "/workspace/project", hook_event_name: "Stop", stop_hook_active: false }));
+    });
+    expect(out.code).toBe(0);
+    // Without the URL the hook probes REDIS_URL (db 14: no mapping) and silently allows every Stop.
+    expect(JSON.parse(out.stdout)).toMatchObject({ decision: "block" });
   });
 });
 

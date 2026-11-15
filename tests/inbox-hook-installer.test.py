@@ -98,6 +98,39 @@ class InboxHookInstallerTest(unittest.TestCase):
             self.assertEqual(rolled.returncode, 0, rolled.stderr)
             self.assertEqual(hooks.read_bytes(), original)
 
+    def test_apply_pins_the_hook_to_redis_url_and_keeps_the_fallback_without_it(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); codex, state = self.paths(root)
+            hooks = codex / "hooks.json"
+            common = ["--apply", "--codex-dir", str(codex), "--state-dir", str(state), "--node-bin", str(NODE)]
+
+            # R1: without --redis-url the hook keeps its REDIS_URL/db 0 fallback (existing installs keep working).
+            applied = self.run_installer(*common)
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            configured = json.loads(hooks.read_text())
+            for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+                command = configured["hooks"][event][0]["hooks"][0]["command"]
+                self.assertIn("gptqueue-codex-hook", command)
+                self.assertNotIn("--redis-url", command)
+
+            rolled = self.run_installer("--rollback", "--codex-dir", str(codex), "--state-dir", str(state))
+            self.assertEqual(rolled.returncode, 0, rolled.stderr)
+
+            # With --redis-url every written entry passes it to the hook, so the gate probes the sidecar's instance.
+            url = "redis://127.0.0.1:6379/3"
+            applied_url = self.run_installer("--redis-url", url, *common)
+            self.assertEqual(applied_url.returncode, 0, applied_url.stderr)
+            configured = json.loads(hooks.read_text())
+            for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+                command = configured["hooks"][event][0]["hooks"][0]["command"]
+                self.assertIn("gptqueue-codex-hook", command)
+                self.assertIn(f"--redis-url {url}", command)
+
+            # The pinned URL must be a valid Redis URL, like the sidecar's own --redis-url.
+            bad = self.run_installer("--redis-url", "redis://127.0.0.1:6379/3?bad=1",
+                                     "--codex-dir", str(codex), "--state-dir", str(state), "--node-bin", str(NODE))
+            self.assertNotEqual(bad.returncode, 0)
+
     def test_refuses_symlink_without_following_or_modifying_target(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); codex, state = self.paths(root)

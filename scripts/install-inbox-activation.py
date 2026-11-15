@@ -31,7 +31,7 @@ HOOK_ENTRIES = {
 }
 
 
-def hook_config(content: bytes, node: str) -> tuple[bytes, list[str], list[str]]:
+def hook_config(content: bytes, node: str, redis_url: str | None = None) -> tuple[bytes, list[str], list[str]]:
     """Add each missing GPTQueue entry. Existing GPTQueue entries and unrelated hooks stay as they are.
 
     Returns the desired bytes and the events whose entry is new and which already had one.
@@ -40,7 +40,10 @@ def hook_config(content: bytes, node: str) -> tuple[bytes, list[str], list[str]]
     if not isinstance(config, dict) or not isinstance(config.get("hooks", {}), dict):
         raise ValueError("Expected a hooks JSON object")
     hooks = config.setdefault("hooks", {})
-    command = shlex.join([node, str(ROOT / "bin/gptqueue-codex-hook")])
+    # The hook must probe the same Redis the sidecar uses (its --redis-url);
+    # without it the hook falls back to REDIS_URL/db 0 (R1).
+    command = shlex.join([node, str(ROOT / "bin/gptqueue-codex-hook")]
+                         + (["--redis-url", redis_url] if redis_url else []))
     new: list[str] = []
     existing: list[str] = []
     for event, entry in HOOK_ENTRIES.items():
@@ -76,6 +79,9 @@ def main() -> None:
     parser.add_argument("--codex-dir", type=Path, default=Path.home() / ".codex")
     parser.add_argument("--state-dir", type=Path, default=Path.home() / ".local/state/gptqueue/inbox-activation")
     parser.add_argument("--node-bin", default=shutil.which("node"))
+    parser.add_argument("--redis-url",
+                        help="Redis URL the hook probes; pass the sidecar's --redis-url. "
+                             "Omit to keep the hook's REDIS_URL/db 0 fallback")
     args = parser.parse_args()
     state = args.state_dir.absolute()
     manifest = state / "manifest.json"
@@ -89,9 +95,11 @@ def main() -> None:
         raise ValueError("--node-bin must name an absolute Node executable")
     if not (ROOT / "dist/registered-shell/codex-hook.js").is_file():
         raise ValueError("Build GPTQueue before installing inbox activation")
+    if args.redis_url:
+        registration.validate_redis_url(args.redis_url)
     target = args.codex_dir.absolute() / "hooks.json"
     original = registration.snapshot(target)
-    desired, new, existing = hook_config(original.content, args.node_bin)
+    desired, new, existing = hook_config(original.content, args.node_bin, args.redis_url)
     print(json.dumps({"mode": "apply" if args.apply else "plan", "target": str(target),
                       "manifest": str(manifest), "sha256": registration.digest(desired),
                       "hooks": list(HOOK_ENTRIES),

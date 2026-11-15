@@ -141,6 +141,19 @@ def pi_shim(runtime_root: Path, node: str, redis_url: str, extension: Path | Non
             "  }\n}\n").encode()
 
 
+# Accept only redis:// or rediss:// URLs with an optional numeric db path (no query or fragment).
+def validate_redis_url(value: str) -> str:
+    try:
+        url = urlsplit(value)
+        if (url.scheme not in ("redis", "rediss") or not url.hostname or url.query or url.fragment
+                or not re.fullmatch(r"/(?:[0-9]+)?", url.path or "/")):
+            raise ValueError()
+        _ = url.port
+    except ValueError:
+        raise ValueError("Invalid Redis URL") from None
+    return value
+
+
 def save_manifest(path: Path, value: dict) -> None:
     atomic_write(path, (json.dumps(value, indent=2) + "\n").encode())
 
@@ -225,14 +238,7 @@ def main() -> None:
         return
     if not args.redis_url:
         raise ValueError("--redis-url is required for plan/apply")
-    try:
-        url = urlsplit(args.redis_url)
-        if (url.scheme not in ("redis", "rediss") or not url.hostname or url.query or url.fragment
-                or not re.fullmatch(r"/(?:[0-9]+)?", url.path or "/")):
-            raise ValueError()
-        _ = url.port
-    except ValueError:
-        raise ValueError("Invalid Redis URL") from None
+    validate_redis_url(args.redis_url)
     if not args.node_bin or not Path(args.node_bin).is_absolute() or not os.access(args.node_bin, os.X_OK):
         raise ValueError("--node-bin must be an absolute executable")
     sidecar = runtime_root / SIDECAR_REL
