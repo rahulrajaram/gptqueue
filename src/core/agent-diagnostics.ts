@@ -38,7 +38,7 @@ const safeBinding = (v: unknown) => { const p = storedBindingSchema.safeParse(Ob
 const now = () => new Date().toISOString();
 
 /**
- * D2: the ONE derivation of published/readiness/activation_ready, shared by
+ * The ONE derivation of published/readiness/activation_ready, shared by
  * details() and find()'s cheap filter path. The two copies drifted once
  * already (find() omitted the display-only slice and inherited a different
  * `published` basis); `published` is now computed from the UNSLICED tool
@@ -169,7 +169,7 @@ export class AgentDiagnostics {
         : null;
       const online = needOnline ? await this.isOnline(name) : false;
 
-      // D2: the SAME derivation details() uses — no second copy to drift.
+      // The SAME derivation details() uses — no second copy to drift.
       const derived = deriveReadiness(online, binding, metadata);
       const activationReady = derived.activation_ready;
 

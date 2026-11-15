@@ -21,6 +21,7 @@
  */
 
 import { spawn } from "child_process";
+import { readFileSync } from "fs";
 import type { RuntimeLaunchContract } from "../core/actor-directory.js";
 import { evaluateLaunchPolicy } from "../core/launch-policy.js";
 
@@ -49,6 +50,21 @@ export const isPidAlive = (pid: number): boolean => {
     const code = (error as NodeJS.ErrnoException).code;
     // EPERM: the process exists but we may not signal it -> still alive.
     return code === "EPERM";
+  }
+};
+
+/**
+ * This machine's kernel boot id (/proc/sys/kernel/random/boot_id), or null
+ * when unreadable. Together with the PID-namespace inode it identifies the
+ * only context in which a spawned pid is observable: a pid recorded on
+ * another boot (or inside another PID namespace) says nothing about process
+ * liveness seen from here.
+ */
+export const hostBootId = (): string | null => {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim() || null;
+  } catch {
+    return null;
   }
 };
 

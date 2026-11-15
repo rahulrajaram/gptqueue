@@ -314,10 +314,10 @@ export const createOpenCodePlugin = (
   input: OpenCodePluginInput,
   options: OpenCodePluginOptions,
 ): OpenCodePluginHooks => {
-  // Before any backend or Redis connection exists (sv-2).
+  // Before any backend or Redis connection exists.
   if (isExplicitWorker(options.env ?? process.env)) return createHeadlessWorkerPlugin();
   const runtimePort = options.runtimePort ?? ((client, identity) => createOpenCodeRuntimePort(client, identity));
-  // I-7: OpenCode's session.idle event, fanned out to that session's runtime port.
+  // OpenCode's session.idle event, fanned out to that session's runtime port.
   const idleListeners = new Map<string, Set<() => void>>();
   const withIdle = (port: OpenCodeRuntimePort, sessionID: string): OpenCodeRuntimePort => Object.freeze({
     readIdentity: (signal: AbortSignal) => port.readIdentity(signal),

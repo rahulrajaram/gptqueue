@@ -70,7 +70,7 @@ const forwardProvisionalLua = (src: string, dst: string, sourceArg: string, targ
       redis.call('SET', '${SESSION_KEYS.forward("")}' .. ${sourceArg}, 'to:' .. ${targetArg}, 'EX', ${SESSION_DEFAULTS.FORWARD_TOMBSTONE_TTL_SECONDS})`;
 
 /**
- * DL-2 shutdown retirement outcome. Only "retired" changed anything:
+ * Shutdown retirement outcome. Only "retired" changed anything:
  * "mapping_changed" means the runtime mapping no longer names the refused
  * target, "claims_held" means the provisional name still holds a claim, and
  * "not_owner" means this client does not hold that provisional name.
@@ -194,7 +194,7 @@ export class RedisClient {
   ): Promise<void> {
     if (!this._sessionId || this._agentName !== source || source === target) throw new Error("Continuity source ownership mismatch");
     const wrapper = SESSION_KEYS.wrapperClaim;
-    // D5: the target-occupancy guard is generated from the SAME shared
+    // The target-occupancy guard is generated from the SAME shared
     // signal table as applyContinuity's occupied() (core/occupancy-guard.ts):
     // runtime-binding, heartbeat, wrapper claim, live session leases, and
     // unacknowledged claims-index entries, enforced by one occupied_target()
@@ -203,7 +203,7 @@ export class RedisClient {
     // the operator path would refuse). Source-side guards (-4, -6) are
     // runtime-path-specific (sole-session ownership, quiet source) and have
     // no operator-path counterpart.
-    // D6: the success path XADDs a runtime_continuity audit event to the
+    // The success path XADDs a runtime_continuity audit event to the
     // same bounded stream the operator path uses, so the identity transfer
     // that runs WITHOUT a human in the loop is audited like one that doesn't.
     // A refusal returns {code, first blocking signal, recheck hint ms}; the
@@ -278,7 +278,7 @@ export class RedisClient {
       redis.call('HDEL', KEYS[15], ARGV[2])
       redis.call('HDEL', KEYS[2], ARGV[1])
       redis.call('DEL', KEYS[12])
-      -- DL-2: work a peer sent to the provisional source name moves with the
+      -- Work a peer sent to the provisional source name moves with the
       -- identity, in this same atomic step, to the bound mailbox's tail.
       local moved = redis.call('LLEN', KEYS[8])
       ${forwardProvisionalLua("KEYS[8]", "KEYS[16]", "ARGV[1]", "ARGV[2]")}
@@ -306,7 +306,7 @@ export class RedisClient {
   }
 
   /**
-   * DL-2: retire a provisional name whose adoption of `target` was refused.
+   * Retire a provisional name whose adoption of `target` was refused.
    * In one atomic step its pending messages move to the bound mailbox's tail
    * and its registry entry is removed, so a peer can no longer discover it
    * and no send to it is accepted afterwards.
@@ -375,13 +375,13 @@ export class RedisClient {
     options: {
       readonly shared?: boolean;
       /**
-       * DL-2: a sidecar's per-startup provisional identity. Marked before its
+       * A sidecar's per-startup provisional identity. Marked before its
        * session exists, so a crash at any point leaves it sweepable.
        */
       readonly provisional?: boolean;
     } = {}
   ): Promise<{ name: string; session_id: string }> {
-    // D2: names are exclusive unless this registrant opts into sharing,
+    // Names are exclusive unless this registrant opts into sharing,
     // explicitly or through GPTQ_AGENT_SHARED=1 for processes that cannot
     // pass the flag.
     const shared = options.shared ?? process.env.GPTQ_AGENT_SHARED === "1";

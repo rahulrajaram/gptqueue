@@ -234,7 +234,7 @@ export const startInboxDispatcher = async (
   const closed = (async () => {
     let cursor = "0-0";
     const waiter = events.createWaiter();
-    // I-4: a runtime's idle hint ends the current wait and any backoff, so a
+    // A runtime's idle hint ends the current wait and any backoff, so a
     // busy activation is retried as soon as the turn ends. activate() still
     // re-checks state; the backoff remains the fallback when no hint comes.
     let wake = new AbortController();

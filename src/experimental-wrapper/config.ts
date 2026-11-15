@@ -228,8 +228,8 @@ export const buildPiInvocation = (
   const prompt = registeredIdentityPrompt(options.agent) + options.prompt;
   return Object.freeze({
     command: process.env.GPTQ_EXPERIMENT_PI_BIN || "pi",
-    // Keep -p first: the locally installed Nudge shim treats it as an
-    // infrastructure invocation and forwards directly to the real Pi CLI.
+    // Keep -p first: some local pi launchers treat a leading -p as an
+    // infrastructure invocation and forward it directly to the real Pi CLI.
     args: Object.freeze([
       "-p",
       "--offline",

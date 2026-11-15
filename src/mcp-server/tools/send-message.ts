@@ -11,7 +11,8 @@ import {
 import { AGENT_NAME_PATTERN } from "../../core/session-store.js";
 import type { ActorDirectoryRecord } from "../../core/actor-directory.js";
 import type { WakeLease } from "../../core/wake-lease.js";
-import { dispatchLaunch } from "../launcher.js";
+import { pidNamespaceId } from "../../core/session-store.js";
+import { dispatchLaunch, hostBootId } from "../launcher.js";
 import {
   assemblePresenceInput,
   type AssembledPresence,
@@ -203,6 +204,10 @@ async function shipLaunch(
           lease_id: lease.lease_id,
           pid: launched.pid,
           spawned_at: new Date().toISOString(),
+          // Host identity of THIS spawner, so a server on another boot or in
+          // another PID namespace never mistakes the pid for locally dead.
+          boot_id: hostBootId(),
+          pidns: pidNamespaceId(),
         });
       } catch {
         // best-effort; launch and send are unaffected

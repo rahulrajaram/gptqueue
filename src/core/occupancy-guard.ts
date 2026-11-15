@@ -1,5 +1,5 @@
 /**
- * D5: the ONE source of truth for the occupancy guard set shared by the two
+ * The ONE source of truth for the occupancy guard set shared by the two
  * adoption state machines — `applyContinuity`'s `occupied()` (operator path,
  * core/mailbox-continuity.ts) and `adoptIdentity`'s target guard (runtime
  * path, mcp-server/redis-client.ts). The F5 drift this table prevents had

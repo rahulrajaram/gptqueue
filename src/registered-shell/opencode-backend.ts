@@ -120,7 +120,7 @@ export const createOpenCodeBackend = async (
       `OpenCode native session ${identity.sessionID}`,
       { label: agentName, uuid: null, client: null, working_directory: identity.directory },
       // The name is derived from the native session id, so only processes on
-      // this same OpenCode session share it (D2 opt-in). A second process keeps
+      // this same OpenCode session share it (shared-name opt-in). A second process keeps
       // its tools and waits in standby; the runtime-binding lease still admits
       // exactly one activation owner.
       { shared: true },

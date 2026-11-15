@@ -12,12 +12,16 @@
 -- ARGV[1] = lease_id the caller expects
 -- ARGV[2] = pid (integer)
 -- ARGV[3] = spawned_at (ISO)
+-- ARGV[4] = spawner's kernel boot id (empty string = not recorded)
+-- ARGV[5] = spawner's PID-namespace inode (empty string = not recorded)
 --
 -- Returns 1 when attached, 0 when the precondition failed or the key is absent.
 local key = KEYS[1]
 local expectedLeaseId = ARGV[1]
 local pid = tonumber(ARGV[2])
 local spawnedAt = ARGV[3]
+local bootId = ARGV[4]
+local pidns = ARGV[5]
 
 local current = redis.call('GET', key)
 if current == false then return 0 end
@@ -29,5 +33,7 @@ if type(lease) ~= 'table' or lease.lease_id ~= expectedLeaseId then return 0 end
 
 lease.spawned_pid = pid
 lease.spawned_at = spawnedAt
+if bootId ~= '' then lease.spawned_boot_id = bootId end
+if pidns ~= '' then lease.spawned_pidns = pidns end
 redis.call('SET', key, cjson.encode(lease), 'KEEPTTL')
 return 1

@@ -1,5 +1,5 @@
 /**
- * DL-2 / AC-1: retire crashed sidecars' provisional identities.
+ * Retire crashed sidecars' provisional identities.
  *
  * A registered sidecar first holds a per-startup provisional name, which
  * peers can discover and send to, before it adopts or binds its mailbox. If

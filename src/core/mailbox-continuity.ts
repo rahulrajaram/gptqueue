@@ -71,7 +71,7 @@ export const applyContinuity = async (redis: Redis, plan: ContinuityPlan): Promi
   if (fingerprint(sourceRaw) !== p.sourceFingerprint) throw operatorRefusal([-3, "source_registration"]);
   if ((!p.source) !== p.legacy_adoption) throw new Error("Invalid legacy adoption plan");
   const wrapperKey = SESSION_KEYS.wrapperClaim;
-  // D5: the occupied() guard is generated from the shared signal table
+  // The occupied() guard is generated from the shared signal table
   // (core/occupancy-guard.ts) — identical to adoptIdentity's target guard.
   // A refusal returns {code, first blocking signal}; the conditions and
   // their order are unchanged (core/adoption-refusal.ts).

@@ -186,7 +186,7 @@ try {
       await writeFile(required('--out'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
       break;
     }
-    // DL-2: retire crashed sidecars' provisional names (idempotent; never touches live or claimed names).
+    // Retire crashed sidecars' provisional names (idempotent; never touches live or claimed names).
     case 'sweep-provisional':
       result = { swept: await sweepProvisional(redis, Number(options['--limit'] ?? 1000)), reserved_sender: await reservedSenderRegistrations(redis) };
       break;
