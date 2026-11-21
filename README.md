@@ -117,7 +117,7 @@ Acknowledging a claim clears the counters of its tasks, and `dlq_requeue` restor
 
 ## Prerequisites
 
-- **Node.js** >= 20
+- **Node.js** >= 22
 - **Redis** running locally (default `redis://127.0.0.1:6379`)
 
 ## Install
