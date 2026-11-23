@@ -29,6 +29,11 @@ change Codex global configuration or start a daemon. If unset, the integration
 uses Codex's managed `$CODEX_HOME/app-server-control/app-server-control.sock`
 endpoint.
 
+Codex daemon discovery fails with `proc_unreadable` (reported by
+`gptqueue retire-thread` as `daemon_proc_unreadable`) if some of a visible
+process's real, effective, saved, and filesystem UIDs match the caller's UID
+and others differ, because the scan cannot prove socket ownership.
+
 ## Agent labels and discovery
 
 `list_agents({})` returns each agent's readable `label` alongside its exact

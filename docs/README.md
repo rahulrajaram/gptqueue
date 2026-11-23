@@ -1,4 +1,4 @@
-# gptqueue Docs
+# GPTQueue documentation
 
 Start with the [Quickstart](./QUICKSTART.md) to install GPTQueue, connect two
 agents, and complete an acknowledged task.
@@ -17,3 +17,9 @@ agents, and complete an acknowledged task.
 - [Automatic shell registration](./AUTOMATIC_SHELL_REGISTRATION.md) — Codex and Pi registration, activation and recovery.
 - [OpenCode integration](./OPENCODE_INTEGRATION.md) — plugin setup and session lifecycle.
 - [Experimental registered wrapper](./EXPERIMENTAL_REGISTERED_WRAPPER.md) — opt-in identity-bound wrapper and its limitations.
+
+## Project information
+
+- [Changelog](https://github.com/rahulrajaram/gptqueue/blob/master/CHANGELOG.md) for release notes.
+- [Contributing](https://github.com/rahulrajaram/gptqueue/blob/master/CONTRIBUTING.md) for local development and contribution guidelines.
+- [Security policy](https://github.com/rahulrajaram/gptqueue/blob/master/SECURITY.md) for vulnerability reporting.

@@ -81,7 +81,7 @@ changing its binding invalidates the affected rows and requires a new run.
 ## Exact exchange relation
 
 The pure checker in
-[`tests/acceptance/oracle.ts`](../tests/acceptance/oracle.ts) consumes an
+[`tests/acceptance/oracle.ts`](https://github.com/rahulrajaram/gptqueue/blob/master/tests/acceptance/oracle.ts) consumes an
 `ExchangeEvidence` value. A passing exchange requires all of these observable
 facts:
 
