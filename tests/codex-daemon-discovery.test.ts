@@ -566,7 +566,15 @@ describe("codex daemon discovery (real process)", () => {
     });
     let held: Socket | undefined;
     try {
-      const identity = await discoverCodexDaemon({ socketPath });
+      // Host-wide scans fail closed on mixed-UID processes, which can occur on CI runners.
+      // Scope PID scans to the spawned child and keep the real socket, argv, and fd evidence.
+      const procRoot = join(root, "proc");
+      const childProc = join("/proc", String(child.pid));
+      await mkdir(procRoot);
+      await symlink(childProc, join(procRoot, String(child.pid)), "dir");
+      await symlink(join(childProc, "net"), join(procRoot, "net"), "dir");
+
+      const identity = await discoverCodexDaemon({ socketPath, procRoot });
       expect(identity).toMatchObject({ pid: child.pid, basis: "socket-owner" });
       expect(identity.argv[0]).toBe("codex");
       held = createConnection(socketPath);
@@ -576,8 +584,8 @@ describe("codex daemon discovery (real process)", () => {
         held!.once("error", error => { clearTimeout(timer); reject(error); });
       });
       // A held accepted AF_UNIX connection must not invalidate the listener pin.
-      await assertDaemonIdentity(identity);
-      const snapshot = await snapshotDaemon(identity);
+      await assertDaemonIdentity(identity, { procRoot });
+      const snapshot = await snapshotDaemon(identity, { procRoot });
       expect(snapshot.children).toEqual([]);
       expect(snapshot.sidecars).toEqual([]);
     } finally {
