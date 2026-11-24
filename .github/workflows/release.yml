@@ -104,12 +104,15 @@ jobs:
             node --input-type=module -e 'await import("@rahulrajaram/gptqueue"); console.log("Package import passed")' < /dev/null
           ./node_modules/.bin/gptqueue --help
 
-      - name: Publish to npm
+      - name: Stage npm release
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           version="$(node -p 'require("./package.json").version')"
-          flags=(--ignore-scripts --access public)
+          flags=(--ignore-scripts --access public --provenance --json)
           if [[ "$version" == *-* ]]; then
             flags+=(--tag next)
           fi
-          npm publish "${flags[@]}" "$RUNNER_TEMP/rahulrajaram-gptqueue-$version.tgz"
+          result="$(npm stage publish "${flags[@]}" "$RUNNER_TEMP/rahulrajaram-gptqueue-$version.tgz")"
+          stage_id="$(jq -er '(.stageId // .["@rahulrajaram/gptqueue"].stageId) | strings | select(test("^[A-Za-z0-9_-]+$"))' <<< "$result")"
+          printf '### npm release staged\n\nApprove with 2FA: `npm stage approve %s`\n\nYou can also approve it on npmjs.com under Staged Packages.\n' \
+            "$stage_id" >> "$GITHUB_STEP_SUMMARY"
