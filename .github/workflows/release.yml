@@ -1,0 +1,115 @@
+name: npm release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: npm-release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "Release commit is not in origin/master history" >&2
+            exit 1
+          fi
+          version="$(node -p 'require("./package.json").version')"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "Expected tag v$version, received $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Pin npm
+        run: |
+          npm install --global npm@11.19.0
+          npm --version
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build and check types and lint
+        run: |
+          npm run build
+          npm run typecheck:tests
+          npx oxlint src/
+
+      - name: Install Redis for the private test fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-server
+
+      - name: Run focused regression tests
+        run: npm test -- tests/codex-daemon-discovery.test.ts tests/codex-socket.test.ts
+
+      - name: Check package contents
+        run: |
+          npm pack --ignore-scripts --dry-run --json > "$RUNNER_TEMP/gptqueue-pack.json"
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+
+          const [pack] = JSON.parse(readFileSync(
+            `${process.env.RUNNER_TEMP}/gptqueue-pack.json`, 'utf8',
+          ));
+          const roots = ['dist/', 'bin/', 'assets/', 'docs/'];
+          const files = ['package.json', 'scripts/check-queue.sh', 'README.md', 'LICENSE'];
+          const paths = pack.files.map(({ path }) => path);
+          const unexpected = paths.filter(path =>
+            !files.includes(path) && !roots.some(root => path.startsWith(root)),
+          );
+          if (unexpected.length) {
+            throw new Error(`Unexpected package files: ${unexpected.join(', ')}`);
+          }
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          for (const entry of [...files, pkg.main, ...Object.values(pkg.bin)]) {
+            if (!paths.includes(entry.replace(/^\.\//, ''))) {
+              throw new Error(`Missing required package file: ${entry}`);
+            }
+          }
+          console.log(`Checked ${paths.length} package files.`);
+          JS
+
+      - name: Smoke-test the release tarball
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+          project="$(mktemp -d "$RUNNER_TEMP/gptqueue-smoke.XXXXXX")"
+          source="$PWD"
+          cd "$project"
+          printf '{"private":true}\n' > package.json
+          npm install --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP/rahulrajaram-gptqueue-$version.tgz"
+          timeout 25s node "$source/scripts/with-owned-redis.mjs" -- \
+            env -u GPTQ_AGENT_NAME -u CLAUDE_CODE_ENTRYPOINT \
+            node --input-type=module -e 'await import("@rahulrajaram/gptqueue"); console.log("Package import passed")' < /dev/null
+          ./node_modules/.bin/gptqueue --help
+
+      - name: Publish to npm
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          flags=(--ignore-scripts --access public)
+          if [[ "$version" == *-* ]]; then
+            flags+=(--tag next)
+          fi
+          npm publish "${flags[@]}" "$RUNNER_TEMP/rahulrajaram-gptqueue-$version.tgz"
