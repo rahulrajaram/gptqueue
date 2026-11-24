@@ -6,9 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-24
+
+### Changed
+- Published on npm as `@rahulrajaram/gptqueue` after npm refused the unscoped
+  name. Installed command names are unchanged.
+
+### Added
+- Tag-triggered releases use npm trusted publishing (OIDC) to stage packages
+  with provenance for maintainer approval with 2FA.
+
 ## [0.1.0] - 2026-11-22
 
-Initial public release candidate.
+Initial public release.
 
 ### Changed
 - Node.js 22 is the minimum supported version (`engines` and CI now cover 22 and 24); Node.js 20 reached end of life in
@@ -29,4 +39,5 @@ Initial public release candidate.
   (`scripts/install-runtime.mjs`).
 - A private, socket-only Redis started by the test suite for hermetic tests.
 
-[Unreleased]: https://github.com/rahulrajaram/gptqueue/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rahulrajaram/gptqueue/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/rahulrajaram/gptqueue/compare/v0.1.0...v0.1.1
