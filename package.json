@@ -1,5 +1,5 @@
 {
-  "name": "gptqueue",
+  "name": "@rahulrajaram/gptqueue",
   "version": "0.1.0",
   "description": "Inter-agent communication via MCP + Redis",
   "type": "module",

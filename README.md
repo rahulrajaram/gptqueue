@@ -143,7 +143,7 @@ native module, run `npm rebuild node-pty` (see [CONTRIBUTING.md](CONTRIBUTING.md
 ensure your npm configuration permits its install script.
 
 Once published, the package will provide `gptqueue-server`, `gptqueue-http` and
-`gptqueue-pty` for a global `npm install -g gptqueue`.
+`gptqueue-pty` for a global `npm install -g @rahulrajaram/gptqueue`.
 
 ## Transports
 
